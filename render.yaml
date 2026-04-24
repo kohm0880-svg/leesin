@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: data-quality-certification
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Leesin.py --host 0.0.0.0
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ALLOW_REMOTE_ADMIN
+        value: false
