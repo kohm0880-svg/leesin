@@ -3,7 +3,7 @@ services:
     name: data-quality-certification
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
     startCommand: python Leesin.py --host 0.0.0.0
     healthCheckPath: /health
     envVars:
