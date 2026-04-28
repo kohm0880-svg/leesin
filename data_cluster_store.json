@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "privacy": "Stores only mapped numeric axis vectors, row counts, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
+  "clusters": [
+    {
+      "id": "cluster_16524f953cbe4ce8b55ca91fac60356c",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        53.0,
+        125.0,
+        2.0
+      ],
+      "rowCount": 1,
+      "primaryKey": "vacuum_level",
+      "createdAt": "2026-04-28T12:14:00.311635+00:00",
+      "fingerprint": "24827b131c7fd60382d9130745f6c29b3aab85d4e0360576c471ddefee22aa59",
+      "storagePolicy": "sanitized_numeric_axis_vector"
+    },
+    {
+      "id": "cluster_a84224f9331b49c6ae459a6f20323c88",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        54.0,
+        130.0,
+        1.9
+      ],
+      "rowCount": 1,
+      "primaryKey": "vacuum_level",
+      "createdAt": "2026-04-28T12:15:43.663507+00:00",
+      "fingerprint": "9e3b0185bcc9df38d9ce030e5e9a9c0ca82607423b846fd3dbaaacf8e3298e6e",
+      "storagePolicy": "sanitized_numeric_axis_vector"
+    },
+    {
+      "id": "cluster_8ae2532c7f704365a1d2d1b94f1a1351",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        55.0,
+        132.0,
+        1.7
+      ],
+      "rowCount": 1,
+      "primaryKey": "vacuum_level",
+      "createdAt": "2026-04-28T12:17:33.255085+00:00",
+      "fingerprint": "20a2ebcab44871aa4b5e14b955ef98bc3d59f2a1631aad3d698ee4e05100b030",
+      "storagePolicy": "sanitized_numeric_axis_vector"
+    },
+    {
+      "id": "cluster_a887ff0c96ef410cac6dd06e61302974",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        56.0,
+        133.0,
+        1.6
+      ],
+      "rowCount": 1,
+      "primaryKey": "vacuum_level",
+      "createdAt": "2026-04-28T12:17:45.907195+00:00",
+      "fingerprint": "fa8717ce72e0e71f9386ad9f858005d92251f7fe6e8f827269d029c8460f8ad3",
+      "storagePolicy": "sanitized_numeric_axis_vector"
+    },
+    {
+      "id": "cluster_7adfe3c9591e45998a1a8b78db6e4275",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        57.0,
+        134.0,
+        1.5
+      ],
+      "rowCount": 1,
+      "primaryKey": "vacuum_level",
+      "createdAt": "2026-04-28T12:18:04.305941+00:00",
+      "fingerprint": "a758adeb1d495415e62ea70ef6a24fe0dbc1aa9eee9a0673e60afcd9cbcd7844",
+      "storagePolicy": "sanitized_numeric_axis_vector"
+    }
+  ]
+}

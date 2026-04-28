@@ -5,10 +5,19 @@
 Check these before uploading the repo to GitHub:
 
 - Do not upload `Lee_sin.venv/`, `.vscode/`, or other local-only folders.
-- Review `goal_store.json` once. If it contains real internal experiment names or sensitive setup values, replace them with sanitized examples before pushing.
-- Remote admin access is disabled by default. Keep `ALLOW_REMOTE_ADMIN=false` unless you add authentication first.
+- `data_cluster_store.json` is ignored by Git. It can contain saved numeric experiment-cluster vectors, so keep it out of GitHub.
+- Review `goal_store.json` once. It should contain only sanitized public Goal/Axis examples.
+- Remote admin writes require `ADMIN_TOKEN` on Render. Keep `ALLOW_REMOTE_ADMIN=false`.
 
-## 2. Push To GitHub
+## 2. What Is Stored
+
+- `goal_store.json`: Experiment Goal, Axis, Domain Range, Resolution, and K_m.
+- `data_cluster_store.json`: only the mapped numeric axis vector, row count, primary axis, timestamp, and goal id.
+- Not stored: original uploaded files, filenames, unmapped columns, notes, operator names, emails, or other personal fields.
+
+The stored data cluster is the target cluster's between-feature position vector. It is appended after a successful analysis and can be used as part of future Peer Groups.
+
+## 3. Push To GitHub
 
 If you have not created a GitHub repo yet:
 
@@ -32,7 +41,7 @@ git commit -m "Prepare Leesin for Render"
 git push
 ```
 
-## 3. Deploy On Render
+## 4. Deploy On Render
 
 This repo already includes a root-level `render.yaml`, so the easiest path is Blueprint deploy.
 
@@ -49,17 +58,22 @@ Render will read:
 - `buildCommand: pip install -r requirements.txt`
 - `startCommand: python Leesin.py --host 0.0.0.0`
 - `healthCheckPath: /health`
+- `LEESIN_STORE_DIR=/var/data`
+- a persistent disk mounted at `/var/data`
 
 When deploy finishes, Render gives you a public `onrender.com` URL that anyone can open.
 
-## 4. Important Notes
+During Blueprint creation, Render asks for `ADMIN_TOKEN`. Use that token in the settings dialog before saving or deleting Goals.
+
+## 5. Important Notes
 
 - Render provides the `PORT` environment variable automatically. This app already reads it.
 - The app must bind to `0.0.0.0` on Render, and this repo is already configured for that.
-- `goal_store.json` is file-based. Changes made from a running Render instance are not durable across restarts/redeploys unless you move that data to a database or persistent storage.
+- Persistent cluster/goal writes require a paid Render service with a persistent disk. Free Render web services have an ephemeral filesystem, so file changes are lost on restart/redeploy/spin-down.
+- For public testing, `USE_DEMO_PEER_GROUP=true` keeps sanitized built-in Peer Groups available. Set it to `false` only after you have enough saved clusters for each Goal.
 - If you want your own domain later, add it in the Render service settings after the first deploy succeeds.
 
-## 5. Local Run
+## 6. Local Run
 
 ```powershell
 .\run_app.ps1

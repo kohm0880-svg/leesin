@@ -2,12 +2,24 @@ services:
   - type: web
     name: data-quality-certification
     runtime: python
-    plan: free
-    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+    plan: starter
+    buildCommand: pip install -r requirements.txt
     startCommand: python Leesin.py --host 0.0.0.0
     healthCheckPath: /health
+    disk:
+      name: leesin-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: ALLOW_REMOTE_ADMIN
         value: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: LEESIN_STORE_DIR
+        value: /var/data
+      - key: SAVE_DATA_CLUSTERS
+        value: true
+      - key: USE_DEMO_PEER_GROUP
+        value: true

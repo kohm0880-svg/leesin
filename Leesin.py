@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import itertools
 import json
 import math
 import os
+import uuid
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +31,9 @@ except ModuleNotFoundError as exc:
 
 
 K_M = 10.0
-GOAL_STORE_PATH = Path(__file__).with_name("goal_store.json")
+STORE_DIR = Path(os.environ.get("LEESIN_STORE_DIR", Path(__file__).parent)).resolve()
+GOAL_STORE_PATH = STORE_DIR / "goal_store.json"
+CLUSTER_STORE_PATH = STORE_DIR / "data_cluster_store.json"
 
 
 @dataclass
@@ -165,6 +170,26 @@ def sscm(X: np.ndarray, center: np.ndarray) -> np.ndarray:
     return (unit_vectors.T @ unit_vectors) / len(X)
 
 
+def sherman_morrison_update(inverse: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    column = vector.reshape(-1, 1)
+    numerator = inverse @ column @ column.T @ inverse
+    denominator = float(1.0 + (column.T @ inverse @ column).item())
+    if abs(denominator) < 1e-12:
+        raise LinAlgError("Sherman-Morrison update became numerically unstable.")
+    return inverse - numerator / denominator
+
+
+def regularized_sscm_inverse(X: np.ndarray, center: np.ndarray, ridge: float = 1e-6) -> np.ndarray:
+    shifted = X - center
+    norms = np.linalg.norm(shifted, axis=1, keepdims=True)
+    unit_vectors = np.divide(shifted, np.where(norms < 1e-12, 1.0, norms))
+    inverse = np.eye(X.shape[1], dtype=float) / ridge
+    scale = math.sqrt(max(len(unit_vectors), 1))
+    for vector in unit_vectors / scale:
+        inverse = sherman_morrison_update(inverse, vector)
+    return inverse
+
+
 def mardia_test(X: np.ndarray) -> dict[str, float | bool]:
     n, p = X.shape
     center = X.mean(axis=0)
@@ -223,7 +248,7 @@ class DataQualityAnalyzer:
             )
 
     def _select_engine(self, X: np.ndarray) -> tuple[str, bool | None, dict[str, float | bool]]:
-        if len(X) < 10:
+        if len(X) < 10 or self.p < 2:
             return "spatial_rank", None, {}
         mardia = mardia_test(X)
         if bool(mardia["is_normal"]):
@@ -260,14 +285,13 @@ class DataQualityAnalyzer:
             model = LedoitWolf().fit(X)
             center = model.location_
             covariance = model.covariance_
+            try:
+                covariance_inv = np.linalg.inv(covariance)
+            except LinAlgError:
+                covariance_inv = pinv(covariance)
         else:
             center = spatial_median(X)
-            covariance = sscm(X, center)
-
-        try:
-            covariance_inv = np.linalg.inv(covariance)
-        except LinAlgError:
-            covariance_inv = pinv(covariance)
+            covariance_inv = regularized_sscm_inverse(X, center)
 
         diff = x_target - center
         D2 = float(diff @ covariance_inv @ diff)
@@ -286,6 +310,11 @@ class DataQualityAnalyzer:
 
         X = np.asarray(self._peers, dtype=float)
         count = len(X)
+        if count < self.p + 1:
+            raise ValueError(
+                f"Peer Group N={count} is too small for n={self.p}. "
+                "Add more saved clusters or reduce the selected axes."
+            )
 
         engine_preview, _, _ = self._select_engine(X)
         if engine_preview != "spatial_rank":
@@ -407,6 +436,7 @@ def load_goal_store() -> list[dict[str, Any]]:
 
 
 def save_goal_store(goals: list[dict[str, Any]]) -> None:
+    GOAL_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     GOAL_STORE_PATH.write_text(json.dumps(goals, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -809,6 +839,253 @@ def build_summary(result: DiagnosisResult) -> list[str]:
     if result.w_eff < 0.7:
         messages.append("비정규 특성이 강해 엔진 효율 가중치가 낮아졌습니다.")
     return messages
+
+
+DEFAULT_GOALS = [
+    {
+        "id": "goal_thermal",
+        "K_m": K_M,
+        "name": "고온 유량 안정성 인증",
+        "axes": [
+            {"name": "temperature", "unit": "C", "domainMin": 0.0, "domainMax": 200.0, "resolution": 10.0},
+            {"name": "pressure", "unit": "bar", "domainMin": 0.0, "domainMax": 100.0, "resolution": 5.0},
+            {"name": "flow_rate", "unit": "kg/h", "domainMin": 0.0, "domainMax": 50.0, "resolution": 2.5},
+        ],
+    },
+    {
+        "id": "goal_vacuum",
+        "K_m": K_M,
+        "name": "진공 유지 안정성 인증",
+        "axes": [
+            {"name": "vacuum_level", "unit": "kPa", "domainMin": 0.0, "domainMax": 100.0, "resolution": 5.0},
+            {"name": "hold_time", "unit": "s", "domainMin": 0.0, "domainMax": 300.0, "resolution": 15.0},
+            {"name": "leak_rate", "unit": "sccm", "domainMin": 0.0, "domainMax": 20.0, "resolution": 1.0},
+        ],
+    },
+]
+
+
+def normalize_goal_for_display(goal: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "id": goal["id"],
+        "name": goal["name"],
+        "K_m": float(goal.get("K_m", K_M)),
+        "axes": [dict(axis) for axis in goal["axes"]],
+    }
+    name = str(normalized["name"])
+    looks_corrupted = any(marker in name for marker in ("�", "吏", "怨", "좎", "덉", "꾩", "媛"))
+    signature = axis_signature([axis["name"] for axis in normalized["axes"]])
+    if looks_corrupted and signature == ("vacuum_level", "hold_time", "leak_rate"):
+        normalized["name"] = "진공 유지 안정성 인증"
+    elif looks_corrupted and signature == ("temperature", "pressure", "flow_rate"):
+        normalized["name"] = "고온 유량 안정성 인증"
+    for axis in normalized["axes"]:
+        if axis["name"] == "temperature" and any(marker in str(axis.get("unit", "")) for marker in ("�", "?", "째")):
+            axis["unit"] = "C"
+    return normalized
+
+
+def normalize_goals_for_display(goals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [normalize_goal_for_display(goal) for goal in goals]
+
+
+def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
+    goals = normalize_goals_for_display(load_goal_store())
+    peer_counts = {}
+    peer_subset_counts = {}
+    for goal in goals:
+        try:
+            peer_counts[goal["id"]] = int(len(pick_peer_group(goal)))
+        except ValueError:
+            peer_counts[goal["id"]] = 0
+        peer_subset_counts[goal["id"]] = peer_group_subset_counts(goal)
+    return {
+        "adminAllowed": admin_allowed,
+        "goals": goals,
+        "peerCounts": peer_counts,
+        "peerSubsetCounts": peer_subset_counts,
+        "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
+        "storage": {
+            "goalStoreFile": GOAL_STORE_PATH.name,
+            "savedItems": ["Experiment Goal 설정"],
+            "unsavedItems": ["업로드한 Target Data", "분석 결과"],
+        },
+        "stateShape": {
+            "admin": ["selectedGoalId", "draftGoal"],
+            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping", "primaryKey"],
+            "report": ["status", "result", "meta", "summary", "confidenceReasons"],
+        },
+        "componentStructure": {
+            "DashboardShell": ["TopActionBar", "AdminSettingsModal", "ColumnMapper", "CertificateReport"],
+            "AdminSettingsModal": ["GoalSelector", "GoalEditorForm", "AxisTableEditor"],
+            "TopActionBar": ["GoalDropdown", "UploadPanel", "AnalyzeButton"],
+            "CertificateReport": ["ScoreCards", "ContributionChart", "SampleSizeList", "CoverageLines", "EquitabilityChart"],
+        },
+    }
+
+
+def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> dict[str, Any]:
+    if not selected_axis_names:
+        return {
+            "id": goal["id"],
+            "name": goal["name"],
+            "K_m": float(goal.get("K_m", K_M)),
+            "axes": [dict(axis) for axis in goal["axes"]],
+        }
+    requested = {name.strip() for name in selected_axis_names if str(name).strip()}
+    axes = [dict(axis) for axis in goal["axes"] if axis["name"] in requested]
+    if not axes:
+        raise ValueError("선택된 축이 없습니다. 분석에 포함할 Axis를 하나 이상 체크하세요.")
+    return {
+        "id": goal["id"],
+        "name": goal["name"],
+        "K_m": float(goal.get("K_m", K_M)),
+        "axes": axes,
+    }
+
+
+def build_target_vector(
+    rows: list[list[Any]],
+    axis_mapping: dict[str, str],
+    goal: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    axis_names = [axis["name"] for axis in goal["axes"]]
+    headers = list(rows[0].keys()) if rows else []
+    means = np.zeros(len(axis_names), dtype=float)
+    count = 0
+    for row_index, row in enumerate(rows, start=1):
+        values = []
+        for axis_name in axis_names:
+            column_name = axis_mapping.get(axis_name)
+            if column_name not in row:
+                raise ValueError(f"Axis '{axis_name}' is not mapped to a valid column.")
+            try:
+                values.append(float(row[column_name]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Row {row_index} has a non-numeric value for Axis '{axis_name}'.") from exc
+        count += 1
+        delta = np.asarray(values, dtype=float) - means
+        means += delta / count
+    if count == 0:
+        raise ValueError("업로드된 데이터가 비어 있습니다.")
+    return means, {"row_count": int(count), "columns": headers}
+
+
+def confidence_reasons(result: DiagnosisResult) -> list[dict[str, Any]]:
+    reasons = [
+        {
+            "label": "Sample Size",
+            "score": round(float(result.sample_size_Z), 4),
+            "impact": "down" if result.sample_size_Z < 0.6 else "stable",
+            "message": "같은 실험 목적의 Peer Group 수가 충분한지 반영합니다.",
+        },
+        {
+            "label": "Coverage",
+            "score": round(float(result.coverage_C), 4),
+            "impact": "down" if result.coverage_C < 0.3 else "stable",
+            "message": "설정한 Domain Range 대비 Peer Group이 실제로 채운 구간 비율입니다.",
+        },
+        {
+            "label": "Equitability",
+            "score": round(float(result.equitability_E), 4),
+            "impact": "down" if result.equitability_E < 0.5 else "stable",
+            "message": "채워진 구간 안에서 Peer Group이 얼마나 고르게 분포하는지 반영합니다.",
+        },
+    ]
+    if result.w_eff < 0.7:
+        reasons.append(
+            {
+                "label": "Engine Robustness",
+                "score": round(float(result.w_eff), 4),
+                "impact": "down",
+                "message": "비정규 분포 영향으로 분석 엔진의 효율 가중치가 낮아졌습니다.",
+            }
+        )
+    return reasons
+
+
+def build_summary(result: DiagnosisResult) -> list[str]:
+    messages: list[str] = []
+    if result.heterogeneity > 0.95 and result.confidence > 0.7:
+        messages.append("이질성과 신뢰도가 모두 높습니다. 새로운 물리적 발견 가능성을 우선 검토할 수 있습니다.")
+    elif result.heterogeneity > 0.95 and result.confidence <= 0.4:
+        messages.append("대상은 크게 벗어나지만 현재 Peer Group 신뢰도가 낮아 계측 오류나 데이터 부족 가능성도 함께 봐야 합니다.")
+    elif result.heterogeneity <= 0.5:
+        messages.append("대상은 현재 Peer Group과 통계적으로 크게 다르지 않습니다.")
+    else:
+        messages.append("이질성이 일부 확인됩니다. 추가 샘플 확보와 분포 검증을 함께 권장합니다.")
+
+    if result.sample_size_Z < 0.5:
+        messages.append("Sample Size가 부족합니다. 같은 실험 목적의 Peer Group을 더 확보하세요.")
+    if result.coverage_C < 0.3:
+        messages.append("Coverage가 낮습니다. 설정한 Domain Range 안에서 Peer Group이 채운 구간이 좁습니다.")
+    if result.equitability_E < 0.5:
+        messages.append("Equitability가 낮습니다. 일부 구간에 데이터가 몰려 있습니다.")
+    if result.w_eff < 0.7:
+        messages.append("비정규 분포 영향으로 분석 엔진 효율 가중치가 낮아졌습니다.")
+    return messages
+
+
+def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
+    goals = normalize_goals_for_display(load_goal_store())
+    goal_id = payload.get("goalId")
+    goal = next((item for item in goals if item["id"] == goal_id), None)
+    if goal is None:
+        raise ValueError("선택한 Experiment Goal이 존재하지 않습니다.")
+
+    rows = payload.get("rows", [])
+    if not rows:
+        raise ValueError("업로드된 데이터가 비어 있습니다.")
+
+    axis_mapping = payload.get("axisMapping", {})
+    if not isinstance(axis_mapping, dict):
+        raise ValueError("Axis 컬럼 매핑 정보가 없습니다.")
+
+    selected_axis_names = payload.get("selectedAxes")
+    if selected_axis_names is None:
+        selected_axis_names = [axis["name"] for axis in goal["axes"]]
+    if not isinstance(selected_axis_names, list):
+        raise ValueError("분석할 Axis 목록은 list 형태여야 합니다.")
+    selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
+
+    primary_key = str(payload.get("primaryKey", "")).strip()
+    if primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
+        raise ValueError("Primary Key는 분석에 포함된 축 중 하나여야 합니다.")
+
+    config = ExperimentConfig(
+        axis_names=[axis["name"] for axis in selected_goal["axes"]],
+        domain_range=[(axis["domainMin"], axis["domainMax"]) for axis in selected_goal["axes"]],
+        resolution=[axis["resolution"] for axis in selected_goal["axes"]],
+        K_m=float(selected_goal.get("K_m", K_M)),
+    )
+
+    target_vector, dataset_meta = build_target_vector(rows, axis_mapping, selected_goal)
+    peer_group = pick_peer_group(goal, [axis["name"] for axis in selected_goal["axes"]])
+
+    analyzer = DataQualityAnalyzer(config)
+    analyzer.add_peers(peer_group)
+    result = analyzer.diagnose(target_vector)
+
+    summary = build_summary(result)
+    summary.append(f"Primary Key는 '{primary_key}'로 기록했고, Peer Group은 서버에서 자동 매칭했습니다.")
+
+    return {
+        "meta": {
+            "experiment_goal": goal["name"],
+            "primary_key": primary_key,
+            "target_rows": dataset_meta["row_count"],
+            "uploaded_columns": dataset_meta["columns"],
+            "peer_group_size": int(len(peer_group)),
+            "axis_names": config.axis_names,
+            "axes": selected_goal["axes"],
+            "available_axes": goal["axes"],
+            "config": asdict(config),
+        },
+        "result": result.to_payload(config.axis_names),
+        "summary": summary,
+        "confidenceReasons": confidence_reasons(result),
+        "visualizations": build_report_visualizations(selected_goal, peer_group, target_vector, result),
+    }
 
 
 PAGE_HTML = """<!doctype html>
@@ -3593,9 +3870,1337 @@ PAGE_HTML = """<!doctype html>
 """
 
 
+def storage_label(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path(__file__).parent))
+    except ValueError:
+        return str(path)
+
+
+def normalize_goal_for_display(goal: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "id": str(goal["id"]),
+        "name": str(goal["name"]),
+        "K_m": float(goal.get("K_m", K_M)),
+        "axes": [dict(axis) for axis in goal["axes"]],
+    }
+    signature = axis_signature([axis["name"] for axis in normalized["axes"]])
+    corrupted_markers = ("�", "吏", "怨", "좎", "덉", "꾩", "媛", "??")
+    if any(marker in normalized["name"] for marker in corrupted_markers):
+        if signature == ("vacuum_level", "hold_time", "leak_rate"):
+            normalized["name"] = "진공 유지 품질 인증"
+        elif signature == ("temperature", "pressure", "flow_rate"):
+            normalized["name"] = "고온 유량 안정성 인증"
+    for axis in normalized["axes"]:
+        if axis["name"] == "temperature" and any(marker in str(axis.get("unit", "")) for marker in ("�", "?", "째")):
+            axis["unit"] = "C"
+    return normalized
+
+
+def normalize_goals_for_display(goals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [normalize_goal_for_display(goal) for goal in goals]
+
+
+def load_cluster_store() -> list[dict[str, Any]]:
+    if not CLUSTER_STORE_PATH.exists():
+        return []
+    raw = json.loads(CLUSTER_STORE_PATH.read_text(encoding="utf-8"))
+    raw_clusters = raw.get("clusters", raw if isinstance(raw, list) else [])
+    clusters: list[dict[str, Any]] = []
+    for item in raw_clusters:
+        try:
+            axis_names = [str(name) for name in item["axisNames"]]
+            values = [float(value) for value in item["values"]]
+            if len(axis_names) != len(values):
+                continue
+            clusters.append(
+                {
+                    "id": str(item.get("id") or f"cluster_{uuid.uuid4().hex}"),
+                    "goalId": str(item["goalId"]),
+                    "goalName": str(item.get("goalName", "")),
+                    "axisNames": axis_names,
+                    "axisSignature": str(item.get("axisSignature") or axis_subset_key(axis_names)),
+                    "values": values,
+                    "rowCount": int(item.get("rowCount", 1)),
+                    "primaryKey": str(item.get("primaryKey", axis_names[0] if axis_names else "")),
+                    "createdAt": str(item.get("createdAt", "")),
+                    "fingerprint": str(item.get("fingerprint", "")),
+                    "storagePolicy": "sanitized_numeric_axis_vector",
+                }
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+    return clusters
+
+
+def save_cluster_store(clusters: list[dict[str, Any]]) -> None:
+    CLUSTER_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "privacy": "Stores only mapped numeric axis vectors, row counts, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
+        "clusters": clusters,
+    }
+    CLUSTER_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def demo_peer_rows(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> list[list[float]]:
+    signature = axis_signature([axis["name"] for axis in goal["axes"]])
+    peer_rows = PEER_GROUP_LIBRARY.get(signature, [])
+    if not peer_rows:
+        return []
+    if not selected_axis_names:
+        return [[float(value) for value in row] for row in peer_rows]
+    name_to_index = {axis["name"]: index for index, axis in enumerate(goal["axes"])}
+    try:
+        selected_indices = [name_to_index[name] for name in selected_axis_names]
+    except KeyError as exc:
+        raise ValueError(f"Selected axis '{exc.args[0]}' does not belong to this Goal.") from exc
+    return [[float(row[index]) for index in selected_indices] for row in peer_rows]
+
+
+def stored_peer_rows(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> list[list[float]]:
+    selected = selected_axis_names or [axis["name"] for axis in goal["axes"]]
+    goal_signature = axis_subset_key([axis["name"] for axis in goal["axes"]])
+    rows: list[list[float]] = []
+    for cluster in load_cluster_store():
+        same_goal = cluster.get("goalId") == goal["id"]
+        same_signature = cluster.get("axisSignature") == goal_signature
+        if not same_goal and not same_signature:
+            continue
+        value_by_axis = dict(zip(cluster.get("axisNames", []), cluster.get("values", [])))
+        if all(axis_name in value_by_axis for axis_name in selected):
+            rows.append([float(value_by_axis[axis_name]) for axis_name in selected])
+    return rows
+
+
+def use_demo_peer_group() -> bool:
+    return os.environ.get("USE_DEMO_PEER_GROUP", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def pick_peer_group(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> np.ndarray:
+    selected = selected_axis_names or [axis["name"] for axis in goal["axes"]]
+    stored_rows = stored_peer_rows(goal, selected)
+    demo_rows = demo_peer_rows(goal, selected)
+    rows = list(stored_rows)
+    if use_demo_peer_group() or len(rows) < len(selected) + 1:
+        rows = demo_rows + rows
+    if not rows:
+        raise ValueError("No saved or demo Peer Group could be matched for this Experiment Goal.")
+    return np.asarray(rows, dtype=float)
+
+
+def peer_group_subset_counts(goal: dict[str, Any]) -> dict[str, int]:
+    axis_names = [axis["name"] for axis in goal["axes"]]
+    counts: dict[str, int] = {}
+    for size in range(1, len(axis_names) + 1):
+        for subset in itertools.combinations(axis_names, size):
+            try:
+                counts[axis_subset_key(list(subset))] = int(len(pick_peer_group(goal, list(subset))))
+            except ValueError:
+                counts[axis_subset_key(list(subset))] = 0
+    return counts
+
+
+def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
+    goals = normalize_goals_for_display(load_goal_store())
+    peer_counts = {}
+    peer_subset_counts = {}
+    for goal in goals:
+        try:
+            peer_counts[goal["id"]] = int(len(pick_peer_group(goal)))
+        except ValueError:
+            peer_counts[goal["id"]] = 0
+        peer_subset_counts[goal["id"]] = peer_group_subset_counts(goal)
+    admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
+    return {
+        "adminAllowed": admin_allowed,
+        "adminAuthRequired": admin_auth_required,
+        "goals": goals,
+        "peerCounts": peer_counts,
+        "peerSubsetCounts": peer_subset_counts,
+        "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
+        "storage": {
+            "storeDir": storage_label(STORE_DIR),
+            "goalStoreFile": storage_label(GOAL_STORE_PATH),
+            "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
+            "clusterCount": len(load_cluster_store()),
+            "demoPeerGroupEnabled": use_demo_peer_group(),
+            "savedItems": ["Experiment Goal 설정", "비식별 numeric 데이터 군집"],
+            "unsavedItems": ["원본 업로드 파일", "파일명", "비매핑 컬럼", "개인정보 컬럼"],
+        },
+        "stateShape": {
+            "admin": ["selectedGoalId", "draftGoal"],
+            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping", "primaryKey"],
+            "report": ["status", "result", "meta", "summary", "confidenceReasons", "savedDataCluster"],
+        },
+    }
+
+
+def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> dict[str, Any]:
+    if not selected_axis_names:
+        return {
+            "id": goal["id"],
+            "name": goal["name"],
+            "K_m": float(goal.get("K_m", K_M)),
+            "axes": [dict(axis) for axis in goal["axes"]],
+        }
+    requested = {name.strip() for name in selected_axis_names if str(name).strip()}
+    axes = [dict(axis) for axis in goal["axes"] if axis["name"] in requested]
+    if not axes:
+        raise ValueError("선택된 축이 없습니다. 분석에 포함할 Axis를 하나 이상 체크하세요.")
+    return {
+        "id": goal["id"],
+        "name": goal["name"],
+        "K_m": float(goal.get("K_m", K_M)),
+        "axes": axes,
+    }
+
+
+def confidence_reasons(result: DiagnosisResult) -> list[dict[str, Any]]:
+    reasons = [
+        {
+            "label": "Sample Size",
+            "score": round(float(result.sample_size_Z), 4),
+            "impact": "down" if result.sample_size_Z < 0.6 else "stable",
+            "message": "같은 실험 목적의 비교 군집 수가 충분한지 반영합니다.",
+        },
+        {
+            "label": "Coverage",
+            "score": round(float(result.coverage_C), 4),
+            "impact": "down" if result.coverage_C < 0.3 else "stable",
+            "message": "Domain Range 안에서 비교 군집이 실제로 점유한 bin 비율입니다.",
+        },
+        {
+            "label": "Equitability",
+            "score": round(float(result.equitability_E), 4),
+            "impact": "down" if result.equitability_E < 0.5 else "stable",
+            "message": "점유된 bin 안에서 비교 군집 sample size가 얼마나 균일한지 반영합니다.",
+        },
+    ]
+    if result.w_eff < 0.7:
+        reasons.append(
+            {
+                "label": "Engine Robustness",
+                "score": round(float(result.w_eff), 4),
+                "impact": "down",
+                "message": "Mardia 첨도 기반 효율 가중치가 낮아 최종 신뢰도가 보수적으로 조정되었습니다.",
+            }
+        )
+    return reasons
+
+
+def build_summary(result: DiagnosisResult) -> list[str]:
+    messages: list[str] = []
+    if result.heterogeneity > 0.95 and result.confidence > 0.7:
+        messages.append("이질성과 신뢰도가 모두 높습니다. 새로운 물리적 발견 가능성을 우선 검토할 수 있습니다.")
+    elif result.heterogeneity > 0.95 and result.confidence <= 0.4:
+        messages.append("대상 군집은 크게 벗어나지만 비교 군집의 신뢰도가 낮아 설계 오류나 데이터 부족 가능성을 함께 봐야 합니다.")
+    elif result.heterogeneity <= 0.5:
+        messages.append("대상 군집은 현재 비교 군집과 통계적으로 크게 다르지 않습니다.")
+    else:
+        messages.append("이질성이 일부 확인됩니다. 추가 군집 확보와 분포 검증을 함께 권장합니다.")
+
+    if result.sample_size_Z < 0.5:
+        messages.append("Sample Size가 부족합니다. 같은 실험 목적의 비교 군집을 더 확보하세요.")
+    if result.coverage_C < 0.3:
+        messages.append("Coverage가 낮습니다. Domain Range 안에서 비교 군집이 채운 bin이 좁습니다.")
+    if result.equitability_E < 0.5:
+        messages.append("Equitability가 낮습니다. 일부 bin에 비교 군집이 몰려 있습니다.")
+    if result.w_eff < 0.7:
+        messages.append("분포 효율 가중치가 낮아 엔진 신뢰도가 보수적으로 반영되었습니다.")
+    return messages
+
+
+def should_save_data_clusters() -> bool:
+    return os.environ.get("SAVE_DATA_CLUSTERS", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def make_cluster_record(
+    goal: dict[str, Any],
+    selected_goal: dict[str, Any],
+    target_vector: np.ndarray,
+    dataset_meta: dict[str, Any],
+    primary_key: str,
+) -> dict[str, Any]:
+    axis_names = [axis["name"] for axis in selected_goal["axes"]]
+    values = [round(float(value), 12) for value in target_vector]
+    fingerprint_payload = {
+        "goalId": goal["id"],
+        "axisNames": axis_names,
+        "values": values,
+        "rowCount": dataset_meta["row_count"],
+        "primaryKey": primary_key,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return {
+        "id": f"cluster_{uuid.uuid4().hex}",
+        "goalId": goal["id"],
+        "goalName": goal["name"],
+        "axisNames": axis_names,
+        "axisSignature": axis_subset_key(axis_names),
+        "values": values,
+        "rowCount": int(dataset_meta["row_count"]),
+        "primaryKey": primary_key,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "fingerprint": fingerprint,
+        "storagePolicy": "sanitized_numeric_axis_vector",
+    }
+
+
+def save_data_cluster(record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    clusters = load_cluster_store()
+    for cluster in clusters:
+        if cluster.get("fingerprint") == record["fingerprint"]:
+            return cluster, False
+    clusters.append(record)
+    save_cluster_store(clusters)
+    return record, True
+
+
+def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
+    goals = normalize_goals_for_display(load_goal_store())
+    goal_id = payload.get("goalId")
+    goal = next((item for item in goals if item["id"] == goal_id), None)
+    if goal is None:
+        raise ValueError("선택한 Experiment Goal이 존재하지 않습니다.")
+
+    rows = payload.get("rows", [])
+    if not rows:
+        raise ValueError("업로드된 데이터가 비어 있습니다.")
+
+    axis_mapping = payload.get("axisMapping", {})
+    if not isinstance(axis_mapping, dict):
+        raise ValueError("Axis 컬럼 매핑 정보가 없습니다.")
+
+    selected_axis_names = payload.get("selectedAxes")
+    if selected_axis_names is None:
+        selected_axis_names = [axis["name"] for axis in goal["axes"]]
+    if not isinstance(selected_axis_names, list):
+        raise ValueError("분석할 Axis 목록은 list 형태여야 합니다.")
+    selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
+
+    primary_key = str(payload.get("primaryKey", "")).strip()
+    if primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
+        raise ValueError("Primary Key는 분석에 포함된 축 중 하나여야 합니다.")
+
+    config = ExperimentConfig(
+        axis_names=[axis["name"] for axis in selected_goal["axes"]],
+        domain_range=[(axis["domainMin"], axis["domainMax"]) for axis in selected_goal["axes"]],
+        resolution=[axis["resolution"] for axis in selected_goal["axes"]],
+        K_m=float(selected_goal.get("K_m", K_M)),
+    )
+
+    target_vector, dataset_meta = build_target_vector(rows, axis_mapping, selected_goal)
+    peer_group = pick_peer_group(goal, [axis["name"] for axis in selected_goal["axes"]])
+
+    analyzer = DataQualityAnalyzer(config)
+    analyzer.add_peers(peer_group)
+    result = analyzer.diagnose(target_vector)
+
+    saved_cluster = None
+    saved_cluster_is_new = False
+    if should_save_data_clusters():
+        saved_cluster, saved_cluster_is_new = save_data_cluster(
+            make_cluster_record(goal, selected_goal, target_vector, dataset_meta, primary_key)
+        )
+
+    summary = build_summary(result)
+    summary.append(f"Primary Key는 '{primary_key}'로 기록했고, Peer Group은 저장된 군집과 비식별 예제 군집에서 자동 매칭했습니다.")
+    if saved_cluster:
+        saved_status = "새 군집으로 저장했습니다" if saved_cluster_is_new else "이미 저장된 군집이라 중복 저장하지 않았습니다"
+        summary.append(f"업로드 원본은 저장하지 않고 axis 숫자 벡터만 {saved_status}.")
+
+    return {
+        "meta": {
+            "experiment_goal": goal["name"],
+            "primary_key": primary_key,
+            "target_rows": dataset_meta["row_count"],
+            "uploaded_columns": dataset_meta["columns"],
+            "peer_group_size": int(len(peer_group)),
+            "axis_names": config.axis_names,
+            "axes": selected_goal["axes"],
+            "available_axes": goal["axes"],
+            "config": asdict(config),
+            "storage_policy": "raw upload rows, filenames, and unmapped columns are not stored",
+        },
+        "result": result.to_payload(config.axis_names),
+        "summary": summary,
+        "confidenceReasons": confidence_reasons(result),
+        "visualizations": build_report_visualizations(selected_goal, peer_group, target_vector, result),
+        "savedDataCluster": None
+        if saved_cluster is None
+        else {
+            "id": saved_cluster["id"],
+            "isNew": saved_cluster_is_new,
+            "axisNames": saved_cluster["axisNames"],
+            "rowCount": saved_cluster["rowCount"],
+            "storeFile": storage_label(CLUSTER_STORE_PATH),
+            "storagePolicy": saved_cluster["storagePolicy"],
+        },
+    }
+
+
+PAGE_HTML = r"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leesin 데이터 품질 인증</title>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --surface-soft: #f0f5f7;
+      --ink: #17212b;
+      --muted: #5f6f7e;
+      --line: #d9e2e8;
+      --teal: #147567;
+      --blue: #315f9f;
+      --gold: #b47b21;
+      --red: #b4473a;
+      --green: #297a4b;
+      --shadow: 0 10px 26px rgba(23, 33, 43, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Segoe UI", "Pretendard", Arial, sans-serif;
+      background: var(--bg);
+    }
+    .page {
+      width: min(1180px, calc(100% - 28px));
+      margin: 18px auto 42px;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 4px; font-size: 28px; letter-spacing: 0; }
+    .subtitle { margin-bottom: 0; color: var(--muted); line-height: 1.5; }
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(240px, 1.1fr) auto auto;
+      gap: 12px;
+      align-items: end;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    select, input, button {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 11px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    select:focus, input:focus {
+      outline: none;
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(20, 117, 103, 0.13);
+    }
+    button {
+      cursor: pointer;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    .primary {
+      border: 0;
+      color: #fff;
+      background: var(--teal);
+    }
+    .secondary {
+      color: var(--blue);
+      background: #eef4fb;
+    }
+    .danger {
+      color: var(--red);
+      background: #fff1ee;
+    }
+    .ghost {
+      color: var(--ink);
+      background: var(--surface);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(340px, 0.95fr);
+      gap: 14px;
+      margin-top: 14px;
+      align-items: start;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .panel h2, .panel h3 { margin-bottom: 6px; letter-spacing: 0; }
+    .panel p, .hint, .meta, .small {
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+    .storage {
+      display: grid;
+      gap: 5px;
+      margin-top: 12px;
+      padding: 11px 12px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      background: #fbfdfe;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .mapper-head, .mapping-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 92px;
+      gap: 10px;
+      align-items: center;
+    }
+    .mapper-head {
+      margin: 10px 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .mapping-row {
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-bottom: 8px;
+    }
+    .axis-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .axis-toggle input, .primary-choice input {
+      width: auto;
+      min-height: auto;
+      accent-color: var(--teal);
+    }
+    .primary-choice {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .error {
+      display: none;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid #f4c7bd;
+      border-radius: 8px;
+      background: #fff1ee;
+      color: var(--red);
+      line-height: 1.5;
+    }
+    .success {
+      display: none;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid #bfe3d4;
+      border-radius: 8px;
+      background: #edf8f3;
+      color: var(--green);
+      line-height: 1.5;
+    }
+    .score-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 12px;
+    }
+    .score {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .score.hero {
+      border: 0;
+      background: var(--teal);
+      color: #fff;
+    }
+    .score small {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-weight: 800;
+    }
+    .score.hero small, .score.hero .small { color: rgba(255,255,255,0.82); }
+    .score strong {
+      display: block;
+      font-size: 42px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+    .score.hero strong { font-size: 62px; }
+    .report-body {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .pill, .reason, .bar-card {
+      padding: 11px 12px;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      line-height: 1.5;
+    }
+    .reason.down { background: #fff1ee; color: var(--red); }
+    .bar-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    .bar-track {
+      height: 10px;
+      border-radius: 999px;
+      background: #dce5ea;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: var(--gold);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .metric strong { display: block; margin-top: 4px; font-size: 22px; }
+    dialog {
+      width: min(920px, calc(100% - 28px));
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+    dialog::backdrop { background: rgba(23, 33, 43, 0.38); }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .modal-body {
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+    }
+    .admin-toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .axis-row {
+      display: grid;
+      grid-template-columns: 1.1fr 0.8fr 0.8fr 0.8fr 0.8fr auto;
+      gap: 8px;
+      align-items: end;
+      margin-bottom: 8px;
+    }
+    .axis-row button { min-width: 70px; }
+    .empty {
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: #fbfdfe;
+      line-height: 1.55;
+    }
+    @media (max-width: 900px) {
+      .toolbar, .grid, .mapper-head, .mapping-row, .score-grid, .metrics, .admin-toolbar, .axis-row {
+        grid-template-columns: 1fr;
+      }
+      .topbar { align-items: flex-start; }
+      .primary-choice { justify-content: flex-start; }
+      .score.hero strong { font-size: 48px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <h1>Leesin 데이터 품질 인증</h1>
+        <p class="subtitle">CSV/TSV 데이터를 업로드하고 Axis 매핑을 확인하면 서버가 Peer Group과 비교해 인증 리포트를 만듭니다.</p>
+      </div>
+      <button class="ghost" id="settings-button" type="button">설정</button>
+    </header>
+
+    <section class="toolbar">
+      <label>Experiment Goal
+        <select id="goal-select"></select>
+      </label>
+      <label>Target Data
+        <input id="file-input" type="file" accept=".csv,.tsv,.txt">
+      </label>
+      <button class="primary" id="run-analysis" type="button" disabled>분석</button>
+      <button class="secondary" id="reset-button" type="button">초기화</button>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>컬럼 매핑</h2>
+            <p>분석할 Axis를 체크하고 업로드 컬럼을 1:1로 연결하세요.</p>
+          </div>
+        </div>
+        <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
+        <div class="mapper-head"><span>Axis</span><span>업로드 컬럼</span><span>Primary</span></div>
+        <div id="mapping-box"></div>
+        <div class="hint" id="mapper-hint">파일을 업로드하면 매핑을 확인할 수 있습니다.</div>
+        <div class="error" id="user-error-box"></div>
+        <div class="storage" id="storage-note"></div>
+      </div>
+
+      <div class="panel" id="report-panel">
+        <div class="panel-head">
+          <div>
+            <h2>인증 리포트</h2>
+            <p>분석 결과는 화면에만 표시되며 자동 저장하지 않습니다.</p>
+          </div>
+        </div>
+        <div id="report-content" class="empty">분석을 실행하면 신뢰도, 이질성, Axis별 기여도와 감점 원인이 여기에 표시됩니다.</div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="settings-modal">
+    <div class="modal-head">
+      <div>
+        <strong>Admin Setup</strong>
+        <div class="small">Goal 저장은 서버의 goal_store.json 파일에 기록됩니다.</div>
+      </div>
+      <button class="ghost" id="settings-close" type="button">닫기</button>
+    </div>
+    <div class="modal-body">
+      <div class="admin-toolbar">
+        <label>Existing Goal
+          <select id="admin-goal-select"></select>
+        </label>
+        <button class="secondary" id="admin-new-goal" type="button">새 Goal</button>
+        <button class="danger" id="admin-delete-goal" type="button">삭제</button>
+      </div>
+      <label>Experiment Goal Name
+        <input id="admin-goal-name" placeholder="예: 진공 유지 안정성 인증">
+      </label>
+      <label>K_m
+        <input id="admin-km-input" type="number" min="0.0001" step="any" value="10">
+      </label>
+      <label id="admin-token-wrap">Admin Token
+        <input id="admin-token-input" type="password" autocomplete="off" placeholder="Render 환경변수 ADMIN_TOKEN">
+      </label>
+      <div>
+        <h3>Axis</h3>
+        <div id="axis-editor"></div>
+        <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
+      </div>
+      <button class="primary" id="admin-save-goal" type="button">저장</button>
+      <div class="success" id="admin-success-box"></div>
+      <div class="error" id="admin-error-box"></div>
+    </div>
+  </dialog>
+
+  <script>
+    const bootstrap = __BOOTSTRAP__;
+    const state = {
+      goals: bootstrap.goals || [],
+      adminAllowed: Boolean(bootstrap.adminAllowed),
+      adminAuthRequired: Boolean(bootstrap.adminAuthRequired),
+      adminToken: '',
+      selectedGoalId: bootstrap.goals?.[0]?.id || '',
+      fileName: '',
+      headers: [],
+      rows: [],
+      selectedAxes: {},
+      axisMapping: {},
+      primaryKey: '',
+      report: null,
+      draftGoal: null,
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function goalById(id) {
+      return state.goals.find(goal => goal.id === id) || null;
+    }
+
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function blankGoal() {
+      return {
+        id: `goal_${Date.now()}`,
+        name: '',
+        K_m: 10,
+        axes: [{ name: '', unit: '', domainMin: 0, domainMax: 100, resolution: 1 }],
+      };
+    }
+
+    function blankAxis() {
+      return { name: '', unit: '', domainMin: 0, domainMax: 100, resolution: 1 };
+    }
+
+    function axisLabel(axis) {
+      return axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
+    }
+
+    function normalizeKey(value) {
+      return String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣_]+/g, '');
+    }
+
+    function selectedAxes(goal) {
+      if (!goal) return [];
+      return goal.axes.filter(axis => state.selectedAxes[axis.name]);
+    }
+
+    function selectedAxisNames(goal) {
+      return selectedAxes(goal).map(axis => axis.name);
+    }
+
+    function resetSelection(goal, keepRows = true) {
+      state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
+      state.axisMapping = buildSuggestedMapping(goal, state.headers);
+      state.primaryKey = goal?.axes?.[0]?.name || '';
+      if (!keepRows) {
+        state.fileName = '';
+        state.headers = [];
+        state.rows = [];
+      }
+      state.report = null;
+    }
+
+    function buildSuggestedMapping(goal, headers) {
+      if (!goal || headers.length === 0) return {};
+      const byKey = new Map(headers.map(header => [normalizeKey(header), header]));
+      const used = new Set();
+      const mapping = {};
+      goal.axes.forEach((axis, index) => {
+        const exact = byKey.get(normalizeKey(axis.name));
+        if (exact && !used.has(exact)) {
+          mapping[axis.name] = exact;
+          used.add(exact);
+          return;
+        }
+        const fallback = headers.find(header => !used.has(header)) || headers[index] || '';
+        mapping[axis.name] = fallback;
+        if (fallback) used.add(fallback);
+      });
+      return mapping;
+    }
+
+    function parseDelimitedText(text, delimiter) {
+      const rows = [];
+      let row = [];
+      let cell = '';
+      let quoted = false;
+      const cleanText = text.replace(/^\uFEFF/, '');
+      for (let index = 0; index < cleanText.length; index += 1) {
+        const char = cleanText[index];
+        const next = cleanText[index + 1];
+        if (char === '"') {
+          if (quoted && next === '"') {
+            cell += '"';
+            index += 1;
+          } else {
+            quoted = !quoted;
+          }
+          continue;
+        }
+        if (!quoted && char === delimiter) {
+          row.push(cell.trim());
+          cell = '';
+          continue;
+        }
+        if (!quoted && (char === '\n' || char === '\r')) {
+          if (char === '\r' && next === '\n') index += 1;
+          row.push(cell.trim());
+          if (row.some(value => value !== '')) rows.push(row);
+          row = [];
+          cell = '';
+          continue;
+        }
+        cell += char;
+      }
+      row.push(cell.trim());
+      if (row.some(value => value !== '')) rows.push(row);
+      const headers = (rows.shift() || []).map(header => header.trim()).filter(Boolean);
+      const records = rows.map(values => {
+        const record = {};
+        headers.forEach((header, index) => {
+          record[header] = values[index] ?? '';
+        });
+        return record;
+      });
+      return { headers, rows: records };
+    }
+
+    function detectDelimiter(text, fileName) {
+      if (fileName.endsWith('.tsv')) return '\t';
+      const firstLine = text.split(/\r?\n/, 1)[0] || '';
+      return firstLine.includes('\t') && !firstLine.includes(',') ? '\t' : ',';
+    }
+
+    function validationMessage() {
+      const goal = goalById(state.selectedGoalId);
+      if (!goal) return 'Experiment Goal을 먼저 선택하세요.';
+      const selected = selectedAxes(goal);
+      if (selected.length === 0) return '분석에 포함할 Axis를 하나 이상 체크하세요.';
+      if (state.rows.length === 0) return 'CSV/TSV 파일을 먼저 업로드하세요.';
+      if (!state.primaryKey || !selected.some(axis => axis.name === state.primaryKey)) {
+        return 'Primary Key를 분석에 포함된 Axis 중 하나로 선택하세요.';
+      }
+      const mapped = [];
+      for (const axis of selected) {
+        const header = state.axisMapping[axis.name];
+        if (!header || !state.headers.includes(header)) {
+          return `${axis.name} Axis에 연결할 업로드 컬럼을 선택하세요.`;
+        }
+        mapped.push(header);
+      }
+      if (mapped.length !== new Set(mapped).size) {
+        return '하나의 업로드 컬럼을 여러 Axis에 중복 연결할 수 없습니다.';
+      }
+      return '';
+    }
+
+    function setError(message) {
+      const box = document.getElementById('user-error-box');
+      box.textContent = message || '';
+      box.style.display = message ? 'block' : 'none';
+    }
+
+    function updateAnalyzeButton() {
+      const message = validationMessage();
+      const ready = !message;
+      const button = document.getElementById('run-analysis');
+      button.disabled = !ready;
+      button.title = ready ? '선택한 매핑으로 분석합니다.' : message;
+      document.getElementById('mapper-hint').textContent = ready
+        ? '매핑이 완료되었습니다. 분석을 누르면 리포트가 갱신됩니다.'
+        : message;
+      if (!ready && state.rows.length > 0) setError(message);
+      if (ready) setError('');
+    }
+
+    function renderGoalSelects() {
+      const options = state.goals.map(goal => `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.name)}</option>`).join('');
+      document.getElementById('goal-select').innerHTML = options || '<option value="">Goal 없음</option>';
+      document.getElementById('goal-select').value = state.selectedGoalId;
+      document.getElementById('admin-goal-select').innerHTML = options || '<option value="">Goal 없음</option>';
+      document.getElementById('admin-goal-select').value = state.draftGoal?.id || state.selectedGoalId;
+    }
+
+    function renderStorageNote() {
+      const storage = bootstrap.storage || {};
+      document.getElementById('storage-note').innerHTML = `
+        <strong>저장 기준</strong>
+        <span>Goal 설정: ${escapeHtml(storage.goalStoreFile || 'goal_store.json')}</span>
+        <span>데이터 군집: ${escapeHtml(storage.clusterStoreFile || 'data_cluster_store.json')}에 axis 숫자 벡터만 저장합니다.</span>
+        <span>원본 업로드 파일, 파일명, 비매핑 컬럼, 개인정보 컬럼은 저장하지 않습니다.</span>
+      `;
+    }
+
+    function renderMapping() {
+      const goal = goalById(state.selectedGoalId);
+      const mappingBox = document.getElementById('mapping-box');
+      if (!goal) {
+        mappingBox.innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>';
+        updateAnalyzeButton();
+        return;
+      }
+      mappingBox.innerHTML = goal.axes.map(axis => `
+        <div class="mapping-row">
+          <label class="axis-toggle">
+            <input type="checkbox" data-axis-toggle="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] ? 'checked' : ''}>
+            <span>${escapeHtml(axisLabel(axis))}</span>
+          </label>
+          <label>
+            <select data-axis-map="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] && state.headers.length ? '' : 'disabled'}>
+              <option value="">컬럼 선택</option>
+              ${state.headers.map(header => `<option value="${escapeHtml(header)}" ${state.axisMapping[axis.name] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="primary-choice">
+            <input type="radio" name="primary-key" value="${escapeHtml(axis.name)}" ${state.primaryKey === axis.name ? 'checked' : ''} ${state.selectedAxes[axis.name] ? '' : 'disabled'}>
+            선택
+          </label>
+        </div>
+      `).join('');
+      document.getElementById('file-meta-box').textContent = state.fileName
+        ? `${state.fileName} · ${state.rows.length} rows · ${state.headers.join(', ')}`
+        : '아직 업로드된 파일이 없습니다.';
+      updateAnalyzeButton();
+    }
+
+    function formatNumber(value, decimals = 2) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return '-';
+      return numeric.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/, '$1');
+    }
+
+    function formatPercent(value, decimals = 0) {
+      return `${formatNumber(Number(value) * 100, decimals)}%`;
+    }
+
+    function renderReport(report) {
+      const result = report.result;
+      const visualizations = report.visualizations || {};
+      const reasons = report.confidenceReasons || [];
+      const content = document.getElementById('report-content');
+      content.className = '';
+      content.innerHTML = `
+        <div class="score-grid">
+          <div class="score hero">
+            <small>Confidence</small>
+            <strong>${escapeHtml(formatPercent(result.confidence, 0))}</strong>
+            <div class="small">Peer Group ${escapeHtml(String(report.meta.peer_group_size))}개 기준</div>
+          </div>
+          <div class="score">
+            <small>Heterogeneity</small>
+            <strong>${escapeHtml(formatPercent(result.heterogeneity, 1))}</strong>
+            <div class="small">Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div>
+          </div>
+        </div>
+        <div class="report-body">
+          <div class="metrics">
+            <div class="metric"><span class="small">Sample Size</span><strong>${escapeHtml(formatPercent(result.sample_size_Z, 0))}</strong></div>
+            <div class="metric"><span class="small">Coverage</span><strong>${escapeHtml(formatPercent(result.coverage_C, 1))}</strong></div>
+            <div class="metric"><span class="small">Equitability</span><strong>${escapeHtml(formatPercent(result.equitability_E, 0))}</strong></div>
+          </div>
+          <div>
+            <h3>Axis별 이질성 기여도</h3>
+            ${(result.contributions || []).map(item => `
+              <div class="bar-card">
+                <div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${escapeHtml(formatNumber(item.percent, 1))}%</strong></div>
+                <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Number(item.percent || 0))}%"></div></div>
+              </div>
+            `).join('')}
+          </div>
+          <div>
+            <h3>요약</h3>
+            ${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}
+          </div>
+          <div>
+            <h3>신뢰도 감점 원인</h3>
+            ${reasons.map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${escapeHtml(formatPercent(item.score, item.label === 'Coverage' ? 1 : 0))}</strong><br>${escapeHtml(item.message)}</div>`).join('')}
+          </div>
+          <div class="small">Target rows ${escapeHtml(String(report.meta.target_rows))} · Columns ${escapeHtml((report.meta.uploaded_columns || []).join(', '))}</div>
+          <div class="small">${report.savedDataCluster ? `저장 군집 ${escapeHtml(report.savedDataCluster.id)} · ${report.savedDataCluster.isNew ? '신규 저장' : '중복 감지'}` : '데이터 군집 저장 비활성화'}</div>
+        </div>
+      `;
+      if (visualizations.coverage) {
+        document.getElementById('report-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    async function handleFileUpload(file) {
+      try {
+        const text = await file.text();
+        const delimiter = detectDelimiter(text, file.name);
+        const parsed = parseDelimitedText(text, delimiter);
+        if (parsed.headers.length === 0) throw new Error('헤더를 찾을 수 없습니다.');
+        if (parsed.rows.length === 0) throw new Error('데이터 행을 찾을 수 없습니다.');
+        const goal = goalById(state.selectedGoalId);
+        state.fileName = file.name;
+        state.headers = parsed.headers;
+        state.rows = parsed.rows;
+        state.axisMapping = buildSuggestedMapping(goal, parsed.headers);
+        const selected = selectedAxes(goal);
+        state.primaryKey = selected[0]?.name || '';
+        state.report = null;
+        setError('');
+        document.getElementById('report-content').className = 'empty';
+        document.getElementById('report-content').textContent = '분석을 실행하면 신뢰도, 이질성, Axis별 기여도와 감점 원인이 여기에 표시됩니다.';
+        renderMapping();
+      } catch (error) {
+        state.fileName = '';
+        state.headers = [];
+        state.rows = [];
+        setError(error.message || '파일을 읽는 중 오류가 발생했습니다.');
+        renderMapping();
+      }
+    }
+
+    async function runAnalysis() {
+      const message = validationMessage();
+      if (message) {
+        setError(message);
+        updateAnalyzeButton();
+        return;
+      }
+      const button = document.getElementById('run-analysis');
+      const goal = goalById(state.selectedGoalId);
+      button.disabled = true;
+      button.textContent = '분석 중...';
+      setError('');
+      try {
+        const response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            goalId: state.selectedGoalId,
+            rows: state.rows,
+            selectedAxes: selectedAxisNames(goal),
+            axisMapping: state.axisMapping,
+            primaryKey: state.primaryKey,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '분석 요청 중 오류가 발생했습니다.');
+        state.report = data;
+        renderReport(data);
+      } catch (error) {
+        setError(error.message || '분석 요청 중 오류가 발생했습니다.');
+      } finally {
+        button.textContent = '분석';
+        updateAnalyzeButton();
+      }
+    }
+
+    function renderAdmin() {
+      state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
+      document.getElementById('admin-goal-name').value = state.draftGoal.name || '';
+      document.getElementById('admin-km-input').value = Number(state.draftGoal.K_m || 10);
+      document.getElementById('axis-editor').innerHTML = (state.draftGoal.axes || []).map((axis, index) => `
+        <div class="axis-row">
+          <label>Axis<input data-axis-field="name" data-index="${index}" value="${escapeHtml(axis.name || '')}"></label>
+          <label>Unit<input data-axis-field="unit" data-index="${index}" value="${escapeHtml(axis.unit || '')}"></label>
+          <label>Min<input data-axis-field="domainMin" data-index="${index}" type="number" step="any" value="${Number(axis.domainMin ?? 0)}"></label>
+          <label>Max<input data-axis-field="domainMax" data-index="${index}" type="number" step="any" value="${Number(axis.domainMax ?? 100)}"></label>
+          <label>Resolution<input data-axis-field="resolution" data-index="${index}" type="number" step="any" value="${Number(axis.resolution ?? 1)}"></label>
+          <button class="danger" type="button" data-axis-remove="${index}">삭제</button>
+        </div>
+      `).join('');
+      renderGoalSelects();
+    }
+
+    function setAdminMessage(kind, message) {
+      const success = document.getElementById('admin-success-box');
+      const error = document.getElementById('admin-error-box');
+      success.style.display = 'none';
+      error.style.display = 'none';
+      if (!message) return;
+      const box = kind === 'success' ? success : error;
+      box.textContent = message;
+      box.style.display = 'block';
+    }
+
+    function adminHeaders() {
+      const headers = { 'Content-Type': 'application/json' };
+      if (state.adminToken) headers['X-Admin-Token'] = state.adminToken;
+      return headers;
+    }
+
+    async function saveGoal() {
+      state.draftGoal.name = document.getElementById('admin-goal-name').value.trim();
+      state.draftGoal.K_m = Number(document.getElementById('admin-km-input').value || 10);
+      try {
+        const response = await fetch('/api/admin/goals', {
+          method: 'POST',
+          headers: adminHeaders(),
+          body: JSON.stringify(state.draftGoal),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Goal 저장 중 오류가 발생했습니다.');
+        state.goals = data.goals;
+        state.selectedGoalId = data.savedGoal.id;
+        state.draftGoal = clone(data.savedGoal);
+        resetSelection(goalById(state.selectedGoalId), true);
+        renderGoalSelects();
+        renderMapping();
+        renderAdmin();
+        setAdminMessage('success', `저장되었습니다. 위치: ${bootstrap.storage?.goalStoreFile || 'goal_store.json'}`);
+      } catch (error) {
+        setAdminMessage('error', error.message || 'Goal 저장 중 오류가 발생했습니다.');
+      }
+    }
+
+    async function deleteGoal() {
+      if (!state.draftGoal?.id) return;
+      try {
+        const response = await fetch('/api/admin/goals/delete', {
+          method: 'POST',
+          headers: adminHeaders(),
+          body: JSON.stringify({ id: state.draftGoal.id }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Goal 삭제 중 오류가 발생했습니다.');
+        state.goals = data.goals;
+        state.selectedGoalId = state.goals[0]?.id || '';
+        state.draftGoal = clone(goalById(state.selectedGoalId) || blankGoal());
+        resetSelection(goalById(state.selectedGoalId), true);
+        renderGoalSelects();
+        renderMapping();
+        renderAdmin();
+        setAdminMessage('success', `삭제 후 ${bootstrap.storage?.goalStoreFile || 'goal_store.json'}에 반영되었습니다.`);
+      } catch (error) {
+        setAdminMessage('error', error.message || 'Goal 삭제 중 오류가 발생했습니다.');
+      }
+    }
+
+    function bindEvents() {
+      document.getElementById('settings-button').addEventListener('click', () => {
+        setAdminMessage('', '');
+        renderAdmin();
+        document.getElementById('settings-modal').showModal();
+      });
+      document.getElementById('settings-close').addEventListener('click', () => document.getElementById('settings-modal').close());
+      document.getElementById('admin-token-input').addEventListener('input', event => {
+        state.adminToken = event.target.value;
+      });
+      document.getElementById('goal-select').addEventListener('change', event => {
+        state.selectedGoalId = event.target.value;
+        state.draftGoal = clone(goalById(state.selectedGoalId) || blankGoal());
+        resetSelection(goalById(state.selectedGoalId), true);
+        renderMapping();
+      });
+      document.getElementById('file-input').addEventListener('change', event => {
+        const file = event.target.files?.[0];
+        if (file) handleFileUpload(file);
+      });
+      document.getElementById('reset-button').addEventListener('click', () => {
+        document.getElementById('file-input').value = '';
+        resetSelection(goalById(state.selectedGoalId), false);
+        document.getElementById('report-content').className = 'empty';
+        document.getElementById('report-content').textContent = '분석을 실행하면 신뢰도, 이질성, Axis별 기여도와 감점 원인이 여기에 표시됩니다.';
+        setError('');
+        renderMapping();
+      });
+      document.getElementById('mapping-box').addEventListener('change', event => {
+        const toggle = event.target.dataset.axisToggle;
+        const axis = event.target.dataset.axisMap;
+        if (toggle) {
+          state.selectedAxes[toggle] = event.target.checked;
+          const goal = goalById(state.selectedGoalId);
+          if (!state.selectedAxes[state.primaryKey]) {
+            state.primaryKey = selectedAxes(goal)[0]?.name || '';
+          }
+        }
+        if (axis) state.axisMapping[axis] = event.target.value;
+        if (event.target.name === 'primary-key') state.primaryKey = event.target.value;
+        state.report = null;
+        renderMapping();
+      });
+      document.getElementById('run-analysis').addEventListener('click', runAnalysis);
+      document.getElementById('admin-goal-select').addEventListener('change', event => {
+        state.draftGoal = clone(goalById(event.target.value) || blankGoal());
+        renderAdmin();
+      });
+      document.getElementById('admin-new-goal').addEventListener('click', () => {
+        state.draftGoal = blankGoal();
+        renderAdmin();
+      });
+      document.getElementById('axis-add-button').addEventListener('click', () => {
+        state.draftGoal.axes.push(blankAxis());
+        renderAdmin();
+      });
+      document.getElementById('axis-editor').addEventListener('input', event => {
+        const field = event.target.dataset.axisField;
+        if (!field) return;
+        const axis = state.draftGoal.axes[Number(event.target.dataset.index)];
+        if (!axis) return;
+        axis[field] = field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value);
+      });
+      document.getElementById('axis-editor').addEventListener('click', event => {
+        const index = event.target.dataset.axisRemove;
+        if (index === undefined) return;
+        state.draftGoal.axes.splice(Number(index), 1);
+        if (state.draftGoal.axes.length === 0) state.draftGoal.axes.push(blankAxis());
+        renderAdmin();
+      });
+      document.getElementById('admin-save-goal').addEventListener('click', saveGoal);
+      document.getElementById('admin-delete-goal').addEventListener('click', deleteGoal);
+    }
+
+    function init() {
+      const goal = goalById(state.selectedGoalId);
+      state.draftGoal = clone(goal || blankGoal());
+      resetSelection(goal, true);
+      document.getElementById('settings-button').style.display = state.adminAllowed ? '' : 'none';
+      document.getElementById('settings-button').style.display = (state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
+      document.getElementById('admin-token-wrap').style.display = state.adminAuthRequired ? '' : 'none';
+      renderStorageNote();
+      renderGoalSelects();
+      renderMapping();
+      bindEvents();
+    }
+
+    init();
+  </script>
+</body>
+</html>
+"""
+
+
 class AppHandler(BaseHTTPRequestHandler):
     def _admin_allowed(self) -> bool:
         if os.environ.get("ALLOW_REMOTE_ADMIN", "").lower() in {"1", "true", "yes", "on"}:
+            return True
+        admin_token = os.environ.get("ADMIN_TOKEN", "")
+        if admin_token and self.headers.get("X-Admin-Token", "") == admin_token:
             return True
         try:
             return ipaddress.ip_address(self.client_address[0]).is_loopback
@@ -3624,7 +5229,7 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/admin/goals":
                 if not self._admin_allowed():
-                    self._send_json({"error": "Admin endpoints are only available on localhost."}, status=HTTPStatus.FORBIDDEN)
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
                     return
                 saved_goal = validate_goal(payload)
                 goals = load_goal_store()
@@ -3638,7 +5243,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/admin/goals/delete":
                 if not self._admin_allowed():
-                    self._send_json({"error": "Admin endpoints are only available on localhost."}, status=HTTPStatus.FORBIDDEN)
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
                     return
                 goal_id = payload.get("id")
                 goals = [goal for goal in load_goal_store() if goal["id"] != goal_id]
