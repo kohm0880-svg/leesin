@@ -1772,6 +1772,309 @@ PAGE_HTML = """<!doctype html>
       return { headers, rows };
     }
 
+    function numberOr(value, fallback) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : fallback;
+    }
+
+    function clamp(value, min, max) {
+      if (max < min) return min;
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function reportTuningKey(report) {
+      const axes = (report.meta?.axis_names || []).join('|');
+      const target = (report.visualizations?.targetVector || []).join('|');
+      return `${report.meta?.experiment_goal || ''}|${axes}|${target}`;
+    }
+
+    function ensureTuning(report) {
+      const key = reportTuningKey(report);
+      if (state.tuning && state.tuningReportKey === key) return;
+      const axes = report.meta?.axes || [];
+      state.tuningReportKey = key;
+      state.tuning = {
+        axes: axes.map(axis => {
+          const baseMin = numberOr(axis.domainMin, 0);
+          const baseMax = numberOr(axis.domainMax, baseMin + 1);
+          const baseResolution = Math.max(Math.abs(numberOr(axis.resolution, 1)), 0.000001);
+          return {
+            baseMin,
+            baseMax,
+            baseResolution,
+            domainMin: baseMin,
+            domainMax: baseMax,
+            resolution: baseResolution,
+          };
+        }),
+      };
+    }
+
+    function normalizeTuningControl(control) {
+      const span = Math.max(control.baseResolution, control.baseMax - control.baseMin);
+      control.resolution = clamp(numberOr(control.resolution, control.baseResolution), control.baseResolution, span);
+      control.domainMin = clamp(numberOr(control.domainMin, control.baseMin), control.baseMin, control.baseMax - control.resolution);
+      control.domainMax = clamp(numberOr(control.domainMax, control.baseMax), control.domainMin + control.resolution, control.baseMax);
+    }
+
+    function updateTuningFromInput(input) {
+      if (!state.report) return;
+      ensureTuning(state.report);
+      const index = Number(input.dataset.tuneIndex);
+      const field = input.dataset.tuneField;
+      const control = state.tuning?.axes?.[index];
+      if (!control || !field) return;
+      control[field] = Number(input.value);
+      normalizeTuningControl(control);
+      input.value = control[field];
+    }
+
+    function tunedMetrics(report) {
+      ensureTuning(report);
+      const peerRows = report.visualizations?.peerRows || [];
+      const controls = state.tuning?.axes || [];
+      controls.forEach(normalizeTuningControl);
+      const axisBinCounts = controls.map(control => {
+        const span = Math.max(control.resolution, control.domainMax - control.domainMin);
+        return Math.max(1, Math.ceil(span / control.resolution));
+      });
+      const totalBins = axisBinCounts.reduce((product, count) => product * count, 1);
+      const occupiedBins = new Map();
+      let validRows = 0;
+
+      peerRows.forEach(row => {
+        const keyParts = [];
+        let valid = true;
+        controls.forEach((control, index) => {
+          const value = Number(row[index]);
+          if (!Number.isFinite(value) || value < control.domainMin || value > control.domainMax) {
+            valid = false;
+            return;
+          }
+          const binCount = axisBinCounts[index];
+          const rawIndex = Math.floor((value - control.domainMin) / control.resolution);
+          keyParts.push(String(clamp(rawIndex, 0, binCount - 1)));
+        });
+        if (!valid || keyParts.length !== controls.length) return;
+        validRows += 1;
+        const key = keyParts.join('|');
+        occupiedBins.set(key, (occupiedBins.get(key) || 0) + 1);
+      });
+
+      const occupiedCount = occupiedBins.size;
+      const coverage = totalBins > 0 ? occupiedCount / totalBins : 0;
+      let equitability = 0;
+      if (occupiedCount === 1) {
+        equitability = 1;
+      } else if (occupiedCount > 1 && validRows > 0) {
+        let entropy = 0;
+        occupiedBins.forEach(count => {
+          const p = count / validRows;
+          if (p > 0) entropy -= p * Math.log(p);
+        });
+        equitability = entropy / Math.log(occupiedCount);
+      }
+      const sampleZ = numberOr(report.result?.sample_size_Z, 0);
+      const wEff = numberOr(report.result?.w_eff, 1);
+      const confidence = Math.pow(Math.max(0, sampleZ * coverage * equitability), 1 / 3) * wEff;
+      return { coverage, equitability, confidence, occupiedCount, totalBins, validRows };
+    }
+
+    function renderAxisHistogram(report, index) {
+      ensureTuning(report);
+      const control = state.tuning.axes[index];
+      const peerRows = report.visualizations?.peerRows || [];
+      const target = Number(report.visualizations?.targetVector?.[index]);
+      const values = peerRows.map(row => Number(row[index])).filter(Number.isFinite);
+      const span = Math.max(control.resolution, control.domainMax - control.domainMin);
+      const realBinCount = Math.max(1, Math.ceil(span / control.resolution));
+      const graphBinCount = Math.min(realBinCount, 48);
+      const counts = Array.from({ length: graphBinCount }, () => 0);
+      values.forEach(value => {
+        if (value < control.domainMin || value > control.domainMax) return;
+        const ratio = clamp((value - control.domainMin) / span, 0, 0.999999);
+        counts[Math.floor(ratio * graphBinCount)] += 1;
+      });
+      const maxCount = Math.max(1, ...counts);
+      const plotLeft = 24;
+      const plotRight = 306;
+      const plotBottom = 92;
+      const plotTop = 12;
+      const plotWidth = plotRight - plotLeft;
+      const barGap = 2;
+      const barWidth = Math.max(1, plotWidth / graphBinCount - barGap);
+      const bars = counts.map((count, binIndex) => {
+        const height = (plotBottom - plotTop) * (count / maxCount);
+        const x = plotLeft + binIndex * (plotWidth / graphBinCount);
+        const y = plotBottom - height;
+        return `<rect x="${formatNumber(x, 2)}" y="${formatNumber(y, 2)}" width="${formatNumber(barWidth, 2)}" height="${formatNumber(height, 2)}" fill="#315f9f" opacity="0.72"></rect>`;
+      }).join('');
+      const targetX = Number.isFinite(target)
+        ? plotLeft + clamp((target - control.domainMin) / span, 0, 1) * plotWidth
+        : NaN;
+      const targetLine = Number.isFinite(targetX)
+        ? `<line x1="${formatNumber(targetX, 2)}" y1="${plotTop}" x2="${formatNumber(targetX, 2)}" y2="${plotBottom}" stroke="#b4473a" stroke-width="3"><title>Target ${formatNumber(target, 4)}</title></line>`
+        : '';
+      return `
+        <svg class="mini-svg" viewBox="0 0 330 110" role="img" aria-label="Axis distribution">
+          <line x1="${plotLeft}" y1="${plotBottom}" x2="${plotRight}" y2="${plotBottom}" stroke="#d9e2e8"></line>
+          ${bars}
+          ${targetLine}
+          <text x="${plotLeft}" y="106" fill="#5f6f7e" font-size="10">${escapeHtml(formatNumber(control.domainMin, 2))}</text>
+          <text x="${plotRight}" y="106" fill="#5f6f7e" font-size="10" text-anchor="end">${escapeHtml(formatNumber(control.domainMax, 2))}</text>
+        </svg>
+      `;
+    }
+
+    function renderTuningPanel(report) {
+      ensureTuning(report);
+      const axes = report.meta?.axes || [];
+      if (!axes.length || !report.visualizations?.peerRows?.length) return '';
+      const metrics = tunedMetrics(report);
+      return `
+        <div class="tuning-panel" id="tuning-panel">
+          <div class="tuning-head">
+            <div>
+              <h3>비교 전용 Range / Resolution</h3>
+              <div class="small">기본 Goal 값은 저장하지 않고, 현재 리포트의 Coverage, Equitability, Confidence 미리보기만 다시 계산합니다.</div>
+            </div>
+            <button class="secondary" id="reset-tuning" type="button">기본값</button>
+          </div>
+          <div class="metrics">
+            <div class="metric"><span class="small">Tuned Confidence</span><strong id="tuned-confidence">${escapeHtml(formatPercent(metrics.confidence, 0))}</strong></div>
+            <div class="metric"><span class="small">Tuned Coverage</span><strong id="tuned-coverage">${escapeHtml(formatPercent(metrics.coverage, 1))}</strong></div>
+            <div class="metric"><span class="small">Tuned Equitability</span><strong id="tuned-equitability">${escapeHtml(formatPercent(metrics.equitability, 0))}</strong></div>
+          </div>
+          <div class="small" id="tuned-bins">${escapeHtml(String(metrics.occupiedCount))} / ${escapeHtml(String(metrics.totalBins))} occupied bins, ${escapeHtml(String(metrics.validRows))} peer clusters in current range</div>
+          ${state.tuning.axes.map((control, index) => {
+            normalizeTuningControl(control);
+            const axis = axes[index] || {};
+            const label = axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
+            const resolutionMax = Math.max(control.baseResolution, control.baseMax - control.baseMin);
+            return `
+              <div class="tuning-axis">
+                <div class="bar-meta"><strong>${escapeHtml(label)}</strong><span>Target ${escapeHtml(formatNumber(report.visualizations?.targetVector?.[index], 4))}</span></div>
+                <div id="tune-graph-${index}">${renderAxisHistogram(report, index)}</div>
+                <div class="tuning-row">
+                  <span>Domain Min</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="domainMin" min="${control.baseMin}" max="${Math.max(control.baseMin, control.baseMax - control.resolution)}" step="${control.baseResolution}" value="${control.domainMin}">
+                  <span class="tuning-value" id="tune-min-value-${index}">${escapeHtml(formatNumber(control.domainMin, 4))}</span>
+                </div>
+                <div class="tuning-row">
+                  <span>Domain Max</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="domainMax" min="${Math.min(control.baseMax, control.baseMin + control.resolution)}" max="${control.baseMax}" step="${control.baseResolution}" value="${control.domainMax}">
+                  <span class="tuning-value" id="tune-max-value-${index}">${escapeHtml(formatNumber(control.domainMax, 4))}</span>
+                </div>
+                <div class="tuning-row">
+                  <span>Resolution</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="resolution" min="${control.baseResolution}" max="${resolutionMax}" step="${control.baseResolution}" value="${control.resolution}">
+                  <span class="tuning-value" id="tune-res-value-${index}">${escapeHtml(formatNumber(control.resolution, 4))}</span>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function refreshTuningOutput(report) {
+      if (!report || !document.getElementById('tuning-panel')) return;
+      ensureTuning(report);
+      const metrics = tunedMetrics(report);
+      const setText = (id, value) => {
+        const node = document.getElementById(id);
+        if (node) node.textContent = value;
+      };
+      setText('tuned-confidence', formatPercent(metrics.confidence, 0));
+      setText('tuned-coverage', formatPercent(metrics.coverage, 1));
+      setText('tuned-equitability', formatPercent(metrics.equitability, 0));
+      setText('tuned-bins', `${metrics.occupiedCount} / ${metrics.totalBins} occupied bins, ${metrics.validRows} peer clusters in current range`);
+      state.tuning.axes.forEach((control, index) => {
+        normalizeTuningControl(control);
+        setText(`tune-min-value-${index}`, formatNumber(control.domainMin, 4));
+        setText(`tune-max-value-${index}`, formatNumber(control.domainMax, 4));
+        setText(`tune-res-value-${index}`, formatNumber(control.resolution, 4));
+        const minInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="domainMin"]`);
+        const maxInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="domainMax"]`);
+        const resInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="resolution"]`);
+        if (minInput) {
+          minInput.max = Math.max(control.baseMin, control.baseMax - control.resolution);
+          minInput.value = control.domainMin;
+        }
+        if (maxInput) {
+          maxInput.min = Math.min(control.baseMax, control.baseMin + control.resolution);
+          maxInput.value = control.domainMax;
+        }
+        if (resInput) resInput.value = control.resolution;
+        const graph = document.getElementById(`tune-graph-${index}`);
+        if (graph) graph.innerHTML = renderAxisHistogram(report, index);
+      });
+    }
+
+    function renderIssue(message) {
+      const content = document.getElementById('report-content');
+      content.className = '';
+      content.innerHTML = `
+        <div class="reason down"><strong>분석을 완료하지 못했습니다</strong><br>${escapeHtml(message)}</div>
+        <div class="small">확인 순서: CSV 헤더가 Goal Axis와 1:1로 매칭되는지, 같은 Experiment Goal로 저장된 비교 군집 수 N이 선택 axis 수 + 1 이상인지 확인하세요.</div>
+      `;
+      document.getElementById('report-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function renderReport(report) {
+      state.report = report;
+      const result = report.result;
+      const reasons = report.confidenceReasons || [];
+      const savedText = report.savedDataCluster
+        ? `저장 군집 ${report.savedDataCluster.id} · ${report.savedDataCluster.isNew ? '신규 저장' : '중복 감지'}`
+        : '데이터 군집 저장 비활성화';
+      const content = document.getElementById('report-content');
+      content.className = '';
+      content.innerHTML = `
+        <div class="score-grid">
+          <div class="score hero">
+            <small>Confidence</small>
+            <strong>${escapeHtml(formatPercent(result.confidence, 0))}</strong>
+            <div class="small">Peer Group ${escapeHtml(String(report.meta.peer_group_size))} clusters</div>
+          </div>
+          <div class="score">
+            <small>Heterogeneity</small>
+            <strong>${escapeHtml(formatPercent(result.heterogeneity, 1))}</strong>
+            <div class="small">Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div>
+          </div>
+        </div>
+        <div class="report-body">
+          <div class="metrics">
+            <div class="metric"><span class="small">Sample Size</span><strong>${escapeHtml(formatPercent(result.sample_size_Z, 0))}</strong></div>
+            <div class="metric"><span class="small">Coverage</span><strong>${escapeHtml(formatPercent(result.coverage_C, 1))}</strong></div>
+            <div class="metric"><span class="small">Equitability</span><strong>${escapeHtml(formatPercent(result.equitability_E, 0))}</strong></div>
+          </div>
+          <div>
+            <h3>Axis별 이질성 기여도</h3>
+            ${(result.contributions || []).map(item => `
+              <div class="bar-card">
+                <div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${escapeHtml(formatNumber(item.percent, 1))}%</strong></div>
+                <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Number(item.percent || 0))}%"></div></div>
+              </div>
+            `).join('')}
+          </div>
+          <div>
+            <h3>요약</h3>
+            ${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}
+          </div>
+          <div>
+            <h3>신뢰도 감점 요인</h3>
+            ${reasons.map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${escapeHtml(formatPercent(item.score, item.label === 'Coverage' ? 1 : 0))}</strong><br>${escapeHtml(item.message)}</div>`).join('')}
+          </div>
+          <div class="small">Target rows ${escapeHtml(String(report.meta.target_rows))} · Columns ${escapeHtml((report.meta.uploaded_columns || []).join(', '))}</div>
+          <div class="small">${escapeHtml(savedText)}</div>
+          ${renderTuningPanel(report)}
+        </div>
+      `;
+      refreshTuningOutput(report);
+      document.getElementById('report-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
     async function handleFileUpload(file) {
       const text = await file.text();
       const delimiter = file.name.endsWith('.tsv') ? '\\t' : ',';
@@ -4113,6 +4416,80 @@ def should_save_data_clusters() -> bool:
     return os.environ.get("SAVE_DATA_CLUSTERS", "true").lower() in {"1", "true", "yes", "on"}
 
 
+def build_report_visualizations(
+    goal: dict[str, Any],
+    peer_group: np.ndarray,
+    target_vector: np.ndarray,
+    result: DiagnosisResult,
+) -> dict[str, Any]:
+    axes = goal["axes"]
+    goal_k_m = float(goal.get("K_m", K_M))
+    sample_size_items = []
+    coverage_axes = []
+    equitability_axes = []
+
+    for index, axis in enumerate(axes):
+        axis_values = peer_group[:, index]
+        distribution = build_axis_distribution(
+            axis_values,
+            float(axis["domainMin"]),
+            float(axis["domainMax"]),
+            float(axis["resolution"]),
+        )
+        non_empty_count = int(np.count_nonzero(~np.isnan(axis_values)))
+        sample_size_items.append(
+            {
+                "axis": axis["name"],
+                "label": axis_display_label(axis),
+                "unit": axis.get("unit", ""),
+                "count": non_empty_count,
+                "z": round(float(non_empty_count / (non_empty_count + goal_k_m)), 6),
+            }
+        )
+        coverage_axes.append(
+            {
+                "axis": axis["name"],
+                "label": axis_display_label(axis),
+                "unit": axis.get("unit", ""),
+                "domainMin": float(axis["domainMin"]),
+                "domainMax": float(axis["domainMax"]),
+                "resolution": float(axis["resolution"]),
+                "targetValue": round(float(target_vector[index]), 6),
+                "peerValues": [round(float(value), 6) for value in axis_values],
+                **distribution,
+            }
+        )
+        equitability_axes.append(
+            {
+                "axis": axis["name"],
+                "label": axis_display_label(axis),
+                "unit": axis.get("unit", ""),
+                "status": "balanced" if result.equitability_E >= 0.5 else "imbalanced",
+                "bins": distribution["bins"],
+            }
+        )
+
+    return {
+        "sampleSize": {
+            "peerGroupCount": int(len(peer_group)),
+            "z": round(float(result.sample_size_Z), 6),
+            "items": sample_size_items,
+        },
+        "coverage": {
+            "score": round(float(result.coverage_C), 6),
+            "axes": coverage_axes,
+        },
+        "equitability": {
+            "score": round(float(result.equitability_E), 6),
+            "status": "balanced" if result.equitability_E >= 0.5 else "imbalanced",
+            "axes": equitability_axes,
+        },
+        "peerRows": [[round(float(value), 6) for value in row] for row in peer_group.tolist()],
+        "targetVector": [round(float(value), 6) for value in target_vector.tolist()],
+        "axisNames": [axis["name"] for axis in axes],
+    }
+
+
 def make_cluster_record(
     goal: dict[str, Any],
     selected_goal: dict[str, Any],
@@ -4180,8 +4557,6 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
     selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
 
     primary_key = goal["name"]
-    if False and primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
-        raise ValueError("Primary Key는 분석에 포함된 축 중 하나여야 합니다.")
 
     config = ExperimentConfig(
         axis_names=[axis["name"] for axis in selected_goal["axes"]],
@@ -4191,18 +4566,30 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     target_vector, dataset_meta = build_target_vector(rows, axis_mapping, selected_goal)
-    peer_group = pick_peer_group(goal, [axis["name"] for axis in selected_goal["axes"]])
-
-    analyzer = DataQualityAnalyzer(config)
-    analyzer.add_peers(peer_group)
-    result = analyzer.diagnose(target_vector)
-
+    pending_cluster = make_cluster_record(goal, selected_goal, target_vector, dataset_meta, primary_key)
     saved_cluster = None
     saved_cluster_is_new = False
+
+    try:
+        peer_group = pick_peer_group(goal, [axis["name"] for axis in selected_goal["axes"]])
+        analyzer = DataQualityAnalyzer(config)
+        analyzer.add_peers(peer_group)
+        result = analyzer.diagnose(target_vector)
+    except ValueError as exc:
+        if should_save_data_clusters():
+            saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
+        selected_count = len(selected_goal["axes"])
+        stored_count = len(stored_peer_rows(goal, [axis["name"] for axis in selected_goal["axes"]]))
+        saved_text = "저장했습니다" if saved_cluster_is_new else "이미 저장되어 있습니다"
+        raise ValueError(
+            f"비교 군집이 부족해서 인증 리포트를 아직 만들 수 없습니다. "
+            f"현재 저장된 비교 군집 N={stored_count}, 필요한 최소 N={selected_count + 1}. "
+            f"이번 업로드 군집은 원본 없이 axis 숫자 벡터로 {saved_text}. "
+            f"같은 Experiment Goal로 군집을 더 업로드하거나 분석 축 수를 줄여주세요. 내부 사유: {exc}"
+        ) from exc
+
     if should_save_data_clusters():
-        saved_cluster, saved_cluster_is_new = save_data_cluster(
-            make_cluster_record(goal, selected_goal, target_vector, dataset_meta, primary_key)
-        )
+        saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
 
     summary = build_summary(result)
     summary.append(f"Primary 기준은 Experiment Goal '{primary_key}'이며, Peer Group은 저장된 군집과 비식별 예제 군집에서 자동 매칭했습니다.")
@@ -4506,6 +4893,55 @@ PAGE_HTML = r"""<!doctype html>
       background: #fff;
     }
     .metric strong { display: block; margin-top: 4px; font-size: 22px; }
+    .tuning-panel {
+      display: grid;
+      gap: 12px;
+      margin-top: 4px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .tuning-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .tuning-head button { width: auto; }
+    .tuning-axis {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .tuning-row {
+      display: grid;
+      grid-template-columns: 94px minmax(120px, 1fr) 88px;
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .tuning-row input[type="range"] {
+      min-height: 30px;
+      padding: 0;
+      accent-color: var(--teal);
+    }
+    .tuning-value {
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .mini-svg {
+      width: 100%;
+      height: 110px;
+      display: block;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdfe;
+    }
     dialog {
       width: min(920px, calc(100% - 28px));
       padding: 0;
@@ -4550,7 +4986,7 @@ PAGE_HTML = r"""<!doctype html>
       line-height: 1.55;
     }
     @media (max-width: 900px) {
-      .toolbar, .grid, .mapper-head, .mapping-row, .score-grid, .metrics, .admin-toolbar, .axis-row {
+      .toolbar, .grid, .mapper-head, .mapping-row, .score-grid, .metrics, .admin-toolbar, .axis-row, .tuning-row {
         grid-template-columns: 1fr;
       }
       .topbar { align-items: flex-start; }
@@ -4658,6 +5094,8 @@ PAGE_HTML = r"""<!doctype html>
       axisMapping: {},
       report: null,
       draftGoal: null,
+      tuningReportKey: '',
+      tuning: null,
     };
 
     function escapeHtml(value) {
@@ -4716,6 +5154,8 @@ PAGE_HTML = r"""<!doctype html>
         state.rows = [];
       }
       state.report = null;
+      state.tuning = null;
+      state.tuningReportKey = '';
     }
 
     function buildSuggestedMapping(goal, headers) {
@@ -4884,6 +5324,309 @@ PAGE_HTML = r"""<!doctype html>
       return `${formatNumber(Number(value) * 100, decimals)}%`;
     }
 
+    function numberOr(value, fallback) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : fallback;
+    }
+
+    function clamp(value, min, max) {
+      if (max < min) return min;
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function reportTuningKey(report) {
+      const axes = (report.meta?.axis_names || []).join('|');
+      const target = (report.visualizations?.targetVector || []).join('|');
+      return `${report.meta?.experiment_goal || ''}|${axes}|${target}`;
+    }
+
+    function ensureTuning(report) {
+      const key = reportTuningKey(report);
+      if (state.tuning && state.tuningReportKey === key) return;
+      const axes = report.meta?.axes || [];
+      state.tuningReportKey = key;
+      state.tuning = {
+        axes: axes.map(axis => {
+          const baseMin = numberOr(axis.domainMin, 0);
+          const baseMax = numberOr(axis.domainMax, baseMin + 1);
+          const baseResolution = Math.max(Math.abs(numberOr(axis.resolution, 1)), 0.000001);
+          return {
+            baseMin,
+            baseMax,
+            baseResolution,
+            domainMin: baseMin,
+            domainMax: baseMax,
+            resolution: baseResolution,
+          };
+        }),
+      };
+    }
+
+    function normalizeTuningControl(control) {
+      const span = Math.max(control.baseResolution, control.baseMax - control.baseMin);
+      control.resolution = clamp(numberOr(control.resolution, control.baseResolution), control.baseResolution, span);
+      control.domainMin = clamp(numberOr(control.domainMin, control.baseMin), control.baseMin, control.baseMax - control.resolution);
+      control.domainMax = clamp(numberOr(control.domainMax, control.baseMax), control.domainMin + control.resolution, control.baseMax);
+    }
+
+    function updateTuningFromInput(input) {
+      if (!state.report) return;
+      ensureTuning(state.report);
+      const index = Number(input.dataset.tuneIndex);
+      const field = input.dataset.tuneField;
+      const control = state.tuning?.axes?.[index];
+      if (!control || !field) return;
+      control[field] = Number(input.value);
+      normalizeTuningControl(control);
+      input.value = control[field];
+    }
+
+    function tunedMetrics(report) {
+      ensureTuning(report);
+      const peerRows = report.visualizations?.peerRows || [];
+      const controls = state.tuning?.axes || [];
+      controls.forEach(normalizeTuningControl);
+      const axisBinCounts = controls.map(control => {
+        const span = Math.max(control.resolution, control.domainMax - control.domainMin);
+        return Math.max(1, Math.ceil(span / control.resolution));
+      });
+      const totalBins = axisBinCounts.reduce((product, count) => product * count, 1);
+      const occupiedBins = new Map();
+      let validRows = 0;
+
+      peerRows.forEach(row => {
+        const keyParts = [];
+        let valid = true;
+        controls.forEach((control, index) => {
+          const value = Number(row[index]);
+          if (!Number.isFinite(value) || value < control.domainMin || value > control.domainMax) {
+            valid = false;
+            return;
+          }
+          const binCount = axisBinCounts[index];
+          const rawIndex = Math.floor((value - control.domainMin) / control.resolution);
+          keyParts.push(String(clamp(rawIndex, 0, binCount - 1)));
+        });
+        if (!valid || keyParts.length !== controls.length) return;
+        validRows += 1;
+        const key = keyParts.join('|');
+        occupiedBins.set(key, (occupiedBins.get(key) || 0) + 1);
+      });
+
+      const occupiedCount = occupiedBins.size;
+      const coverage = totalBins > 0 ? occupiedCount / totalBins : 0;
+      let equitability = 0;
+      if (occupiedCount === 1) {
+        equitability = 1;
+      } else if (occupiedCount > 1 && validRows > 0) {
+        let entropy = 0;
+        occupiedBins.forEach(count => {
+          const p = count / validRows;
+          if (p > 0) entropy -= p * Math.log(p);
+        });
+        equitability = entropy / Math.log(occupiedCount);
+      }
+      const sampleZ = numberOr(report.result?.sample_size_Z, 0);
+      const wEff = numberOr(report.result?.w_eff, 1);
+      const confidence = Math.pow(Math.max(0, sampleZ * coverage * equitability), 1 / 3) * wEff;
+      return { coverage, equitability, confidence, occupiedCount, totalBins, validRows };
+    }
+
+    function renderAxisHistogram(report, index) {
+      ensureTuning(report);
+      const control = state.tuning.axes[index];
+      const peerRows = report.visualizations?.peerRows || [];
+      const target = Number(report.visualizations?.targetVector?.[index]);
+      const values = peerRows.map(row => Number(row[index])).filter(Number.isFinite);
+      const span = Math.max(control.resolution, control.domainMax - control.domainMin);
+      const realBinCount = Math.max(1, Math.ceil(span / control.resolution));
+      const graphBinCount = Math.min(realBinCount, 48);
+      const counts = Array.from({ length: graphBinCount }, () => 0);
+      values.forEach(value => {
+        if (value < control.domainMin || value > control.domainMax) return;
+        const ratio = clamp((value - control.domainMin) / span, 0, 0.999999);
+        counts[Math.floor(ratio * graphBinCount)] += 1;
+      });
+      const maxCount = Math.max(1, ...counts);
+      const plotLeft = 24;
+      const plotRight = 306;
+      const plotBottom = 92;
+      const plotTop = 12;
+      const plotWidth = plotRight - plotLeft;
+      const barGap = 2;
+      const barWidth = Math.max(1, plotWidth / graphBinCount - barGap);
+      const bars = counts.map((count, binIndex) => {
+        const height = (plotBottom - plotTop) * (count / maxCount);
+        const x = plotLeft + binIndex * (plotWidth / graphBinCount);
+        const y = plotBottom - height;
+        return `<rect x="${formatNumber(x, 2)}" y="${formatNumber(y, 2)}" width="${formatNumber(barWidth, 2)}" height="${formatNumber(height, 2)}" fill="#315f9f" opacity="0.72"></rect>`;
+      }).join('');
+      const targetX = Number.isFinite(target)
+        ? plotLeft + clamp((target - control.domainMin) / span, 0, 1) * plotWidth
+        : NaN;
+      const targetLine = Number.isFinite(targetX)
+        ? `<line x1="${formatNumber(targetX, 2)}" y1="${plotTop}" x2="${formatNumber(targetX, 2)}" y2="${plotBottom}" stroke="#b4473a" stroke-width="3"><title>Target ${formatNumber(target, 4)}</title></line>`
+        : '';
+      return `
+        <svg class="mini-svg" viewBox="0 0 330 110" role="img" aria-label="Axis distribution">
+          <line x1="${plotLeft}" y1="${plotBottom}" x2="${plotRight}" y2="${plotBottom}" stroke="#d9e2e8"></line>
+          ${bars}
+          ${targetLine}
+          <text x="${plotLeft}" y="106" fill="#5f6f7e" font-size="10">${escapeHtml(formatNumber(control.domainMin, 2))}</text>
+          <text x="${plotRight}" y="106" fill="#5f6f7e" font-size="10" text-anchor="end">${escapeHtml(formatNumber(control.domainMax, 2))}</text>
+        </svg>
+      `;
+    }
+
+    function renderTuningPanel(report) {
+      ensureTuning(report);
+      const axes = report.meta?.axes || [];
+      if (!axes.length || !report.visualizations?.peerRows?.length) return '';
+      const metrics = tunedMetrics(report);
+      return `
+        <div class="tuning-panel" id="tuning-panel">
+          <div class="tuning-head">
+            <div>
+              <h3>비교 전용 Range / Resolution</h3>
+              <div class="small">기본 Goal 값은 저장하지 않고, 현재 리포트의 Coverage, Equitability, Confidence 미리보기만 다시 계산합니다.</div>
+            </div>
+            <button class="secondary" id="reset-tuning" type="button">기본값</button>
+          </div>
+          <div class="metrics">
+            <div class="metric"><span class="small">Tuned Confidence</span><strong id="tuned-confidence">${escapeHtml(formatPercent(metrics.confidence, 0))}</strong></div>
+            <div class="metric"><span class="small">Tuned Coverage</span><strong id="tuned-coverage">${escapeHtml(formatPercent(metrics.coverage, 1))}</strong></div>
+            <div class="metric"><span class="small">Tuned Equitability</span><strong id="tuned-equitability">${escapeHtml(formatPercent(metrics.equitability, 0))}</strong></div>
+          </div>
+          <div class="small" id="tuned-bins">${escapeHtml(String(metrics.occupiedCount))} / ${escapeHtml(String(metrics.totalBins))} occupied bins, ${escapeHtml(String(metrics.validRows))} peer clusters in current range</div>
+          ${state.tuning.axes.map((control, index) => {
+            normalizeTuningControl(control);
+            const axis = axes[index] || {};
+            const label = axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
+            const resolutionMax = Math.max(control.baseResolution, control.baseMax - control.baseMin);
+            return `
+              <div class="tuning-axis">
+                <div class="bar-meta"><strong>${escapeHtml(label)}</strong><span>Target ${escapeHtml(formatNumber(report.visualizations?.targetVector?.[index], 4))}</span></div>
+                <div id="tune-graph-${index}">${renderAxisHistogram(report, index)}</div>
+                <div class="tuning-row">
+                  <span>Domain Min</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="domainMin" min="${control.baseMin}" max="${Math.max(control.baseMin, control.baseMax - control.resolution)}" step="${control.baseResolution}" value="${control.domainMin}">
+                  <span class="tuning-value" id="tune-min-value-${index}">${escapeHtml(formatNumber(control.domainMin, 4))}</span>
+                </div>
+                <div class="tuning-row">
+                  <span>Domain Max</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="domainMax" min="${Math.min(control.baseMax, control.baseMin + control.resolution)}" max="${control.baseMax}" step="${control.baseResolution}" value="${control.domainMax}">
+                  <span class="tuning-value" id="tune-max-value-${index}">${escapeHtml(formatNumber(control.domainMax, 4))}</span>
+                </div>
+                <div class="tuning-row">
+                  <span>Resolution</span>
+                  <input type="range" data-tune-index="${index}" data-tune-field="resolution" min="${control.baseResolution}" max="${resolutionMax}" step="${control.baseResolution}" value="${control.resolution}">
+                  <span class="tuning-value" id="tune-res-value-${index}">${escapeHtml(formatNumber(control.resolution, 4))}</span>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function refreshTuningOutput(report) {
+      if (!report || !document.getElementById('tuning-panel')) return;
+      ensureTuning(report);
+      const metrics = tunedMetrics(report);
+      const setText = (id, value) => {
+        const node = document.getElementById(id);
+        if (node) node.textContent = value;
+      };
+      setText('tuned-confidence', formatPercent(metrics.confidence, 0));
+      setText('tuned-coverage', formatPercent(metrics.coverage, 1));
+      setText('tuned-equitability', formatPercent(metrics.equitability, 0));
+      setText('tuned-bins', `${metrics.occupiedCount} / ${metrics.totalBins} occupied bins, ${metrics.validRows} peer clusters in current range`);
+      state.tuning.axes.forEach((control, index) => {
+        normalizeTuningControl(control);
+        setText(`tune-min-value-${index}`, formatNumber(control.domainMin, 4));
+        setText(`tune-max-value-${index}`, formatNumber(control.domainMax, 4));
+        setText(`tune-res-value-${index}`, formatNumber(control.resolution, 4));
+        const minInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="domainMin"]`);
+        const maxInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="domainMax"]`);
+        const resInput = document.querySelector(`[data-tune-index="${index}"][data-tune-field="resolution"]`);
+        if (minInput) {
+          minInput.max = Math.max(control.baseMin, control.baseMax - control.resolution);
+          minInput.value = control.domainMin;
+        }
+        if (maxInput) {
+          maxInput.min = Math.min(control.baseMax, control.baseMin + control.resolution);
+          maxInput.value = control.domainMax;
+        }
+        if (resInput) resInput.value = control.resolution;
+        const graph = document.getElementById(`tune-graph-${index}`);
+        if (graph) graph.innerHTML = renderAxisHistogram(report, index);
+      });
+    }
+
+    function renderIssue(message) {
+      const content = document.getElementById('report-content');
+      content.className = '';
+      content.innerHTML = `
+        <div class="reason down"><strong>분석을 완료하지 못했습니다</strong><br>${escapeHtml(message)}</div>
+        <div class="small">확인 순서: CSV 헤더가 Goal Axis와 1:1로 매칭되는지, 같은 Experiment Goal로 저장된 비교 군집 수 N이 선택 axis 수 + 1 이상인지 확인하세요.</div>
+      `;
+      document.getElementById('report-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function renderRichReport(report) {
+      state.report = report;
+      const result = report.result;
+      const reasons = report.confidenceReasons || [];
+      const savedText = report.savedDataCluster
+        ? `저장 군집 ${report.savedDataCluster.id} · ${report.savedDataCluster.isNew ? '신규 저장' : '중복 감지'}`
+        : '데이터 군집 저장 비활성화';
+      const content = document.getElementById('report-content');
+      content.className = '';
+      content.innerHTML = `
+        <div class="score-grid">
+          <div class="score hero">
+            <small>Confidence</small>
+            <strong>${escapeHtml(formatPercent(result.confidence, 0))}</strong>
+            <div class="small">Peer Group ${escapeHtml(String(report.meta.peer_group_size))} clusters</div>
+          </div>
+          <div class="score">
+            <small>Heterogeneity</small>
+            <strong>${escapeHtml(formatPercent(result.heterogeneity, 1))}</strong>
+            <div class="small">Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div>
+          </div>
+        </div>
+        <div class="report-body">
+          <div class="metrics">
+            <div class="metric"><span class="small">Sample Size</span><strong>${escapeHtml(formatPercent(result.sample_size_Z, 0))}</strong></div>
+            <div class="metric"><span class="small">Coverage</span><strong>${escapeHtml(formatPercent(result.coverage_C, 1))}</strong></div>
+            <div class="metric"><span class="small">Equitability</span><strong>${escapeHtml(formatPercent(result.equitability_E, 0))}</strong></div>
+          </div>
+          <div>
+            <h3>Axis별 이질성 기여도</h3>
+            ${(result.contributions || []).map(item => `
+              <div class="bar-card">
+                <div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${escapeHtml(formatNumber(item.percent, 1))}%</strong></div>
+                <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Number(item.percent || 0))}%"></div></div>
+              </div>
+            `).join('')}
+          </div>
+          <div>
+            <h3>요약</h3>
+            ${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}
+          </div>
+          <div>
+            <h3>신뢰도 감점 요인</h3>
+            ${reasons.map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${escapeHtml(formatPercent(item.score, item.label === 'Coverage' ? 1 : 0))}</strong><br>${escapeHtml(item.message)}</div>`).join('')}
+          </div>
+          <div class="small">Target rows ${escapeHtml(String(report.meta.target_rows))} · Columns ${escapeHtml((report.meta.uploaded_columns || []).join(', '))}</div>
+          <div class="small">${escapeHtml(savedText)}</div>
+          ${renderTuningPanel(report)}
+        </div>
+      `;
+      refreshTuningOutput(report);
+      document.getElementById('report-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
     function renderReport(report) {
       const result = report.result;
       const visualizations = report.visualizations || {};
@@ -4948,6 +5691,8 @@ PAGE_HTML = r"""<!doctype html>
         state.rows = parsed.rows;
         state.axisMapping = buildSuggestedMapping(goal, parsed.headers);
         state.report = null;
+        state.tuning = null;
+        state.tuningReportKey = '';
         setError('');
         document.getElementById('report-content').className = 'empty';
         document.getElementById('report-content').textContent = '분석을 실행하면 신뢰도, 이질성, Axis별 기여도와 감점 원인이 여기에 표시됩니다.';
@@ -4956,7 +5701,9 @@ PAGE_HTML = r"""<!doctype html>
         state.fileName = '';
         state.headers = [];
         state.rows = [];
-        setError(error.message || '파일을 읽는 중 오류가 발생했습니다.');
+        const detail = error.message || '파일을 읽는 중 오류가 발생했습니다.';
+        setError(detail);
+        renderIssue(detail);
         renderMapping();
       }
     }
@@ -4987,9 +5734,11 @@ PAGE_HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || '분석 요청 중 오류가 발생했습니다.');
         state.report = data;
-        renderReport(data);
+        renderRichReport(data);
       } catch (error) {
-        setError(error.message || '분석 요청 중 오류가 발생했습니다.');
+        const detail = error.message || '분석 요청 중 오류가 발생했습니다.';
+        setError(detail);
+        renderIssue(detail);
       } finally {
         button.textContent = '분석';
         updateAnalyzeButton();
@@ -5030,9 +5779,16 @@ PAGE_HTML = r"""<!doctype html>
       return headers;
     }
 
+    function syncDraftFromAdminForm() {
+      state.draftGoal = state.draftGoal || blankGoal();
+      const nameInput = document.getElementById('admin-goal-name');
+      const kmInput = document.getElementById('admin-km-input');
+      if (nameInput) state.draftGoal.name = nameInput.value.trim();
+      if (kmInput) state.draftGoal.K_m = Number(kmInput.value || state.draftGoal.K_m || 10);
+    }
+
     async function saveGoal() {
-      state.draftGoal.name = document.getElementById('admin-goal-name').value.trim();
-      state.draftGoal.K_m = Number(document.getElementById('admin-km-input').value || 10);
+      syncDraftFromAdminForm();
       try {
         const response = await fetch('/api/admin/goals', {
           method: 'POST',
@@ -5087,6 +5843,14 @@ PAGE_HTML = r"""<!doctype html>
       document.getElementById('admin-token-input').addEventListener('input', event => {
         state.adminToken = event.target.value;
       });
+      document.getElementById('admin-goal-name').addEventListener('input', event => {
+        state.draftGoal = state.draftGoal || blankGoal();
+        state.draftGoal.name = event.target.value;
+      });
+      document.getElementById('admin-km-input').addEventListener('input', event => {
+        state.draftGoal = state.draftGoal || blankGoal();
+        state.draftGoal.K_m = Number(event.target.value || state.draftGoal.K_m || 10);
+      });
       document.getElementById('goal-select').addEventListener('change', event => {
         state.selectedGoalId = event.target.value;
         state.draftGoal = clone(goalById(state.selectedGoalId) || blankGoal());
@@ -5113,7 +5877,20 @@ PAGE_HTML = r"""<!doctype html>
         }
         if (axis) state.axisMapping[axis] = event.target.value;
         state.report = null;
+        state.tuning = null;
+        state.tuningReportKey = '';
         renderMapping();
+      });
+      document.getElementById('report-content').addEventListener('input', event => {
+        if (!event.target.dataset.tuneField) return;
+        updateTuningFromInput(event.target);
+        refreshTuningOutput(state.report);
+      });
+      document.getElementById('report-content').addEventListener('click', event => {
+        if (event.target.id !== 'reset-tuning' || !state.report) return;
+        state.tuning = null;
+        state.tuningReportKey = '';
+        renderRichReport(state.report);
       });
       document.getElementById('run-analysis').addEventListener('click', runAnalysis);
       document.getElementById('admin-goal-select').addEventListener('change', event => {
@@ -5125,6 +5902,7 @@ PAGE_HTML = r"""<!doctype html>
         renderAdmin();
       });
       document.getElementById('axis-add-button').addEventListener('click', () => {
+        syncDraftFromAdminForm();
         state.draftGoal.axes.push(blankAxis());
         renderAdmin();
       });
@@ -5138,6 +5916,7 @@ PAGE_HTML = r"""<!doctype html>
       document.getElementById('axis-editor').addEventListener('click', event => {
         const index = event.target.dataset.axisRemove;
         if (index === undefined) return;
+        syncDraftFromAdminForm();
         state.draftGoal.axes.splice(Number(index), 1);
         if (state.draftGoal.axes.length === 0) state.draftGoal.axes.push(blankAxis());
         renderAdmin();

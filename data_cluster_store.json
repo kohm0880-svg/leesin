@@ -148,6 +148,27 @@
       "createdAt": "2026-04-28T12:33:59.173283+00:00",
       "fingerprint": "e28911418d099579d3b10c0f30bb3f40078c96e5ca7d499647beb0f2b060f81b",
       "storagePolicy": "sanitized_numeric_axis_vector"
+    },
+    {
+      "id": "cluster_1a57b7cef5f2405295e2e24ec05e28c2",
+      "goalId": "goal_vacuum",
+      "goalName": "진공 유지 품질 인증",
+      "axisNames": [
+        "vacuum_level",
+        "hold_time",
+        "leak_rate"
+      ],
+      "axisSignature": "vacuum_level|hold_time|leak_rate",
+      "values": [
+        49.0,
+        130.0,
+        3.1
+      ],
+      "rowCount": 3,
+      "primaryKey": "진공 유지 품질 인증",
+      "createdAt": "2026-04-28T13:31:52.177625+00:00",
+      "fingerprint": "3378a5fca80ccec33e07a1dbcbad98a3d346c3dc13ebf669e7a1fd6c99b10da8",
+      "storagePolicy": "sanitized_numeric_axis_vector"
     }
   ]
 }
