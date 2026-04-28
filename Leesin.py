@@ -508,7 +508,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
         "stateShape": {
             "admin": ["selectedGoalId", "draftGoal"],
-            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping", "primaryKey"],
+            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping"],
             "report": ["status", "result", "meta", "summary", "confidenceReasons"],
         },
         "componentStructure": {
@@ -912,7 +912,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         },
         "stateShape": {
             "admin": ["selectedGoalId", "draftGoal"],
-            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping", "primaryKey"],
+            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping"],
             "report": ["status", "result", "meta", "summary", "confidenceReasons"],
         },
         "componentStructure": {
@@ -1048,9 +1048,7 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("분석할 Axis 목록은 list 형태여야 합니다.")
     selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
 
-    primary_key = str(payload.get("primaryKey", "")).strip()
-    if primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
-        raise ValueError("Primary Key는 분석에 포함된 축 중 하나여야 합니다.")
+    primary_key = goal["name"]
 
     config = ExperimentConfig(
         axis_names=[axis["name"] for axis in selected_goal["axes"]],
@@ -4030,7 +4028,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         },
         "stateShape": {
             "admin": ["selectedGoalId", "draftGoal"],
-            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping", "primaryKey"],
+            "user": ["selectedGoalId", "fileName", "headers", "rows", "selectedAxes", "axisMapping"],
             "report": ["status", "result", "meta", "summary", "confidenceReasons", "savedDataCluster"],
         },
     }
@@ -4181,8 +4179,8 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("분석할 Axis 목록은 list 형태여야 합니다.")
     selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
 
-    primary_key = str(payload.get("primaryKey", "")).strip()
-    if primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
+    primary_key = goal["name"]
+    if False and primary_key not in [axis["name"] for axis in selected_goal["axes"]]:
         raise ValueError("Primary Key는 분석에 포함된 축 중 하나여야 합니다.")
 
     config = ExperimentConfig(
@@ -4207,7 +4205,7 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     summary = build_summary(result)
-    summary.append(f"Primary Key는 '{primary_key}'로 기록했고, Peer Group은 저장된 군집과 비식별 예제 군집에서 자동 매칭했습니다.")
+    summary.append(f"Primary 기준은 Experiment Goal '{primary_key}'이며, Peer Group은 저장된 군집과 비식별 예제 군집에서 자동 매칭했습니다.")
     if saved_cluster:
         saved_status = "새 군집으로 저장했습니다" if saved_cluster_is_new else "이미 저장된 군집이라 중복 저장하지 않았습니다"
         summary.append(f"업로드 원본은 저장하지 않고 axis 숫자 벡터만 {saved_status}.")
@@ -4385,7 +4383,7 @@ PAGE_HTML = r"""<!doctype html>
     }
     .mapper-head, .mapping-row {
       display: grid;
-      grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 92px;
+      grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr);
       gap: 10px;
       align-items: center;
     }
@@ -4411,19 +4409,10 @@ PAGE_HTML = r"""<!doctype html>
       font-weight: 700;
       letter-spacing: 0;
     }
-    .axis-toggle input, .primary-choice input {
+    .axis-toggle input {
       width: auto;
       min-height: auto;
       accent-color: var(--teal);
-    }
-    .primary-choice {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 7px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
     }
     .error {
       display: none;
@@ -4565,7 +4554,6 @@ PAGE_HTML = r"""<!doctype html>
         grid-template-columns: 1fr;
       }
       .topbar { align-items: flex-start; }
-      .primary-choice { justify-content: flex-start; }
       .score.hero strong { font-size: 48px; }
     }
   </style>
@@ -4600,7 +4588,7 @@ PAGE_HTML = r"""<!doctype html>
           </div>
         </div>
         <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
-        <div class="mapper-head"><span>Axis</span><span>업로드 컬럼</span><span>Primary</span></div>
+        <div class="mapper-head"><span>Axis</span><span>업로드 컬럼</span></div>
         <div id="mapping-box"></div>
         <div class="hint" id="mapper-hint">파일을 업로드하면 매핑을 확인할 수 있습니다.</div>
         <div class="error" id="user-error-box"></div>
@@ -4668,7 +4656,6 @@ PAGE_HTML = r"""<!doctype html>
       rows: [],
       selectedAxes: {},
       axisMapping: {},
-      primaryKey: '',
       report: null,
       draftGoal: null,
     };
@@ -4723,7 +4710,6 @@ PAGE_HTML = r"""<!doctype html>
     function resetSelection(goal, keepRows = true) {
       state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
       state.axisMapping = buildSuggestedMapping(goal, state.headers);
-      state.primaryKey = goal?.axes?.[0]?.name || '';
       if (!keepRows) {
         state.fileName = '';
         state.headers = [];
@@ -4809,9 +4795,6 @@ PAGE_HTML = r"""<!doctype html>
       const selected = selectedAxes(goal);
       if (selected.length === 0) return '분석에 포함할 Axis를 하나 이상 체크하세요.';
       if (state.rows.length === 0) return 'CSV/TSV 파일을 먼저 업로드하세요.';
-      if (!state.primaryKey || !selected.some(axis => axis.name === state.primaryKey)) {
-        return 'Primary Key를 분석에 포함된 Axis 중 하나로 선택하세요.';
-      }
       const mapped = [];
       for (const axis of selected) {
         const header = state.axisMapping[axis.name];
@@ -4882,10 +4865,6 @@ PAGE_HTML = r"""<!doctype html>
               <option value="">컬럼 선택</option>
               ${state.headers.map(header => `<option value="${escapeHtml(header)}" ${state.axisMapping[axis.name] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}
             </select>
-          </label>
-          <label class="primary-choice">
-            <input type="radio" name="primary-key" value="${escapeHtml(axis.name)}" ${state.primaryKey === axis.name ? 'checked' : ''} ${state.selectedAxes[axis.name] ? '' : 'disabled'}>
-            선택
           </label>
         </div>
       `).join('');
@@ -4968,8 +4947,6 @@ PAGE_HTML = r"""<!doctype html>
         state.headers = parsed.headers;
         state.rows = parsed.rows;
         state.axisMapping = buildSuggestedMapping(goal, parsed.headers);
-        const selected = selectedAxes(goal);
-        state.primaryKey = selected[0]?.name || '';
         state.report = null;
         setError('');
         document.getElementById('report-content').className = 'empty';
@@ -5005,7 +4982,6 @@ PAGE_HTML = r"""<!doctype html>
             rows: state.rows,
             selectedAxes: selectedAxisNames(goal),
             axisMapping: state.axisMapping,
-            primaryKey: state.primaryKey,
           }),
         });
         const data = await response.json();
@@ -5134,13 +5110,8 @@ PAGE_HTML = r"""<!doctype html>
         const axis = event.target.dataset.axisMap;
         if (toggle) {
           state.selectedAxes[toggle] = event.target.checked;
-          const goal = goalById(state.selectedGoalId);
-          if (!state.selectedAxes[state.primaryKey]) {
-            state.primaryKey = selectedAxes(goal)[0]?.name || '';
-          }
         }
         if (axis) state.axisMapping[axis] = event.target.value;
-        if (event.target.name === 'primary-key') state.primaryKey = event.target.value;
         state.report = null;
         renderMapping();
       });
