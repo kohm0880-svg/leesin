@@ -7,6 +7,7 @@ import itertools
 import json
 import math
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 try:
     import numpy as np
     from numpy.linalg import LinAlgError, pinv
+    import psycopg2
     from scipy import stats
     from sklearn.covariance import LedoitWolf
 except ModuleNotFoundError as exc:
@@ -34,6 +36,123 @@ K_M = 10.0
 STORE_DIR = Path(os.environ.get("LEESIN_STORE_DIR", Path(__file__).parent)).resolve()
 GOAL_STORE_PATH = STORE_DIR / "goal_store.json"
 CLUSTER_STORE_PATH = STORE_DIR / "data_cluster_store.json"
+
+DB_TABLE_NAME = os.environ.get("LEESIN_DB_TABLE", "leesin_contents").strip() or "leesin_contents"
+DB_KEY_GOALS = "goal_store"
+DB_KEY_CLUSTERS = "cluster_store"
+
+
+def _db_enabled() -> bool:
+    url = os.environ.get("DATABASE_URL")
+    return bool(url and url.strip())
+
+
+def _db_connect() -> "psycopg2.extensions.connection":
+    # Requirement: connect using os.environ["DATABASE_URL"].
+    return psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=5)
+
+
+def init_database() -> None:
+    """Ensure the Postgres table exists (no-op if DATABASE_URL is not set)."""
+    if not _db_enabled():
+        return
+    last_exc: Exception | None = None
+    for attempt in range(12):
+        try:
+            conn = _db_connect()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS {DB_TABLE_NAME} (
+                                id SERIAL PRIMARY KEY,
+                                content TEXT
+                            )
+                            """
+                        )
+            finally:
+                conn.close()
+            return
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(min(2.5, 0.5 + attempt * 0.2))
+    if last_exc:
+        raise last_exc
+
+
+def db_insert_content(content: str) -> int:
+    """Insert raw content into the DB table and return the new id."""
+    if not _db_enabled():
+        raise RuntimeError("DATABASE_URL is not configured.")
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {DB_TABLE_NAME} (content) VALUES (%s) RETURNING id",
+                    (content,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def db_select_content(limit: int = 100) -> list[tuple[int, str]]:
+    """Return the most recent rows as (id, content)."""
+    if not _db_enabled():
+        raise RuntimeError("DATABASE_URL is not configured.")
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id, content FROM {DB_TABLE_NAME} ORDER BY id DESC LIMIT %s",
+                    (int(limit),),
+                )
+                rows = cur.fetchall()
+                return [(int(row[0]), "" if row[1] is None else str(row[1])) for row in rows]
+    finally:
+        conn.close()
+
+
+def _db_store_key_pattern(key: str) -> str:
+    # We store envelopes as JSON with a stable "key" field, so LIKE on text works.
+    return f'%\"key\":\"{key}\"%'
+
+
+def db_insert_store_payload(key: str, payload: Any) -> int:
+    """Store a JSON envelope (key + payload) in DB and return its row id."""
+    envelope = {"key": key, "payload": payload}
+    content = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    return db_insert_content(content)
+
+
+def db_select_latest_store_payload(key: str) -> Any | None:
+    """Load the latest payload for a store key, or None if not found."""
+    if not _db_enabled():
+        return None
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT content FROM {DB_TABLE_NAME} WHERE content LIKE %s ORDER BY id DESC LIMIT 1",
+                    (_db_store_key_pattern(key),),
+                )
+                row = cur.fetchone()
+                if not row or row[0] is None:
+                    return None
+                try:
+                    envelope = json.loads(str(row[0]))
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(envelope, dict) or envelope.get("key") != key:
+                    return None
+                return envelope.get("payload")
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -415,10 +534,18 @@ def _default_goal_payload() -> list[dict[str, Any]]:
 
 
 def load_goal_store() -> list[dict[str, Any]]:
-    if GOAL_STORE_PATH.exists():
-        raw_goals = json.loads(GOAL_STORE_PATH.read_text(encoding="utf-8"))
-    else:
-        raw_goals = _default_goal_payload()
+    raw_goals: Any | None = None
+    if _db_enabled():
+        raw_goals = db_select_latest_store_payload(DB_KEY_GOALS)
+
+    if raw_goals is None:
+        if GOAL_STORE_PATH.exists():
+            raw_goals = json.loads(GOAL_STORE_PATH.read_text(encoding="utf-8"))
+        else:
+            raw_goals = _default_goal_payload()
+        if _db_enabled():
+            # Seed DB from existing file/defaults so future loads don't depend on local disk.
+            db_insert_store_payload(DB_KEY_GOALS, raw_goals)
 
     normalized_goals: list[dict[str, Any]] = []
     for goal in raw_goals:
@@ -436,6 +563,9 @@ def load_goal_store() -> list[dict[str, Any]]:
 
 
 def save_goal_store(goals: list[dict[str, Any]]) -> None:
+    if _db_enabled():
+        db_insert_store_payload(DB_KEY_GOALS, goals)
+        return
     GOAL_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     GOAL_STORE_PATH.write_text(json.dumps(goals, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -4203,9 +4333,19 @@ def normalize_goals_for_display(goals: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def load_cluster_store() -> list[dict[str, Any]]:
-    if not CLUSTER_STORE_PATH.exists():
-        return []
-    raw = json.loads(CLUSTER_STORE_PATH.read_text(encoding="utf-8"))
+    raw: Any | None = None
+    if _db_enabled():
+        raw = db_select_latest_store_payload(DB_KEY_CLUSTERS)
+
+    if raw is None:
+        if not CLUSTER_STORE_PATH.exists():
+            if _db_enabled():
+                db_insert_store_payload(DB_KEY_CLUSTERS, {"version": 1, "clusters": []})
+            return []
+        raw = json.loads(CLUSTER_STORE_PATH.read_text(encoding="utf-8"))
+        if _db_enabled():
+            # Seed DB from existing file so future loads don't depend on local disk.
+            db_insert_store_payload(DB_KEY_CLUSTERS, raw)
     raw_clusters = raw.get("clusters", raw if isinstance(raw, list) else [])
     clusters: list[dict[str, Any]] = []
     for item in raw_clusters:
@@ -4235,12 +4375,15 @@ def load_cluster_store() -> list[dict[str, Any]]:
 
 
 def save_cluster_store(clusters: list[dict[str, Any]]) -> None:
-    CLUSTER_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
         "privacy": "Stores only mapped numeric axis vectors, row counts, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
         "clusters": clusters,
     }
+    if _db_enabled():
+        db_insert_store_payload(DB_KEY_CLUSTERS, payload)
+        return
+    CLUSTER_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CLUSTER_STORE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -4313,6 +4456,11 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
             peer_counts[goal["id"]] = 0
         peer_subset_counts[goal["id"]] = peer_group_subset_counts(goal)
     admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
+    storage_backend = "postgresql" if _db_enabled() else "file"
+    goal_store_label = f"{DB_TABLE_NAME} (key: {DB_KEY_GOALS})" if _db_enabled() else storage_label(GOAL_STORE_PATH)
+    cluster_store_label = (
+        f"{DB_TABLE_NAME} (key: {DB_KEY_CLUSTERS})" if _db_enabled() else storage_label(CLUSTER_STORE_PATH)
+    )
     return {
         "adminAllowed": admin_allowed,
         "adminAuthRequired": admin_auth_required,
@@ -4321,9 +4469,10 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "peerSubsetCounts": peer_subset_counts,
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
         "storage": {
-            "storeDir": storage_label(STORE_DIR),
-            "goalStoreFile": storage_label(GOAL_STORE_PATH),
-            "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
+            "backend": storage_backend,
+            "storeDir": "PostgreSQL (DATABASE_URL)" if _db_enabled() else storage_label(STORE_DIR),
+            "goalStoreFile": goal_store_label,
+            "clusterStoreFile": cluster_store_label,
             "clusterCount": len(load_cluster_store()),
             "demoPeerGroupEnabled": use_demo_peer_group(),
             "savedItems": ["Experiment Goal 설정", "비식별 numeric 데이터 군집"],
@@ -5047,7 +5196,7 @@ PAGE_HTML = r"""<!doctype html>
     <div class="modal-head">
       <div>
         <strong>Admin Setup</strong>
-        <div class="small">Goal 저장은 서버의 goal_store.json 파일에 기록됩니다.</div>
+        <div class="small">Goal 설정은 서버 저장소(PostgreSQL 또는 파일)에 기록됩니다.</div>
       </div>
       <button class="ghost" id="settings-close" type="button">닫기</button>
     </div>
@@ -5966,7 +6115,21 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json(build_bootstrap_payload(admin_allowed=self._admin_allowed()))
             return
         if parsed.path == "/health":
-            self._send_json({"status": "ok"})
+            if _db_enabled():
+                try:
+                    conn = _db_connect()
+                    try:
+                        with conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT 1")
+                    finally:
+                        conn.close()
+                except Exception:
+                    self._send_json({"status": "error", "db": "unavailable"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                self._send_json({"status": "ok", "db": "ok"})
+                return
+            self._send_json({"status": "ok", "db": "disabled"})
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -6046,6 +6209,7 @@ def main() -> None:
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     args = parser.parse_args()
+    init_database()
     run_server(args.host, args.port)
 
 
