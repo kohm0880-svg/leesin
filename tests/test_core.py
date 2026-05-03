@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+
+import app
+import storage
+from models import ExperimentConfig
+from stats_engine import DataQualityAnalyzer
+
+
+def axis(name: str) -> dict:
+    return {"name": name, "unit": "", "domainMin": 0.0, "domainMax": 10.0, "resolution": 1.0}
+
+
+class CoreBehaviorTests(unittest.TestCase):
+    def test_csv_rows_become_one_cluster_vector(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        rows = [{"x_col": "1", "y_col": "10"}, {"x_col": "3", "y_col": "14"}]
+        vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
+        self.assertEqual(meta["row_count"], 2)
+        np.testing.assert_allclose(vector, np.array([2.0, 12.0]))
+
+    def test_same_axes_different_goal_id_are_separated(self) -> None:
+        clusters = [
+            {"id": "a1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 2], "rowCount": 2},
+            {"id": "b1", "goalId": "goal_b", "axisNames": ["x", "y"], "values": [9, 8], "rowCount": 2},
+        ]
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        with patch("storage.load_cluster_store", return_value=clusters):
+            peers = storage.get_peer_group(goal, ["x", "y"])
+        np.testing.assert_allclose(peers, np.array([[1.0, 2.0]]))
+
+    def test_same_goal_and_axis_signature_match_peer_group(self) -> None:
+        clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 2], "rowCount": 2}]
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        with patch("storage.load_cluster_store", return_value=clusters):
+            peers = storage.get_peer_group(goal, ["x", "y"])
+        self.assertEqual(peers.shape, (1, 2))
+
+    def test_selected_axis_subset_uses_same_goal_clusters(self) -> None:
+        clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["a", "b", "c"], "values": [1, 2, 3], "rowCount": 2}]
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("a"), axis("b"), axis("c")]}
+        with patch("storage.load_cluster_store", return_value=clusters):
+            peers = storage.get_peer_group(goal, ["a", "c"])
+        np.testing.assert_allclose(peers, np.array([[1.0, 3.0]]))
+
+    def test_coverage_occupied_bins_do_not_exceed_peer_count(self) -> None:
+        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
+        analyzer = DataQualityAnalyzer(config)
+        peers = np.array([[1, 1], [2, 2], [2.1, 2.1], [3, 3]], dtype=float)
+        analyzer.add_peers(peers)
+        self.assertLessEqual(analyzer._grid.occupied_bins, len(peers))
+
+    def test_heterogeneity_increases_with_d2(self) -> None:
+        config = ExperimentConfig(["x", "y"], [(-10, 10), (-10, 10)], [1, 1])
+        peers = np.array(
+            [
+                [0, 0],
+                [1, 0],
+                [-1, 0],
+                [0, 1],
+                [0, -1],
+                [1, 1],
+                [-1, -1],
+                [1, -1],
+                [-1, 1],
+                [0.5, 0.2],
+                [-0.4, 0.3],
+                [0.2, -0.6],
+            ],
+            dtype=float,
+        )
+        analyzer = DataQualityAnalyzer(config)
+        analyzer.add_peers(peers)
+        near = analyzer.diagnose([0.1, 0.1])
+        far = analyzer.diagnose([4, 4])
+        self.assertGreater(far.D2, near.D2)
+        self.assertGreater(far.heterogeneity, near.heterogeneity)
+
+    def test_non_numeric_value_reports_row_and_axis(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
+        with self.assertRaisesRegex(ValueError, "Row 2.*axis 'x'.*bad"):
+            app.build_cluster_vector([{"x_col": "bad"}], {"x": "x_col"}, goal)
+
+
+if __name__ == "__main__":
+    unittest.main()
