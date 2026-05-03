@@ -22,6 +22,9 @@ class CoreBehaviorTests(unittest.TestCase):
         vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
         self.assertEqual(meta["row_count"], 2)
         np.testing.assert_allclose(vector, np.array([2.0, 12.0]))
+        self.assertEqual(meta["values_mean"], [2.0, 12.0])
+        self.assertEqual(meta["values_variance"], [2.0, 8.0])
+        self.assertEqual(meta["values_std"], [1.414213562373, 2.828427124746])
 
     def test_same_axes_different_goal_id_are_separated(self) -> None:
         clusters = [
@@ -39,6 +42,9 @@ class CoreBehaviorTests(unittest.TestCase):
         with patch("storage.load_cluster_store", return_value=clusters):
             peers = storage.get_peer_group(goal, ["x", "y"])
         self.assertEqual(peers.shape, (1, 2))
+
+    def test_demo_peer_group_default_is_disabled(self) -> None:
+        self.assertFalse(storage.use_demo_peer_group())
 
     def test_selected_axis_subset_uses_same_goal_clusters(self) -> None:
         clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["a", "b", "c"], "values": [1, 2, 3], "rowCount": 2}]
@@ -84,6 +90,61 @@ class CoreBehaviorTests(unittest.TestCase):
         goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
         with self.assertRaisesRegex(ValueError, "Row 2.*axis 'x'.*bad"):
             app.build_cluster_vector([{"x_col": "bad"}], {"x": "x_col"}, goal)
+
+    def test_batch_analysis_uses_only_preexisting_peer_group(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        clusters = [
+            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
+            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
+            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
+        ]
+        payload = {
+            "goalId": "goal_a",
+            "selectedAxes": ["x", "y"],
+            "files": [
+                {"displayName": "a.csv", "axisMapping": {"x": "x", "y": "y"}, "rows": [{"x": "4", "y": "4"}]},
+                {"displayName": "b.csv", "axisMapping": {"x": "x", "y": "y"}, "rows": [{"x": "5", "y": "5"}]},
+            ],
+        }
+        with patch("app.load_goal_store", return_value=[goal]), patch("storage.load_cluster_store", return_value=clusters), patch("app.load_cluster_store", return_value=clusters):
+            result = app.analyze_batch_request(payload)
+        self.assertEqual([item["analysisSummary"]["peer_group_size"] for item in result["items"]], [3, 3])
+
+    def test_current_reevaluation_excludes_self_from_peer_group(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        clusters = [
+            {"id": "target", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [4, 4], "rowCount": 1},
+            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
+            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
+            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
+        ]
+        with patch("app.load_goal_store", return_value=[goal]), patch("storage.load_cluster_store", return_value=clusters), patch("app.load_cluster_store", return_value=clusters):
+            result = app.reevaluate_cluster("target")
+        self.assertEqual(result["currentPeerGroupSize"], 3)
+
+    def test_out_of_domain_warning_is_reported(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        clusters = [
+            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
+            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
+            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
+        ]
+        with patch("storage.load_cluster_store", return_value=clusters):
+            result = app.run_vector_analysis(goal, goal, np.array([11.0, 2.0]))
+        self.assertEqual(result["resultPayload"]["outOfDomainWarningCount"], 1)
+        self.assertEqual(result["resultPayload"]["outOfDomainWarnings"][0]["role"], "target")
+
+    def test_export_json_and_csv_are_download_payloads(self) -> None:
+        report = {
+            "meta": {"experiment_goal": "A", "goal_id": "goal_a", "axis_names": ["x"], "peer_group_size": 3},
+            "result": {"engine": "spatial_rank", "confidence": 0.5, "heterogeneity": 0.1},
+            "summary": ["ok"],
+        }
+        exported_json = app.export_report_request({"format": "json", "report": report})
+        exported_csv = app.export_report_request({"format": "csv", "report": report})
+        self.assertTrue(exported_json["filename"].endswith(".json"))
+        self.assertTrue(exported_csv["filename"].endswith(".csv"))
+        self.assertIn("experiment_goal", exported_csv["content"])
 
 
 if __name__ == "__main__":

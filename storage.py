@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import itertools
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,93 @@ SAMPLE_PEER_LIBRARY = {
         [58.0, 150.0, 1.4],
     ],
 }
+
+
+ANALYSIS_AT_UPLOAD_KEYS = {
+    "analysisTimestamp": None,
+    "peerGroupSize": None,
+    "engine": None,
+    "isNormal": None,
+    "center": None,
+    "D2": None,
+    "pValue": None,
+    "heterogeneity": None,
+    "confidence": None,
+    "sampleSizeZ": None,
+    "coverageC": None,
+    "equitabilityE": None,
+    "wEff": None,
+    "totalBins": None,
+    "occupiedBins": None,
+    "contributions": None,
+    "mardiaSkewStat": None,
+    "mardiaSkewPval": None,
+    "mardiaKurtStat": None,
+    "mardiaKurtPval": None,
+    "b2p": None,
+    "outOfDomainWarnings": [],
+}
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_optional_float_list(values: Any, size: int, default: float | None = None) -> list[float | None]:
+    if not isinstance(values, list) or len(values) != size:
+        return [default for _ in range(size)]
+    normalized: list[float | None] = []
+    for value in values:
+        if value is None:
+            normalized.append(None)
+        else:
+            try:
+                normalized.append(float(value))
+            except (TypeError, ValueError):
+                normalized.append(default)
+    return normalized
+
+
+def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
+    source = snapshot if isinstance(snapshot, dict) else {}
+    normalized = dict(ANALYSIS_AT_UPLOAD_KEYS)
+    normalized["outOfDomainWarnings"] = []
+    aliases = {
+        "p_value": "pValue",
+        "sample_size_Z": "sampleSizeZ",
+        "coverage_C": "coverageC",
+        "equitability_E": "equitabilityE",
+        "w_eff": "wEff",
+        "mardia_skew_stat": "mardiaSkewStat",
+        "mardia_skew_pval": "mardiaSkewPval",
+        "mardia_kurt_stat": "mardiaKurtStat",
+        "mardia_kurt_pval": "mardiaKurtPval",
+        "is_normal": "isNormal",
+    }
+    for key, value in source.items():
+        normalized[aliases.get(key, key)] = value
+    if not isinstance(normalized.get("outOfDomainWarnings"), list):
+        normalized["outOfDomainWarnings"] = []
+    return normalized
+
+
+def cluster_fingerprint_payload(record: dict[str, Any]) -> dict[str, Any]:
+    axis_names = [str(name) for name in record.get("axisNames", [])]
+    values = [round(float(value), 12) for value in record.get("values", [])]
+    goal_id = str(record.get("goalId", ""))
+    return {
+        "goalId": goal_id,
+        "peerGroupKey": str(record.get("peerGroupKey") or peer_group_key(goal_id, axis_names)),
+        "axisNames": axis_names,
+        "values": values,
+        "rowCount": int(record.get("rowCount", 1) or 1),
+        "summaryMethod": str(record.get("summaryMethod") or "mean"),
+    }
+
+
+def cluster_fingerprint(record: dict[str, Any]) -> str:
+    payload = cluster_fingerprint_payload(record)
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _db_enabled() -> bool:
@@ -273,7 +362,12 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             return None
         goal_id = str(item["goalId"])
         signature = axis_subset_key(axis_names)
-        return {
+        row_count = int(item.get("rowCount", 1) or 1)
+        summary_method = str(item.get("summaryMethod") or item.get("summary_method") or "mean")
+        created_at = str(item.get("createdAt") or item.get("uploadedAt") or utc_now_iso())
+        uploaded_at = str(item.get("uploadedAt") or created_at)
+        analysis = normalize_analysis_snapshot(item.get("analysisAtUpload"))
+        normalized = {
             "id": str(item.get("id") or f"cluster_{os.urandom(8).hex()}"),
             "goalId": goal_id,
             "goalName": str(item.get("goalName", "")),
@@ -281,11 +375,37 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "axisSignature": signature,
             "peerGroupKey": str(item.get("peerGroupKey") or peer_group_key(goal_id, axis_names)),
             "values": values,
-            "rowCount": int(item.get("rowCount", 1)),
-            "createdAt": str(item.get("createdAt", "")),
-            "fingerprint": str(item.get("fingerprint", "")),
+            "valuesMean": normalize_optional_float_list(item.get("valuesMean", values), len(values), None),
+            "valuesVariance": normalize_optional_float_list(item.get("valuesVariance"), len(values), None),
+            "valuesStd": normalize_optional_float_list(item.get("valuesStd"), len(values), None),
+            "rowCount": row_count,
+            "createdAt": created_at,
+            "uploadedAt": uploaded_at,
+            "sourceBatchId": item.get("sourceBatchId") or item.get("source_batch_id"),
+            "summaryMethod": summary_method,
             "storagePolicy": "sanitized_numeric_axis_vector",
+            "analysisAtUpload": analysis,
+            "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
+            "engineAtUpload": analysis.get("engine"),
+            "heterogeneityAtUpload": analysis.get("heterogeneity"),
+            "confidenceAtUpload": analysis.get("confidence"),
+            "D2AtUpload": analysis.get("D2"),
+            "pValueAtUpload": analysis.get("pValue"),
+            "sampleSizeZAtUpload": analysis.get("sampleSizeZ"),
+            "coverageCAtUpload": analysis.get("coverageC"),
+            "equitabilityEAtUpload": analysis.get("equitabilityE"),
+            "wEffAtUpload": analysis.get("wEff"),
+            "contributionsAtUpload": analysis.get("contributions"),
+            "totalBinsAtUpload": analysis.get("totalBins"),
+            "occupiedBinsAtUpload": analysis.get("occupiedBins"),
+            "mardiaSkewStatAtUpload": analysis.get("mardiaSkewStat"),
+            "mardiaSkewPvalAtUpload": analysis.get("mardiaSkewPval"),
+            "mardiaKurtStatAtUpload": analysis.get("mardiaKurtStat"),
+            "mardiaKurtPvalAtUpload": analysis.get("mardiaKurtPval"),
+            "b2pAtUpload": analysis.get("b2p"),
         }
+        normalized["fingerprint"] = cluster_fingerprint(normalized)
+        return normalized
     except (TypeError, ValueError, KeyError):
         return None
 
@@ -328,7 +448,7 @@ def should_save_data_clusters() -> bool:
 
 
 def use_demo_peer_group() -> bool:
-    return os.environ.get("USE_DEMO_PEER_GROUP", "true").lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("USE_DEMO_PEER_GROUP", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def _extract_selected_values(cluster: dict[str, Any], selected_axis_names: list[str]) -> list[float] | None:
@@ -422,8 +542,9 @@ def save_peer_cluster(record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     normalized = _normalize_cluster(record)
     if normalized is None:
         raise ValueError("Cluster record is invalid.")
+    wanted_payload = cluster_fingerprint_payload(normalized)
     for cluster in clusters:
-        if cluster.get("fingerprint") == normalized["fingerprint"]:
+        if cluster.get("fingerprint") == normalized["fingerprint"] or cluster_fingerprint_payload(cluster) == wanted_payload:
             return cluster, False
     clusters.append(normalized)
     save_cluster_store(clusters)
@@ -456,6 +577,20 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "peerGroupKey": str(cluster.get("peerGroupKey", "")),
         "axisNames": list(cluster.get("axisNames") or []),
         "values": [round(float(value), 6) for value in cluster.get("values", [])],
+        "valuesMean": [None if value is None else round(float(value), 6) for value in cluster.get("valuesMean", [])],
+        "valuesVariance": [None if value is None else round(float(value), 6) for value in cluster.get("valuesVariance", [])],
+        "valuesStd": [None if value is None else round(float(value), 6) for value in cluster.get("valuesStd", [])],
         "rowCount": int(cluster.get("rowCount", 0) or 0),
         "createdAt": str(cluster.get("createdAt", "")),
+        "uploadedAt": str(cluster.get("uploadedAt", cluster.get("createdAt", ""))),
+        "sourceBatchId": cluster.get("sourceBatchId"),
+        "summaryMethod": str(cluster.get("summaryMethod", "mean")),
+        "fingerprint": str(cluster.get("fingerprint", "")),
+        "analysisAtUpload": normalize_analysis_snapshot(cluster.get("analysisAtUpload")),
+        "peerGroupSizeAtUpload": cluster.get("peerGroupSizeAtUpload"),
+        "engineAtUpload": cluster.get("engineAtUpload"),
+        "heterogeneityAtUpload": cluster.get("heterogeneityAtUpload"),
+        "confidenceAtUpload": cluster.get("confidenceAtUpload"),
+        "D2AtUpload": cluster.get("D2AtUpload"),
+        "pValueAtUpload": cluster.get("pValueAtUpload"),
     }

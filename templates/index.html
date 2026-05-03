@@ -5,61 +5,66 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Leesin 데이터 품질 인증</title>
   <style>
-    :root {
-      --bg:#f5f7fa; --surface:#fff; --soft:#eef4f6; --ink:#17212b; --muted:#5f6f7e;
-      --line:#d9e2e8; --teal:#147567; --blue:#315f9f; --gold:#b47b21; --red:#b4473a; --green:#297a4b;
-      --shadow:0 10px 26px rgba(23,33,43,.08);
-    }
+    :root { --bg:#f5f7fb; --surface:#fff; --ink:#17212b; --muted:#667789; --line:#d9e2ea; --soft:#eef5f7; --teal:#147567; --blue:#315f9f; --red:#b4473a; --green:#297a4b; --gold:#b47b21; --shadow:0 12px 30px rgba(23,33,43,.08); }
     * { box-sizing:border-box; }
-    body { margin:0; color:var(--ink); font-family:"Segoe UI","Pretendard",Arial,sans-serif; background:var(--bg); }
-    .page { width:min(1180px, calc(100% - 28px)); margin:18px auto 42px; }
-    .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px; }
-    h1,h2,h3,p { margin-top:0; } h1 { margin-bottom:4px; font-size:28px; letter-spacing:0; }
-    .subtitle,.hint,.meta,.small { color:var(--muted); line-height:1.55; font-size:14px; }
-    .toolbar,.panel,dialog { border:1px solid var(--line); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); }
-    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) minmax(240px,1.1fr) auto auto; gap:12px; align-items:end; padding:14px; }
-    .grid { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(340px,.95fr); gap:14px; margin-top:14px; align-items:start; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:"Segoe UI","Pretendard",Arial,sans-serif; }
+    .page { width:min(1240px, calc(100% - 28px)); margin:18px auto 48px; }
+    .topbar,.panel,.toolbar,dialog { background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+    .topbar { display:flex; justify-content:space-between; gap:16px; padding:18px; margin-bottom:14px; }
+    h1,h2,h3,p { margin-top:0; } h1 { margin-bottom:5px; font-size:28px; }
+    .subtitle,.small,.meta { color:var(--muted); line-height:1.55; font-size:13px; }
+    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) minmax(260px,1.25fr) auto auto auto; gap:12px; align-items:end; padding:14px; }
+    .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(380px,.95fr); gap:14px; align-items:start; margin-top:14px; }
     .panel { padding:16px; }
-    .panel-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; }
-    label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:800; letter-spacing:0; }
-    select,input,button { width:100%; min-height:40px; border:1px solid var(--line); border-radius:8px; padding:9px 11px; background:#fff; color:var(--ink); font:inherit; }
-    input[type="checkbox"] { width:auto; min-height:auto; accent-color:var(--teal); }
+    .panel-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
+    label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:800; }
+    select,input,button { min-height:40px; border:1px solid var(--line); border-radius:9px; padding:9px 11px; background:#fff; color:var(--ink); font:inherit; }
+    input[type="checkbox"] { min-height:auto; accent-color:var(--teal); }
     input[type="range"] { padding:0; accent-color:var(--teal); }
-    button { cursor:pointer; font-weight:800; white-space:nowrap; } button:disabled { cursor:not-allowed; opacity:.55; }
-    .primary { border:0; color:#fff; background:var(--teal); } .secondary { color:var(--blue); background:#eef4fb; } .danger { color:var(--red); background:#fff1ee; } .ghost { color:var(--ink); background:#fff; }
-    .storage,.empty,.pill,.reason,.bar-card { padding:11px 12px; border-radius:8px; background:var(--soft); line-height:1.5; }
-    .storage { display:grid; gap:5px; margin-top:12px; border:1px dashed var(--line); background:#fbfdfe; font-size:13px; }
-    .mapper-head,.mapping-row { display:grid; grid-template-columns:minmax(180px,1fr) minmax(180px,1fr); gap:10px; align-items:center; }
+    button { cursor:pointer; font-weight:800; white-space:nowrap; }
+    button:disabled { cursor:not-allowed; opacity:.55; }
+    .primary { border:0; color:#fff; background:var(--teal); }
+    .secondary { color:var(--blue); background:#eef4fb; }
+    .danger { color:var(--red); background:#fff1ee; }
+    .ghost { color:var(--ink); background:#fff; }
+    .pill,.empty,.notice,.reason,.cluster-item,.batch-item,.axis-card { border-radius:10px; background:var(--soft); padding:11px 12px; line-height:1.5; }
+    .notice { border:1px dashed var(--line); background:#fbfdfe; }
+    .error,.success { display:none; padding:10px 12px; margin-top:10px; border-radius:10px; line-height:1.5; }
+    .error { color:var(--red); background:#fff1ee; border:1px solid #f4c7bd; }
+    .success { color:var(--green); background:#edf8f3; border:1px solid #bfe3d4; }
+    .mapper-head,.mapping-row { display:grid; grid-template-columns:minmax(160px,1fr) minmax(180px,1fr); gap:10px; align-items:center; }
     .mapper-head { margin:10px 0 8px; color:var(--muted); font-size:12px; font-weight:800; }
-    .mapping-row { padding:10px; border:1px solid var(--line); border-radius:8px; background:#fff; margin-bottom:8px; }
-    .axis-toggle { display:flex; align-items:center; gap:8px; color:var(--ink); font-size:14px; font-weight:800; }
-    .error,.success { display:none; margin-top:10px; padding:10px 12px; border-radius:8px; line-height:1.5; }
-    .error { border:1px solid #f4c7bd; background:#fff1ee; color:var(--red); } .success { border:1px solid #bfe3d4; background:#edf8f3; color:var(--green); }
-    .score-grid,.metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-    .metrics { grid-template-columns:repeat(4,minmax(0,1fr)); }
-    .score,.metric { padding:14px; border:1px solid var(--line); border-radius:8px; background:#fff; }
-    .score.hero { border:0; color:#fff; background:var(--teal); } .score small,.metric .small { display:block; margin-bottom:8px; font-weight:800; }
-    .score.hero small,.score.hero .small { color:rgba(255,255,255,.82); }
-    .score strong { display:block; font-size:42px; line-height:1; letter-spacing:0; } .score.hero strong { font-size:62px; }
+    .mapping-row { padding:10px; border:1px solid var(--line); border-radius:10px; background:#fff; margin-bottom:8px; }
+    .axis-toggle { display:flex; align-items:center; gap:8px; color:var(--ink); font-size:14px; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+    .score-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .score,.metric { border:1px solid var(--line); border-radius:12px; padding:14px; background:#fff; }
+    .score.hero { border:0; color:#fff; background:var(--teal); }
+    .score small,.metric .small { display:block; margin-bottom:8px; font-weight:800; }
+    .score strong { display:block; font-size:42px; line-height:1; }
+    .score.hero strong { font-size:58px; }
     .metric strong { display:block; font-size:20px; }
-    .report-body,.tuning-panel,.cluster-list { display:grid; gap:12px; margin-top:12px; }
-    .reason.down { background:#fff1ee; color:var(--red); }
-    .bar-meta { display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; font-size:14px; }
-    .bar-track { height:10px; border-radius:999px; background:#dce5ea; overflow:hidden; } .bar-fill { height:100%; border-radius:inherit; background:var(--gold); }
-    .tuning-panel { padding-top:12px; border-top:1px solid var(--line); }
-    .tuning-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; } .tuning-head button { width:auto; }
-    .tuning-axis,.cluster-item { display:grid; gap:10px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#fff; }
-    .tuning-row { display:grid; grid-template-columns:94px minmax(120px,1fr) 88px; gap:10px; align-items:center; color:var(--muted); font-size:12px; font-weight:800; }
-    .tuning-value { color:var(--ink); font-variant-numeric:tabular-nums; text-align:right; }
-    .mini-svg { width:100%; height:110px; display:block; border:1px solid var(--line); border-radius:8px; background:#fbfdfe; }
-    dialog { width:min(980px, calc(100% - 28px)); padding:0; } dialog::backdrop { background:rgba(23,33,43,.38); }
-    .modal-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line); }
-    .modal-body { display:grid; gap:14px; padding:16px; }
+    .report-body,.cluster-list,.batch-list,.axis-editor { display:grid; gap:12px; margin-top:12px; }
+    .bar-meta { display:flex; justify-content:space-between; gap:10px; margin-bottom:6px; font-size:14px; }
+    .bar-track { height:10px; border-radius:999px; background:#dce5ea; overflow:hidden; }
+    .bar-fill { height:100%; border-radius:inherit; background:var(--gold); }
+    .reason.down { color:var(--red); background:#fff1ee; }
+    .batch-item,.cluster-item { display:grid; gap:8px; border:1px solid var(--line); background:#fff; }
+    .batch-grid { display:grid; grid-template-columns:auto 1.2fr repeat(5,minmax(95px,.6fr)); gap:8px; align-items:center; font-size:13px; }
+    .cluster-actions,.export-actions,.row-actions { display:flex; flex-wrap:wrap; gap:8px; }
+    .cluster-actions button,.export-actions button,.row-actions button,.panel-head button { width:auto; }
+    dialog { width:min(980px, calc(100% - 28px)); padding:0; }
+    dialog::backdrop { background:rgba(23,33,43,.4); }
+    .modal-head { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:14px 16px; border-bottom:1px solid var(--line); }
+    .modal-body { padding:16px; display:grid; gap:14px; }
     .admin-toolbar { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; align-items:end; }
-    .axis-row { display:grid; grid-template-columns:1.1fr .8fr .8fr .8fr .8fr auto; gap:8px; align-items:end; margin-bottom:8px; }
-    @media (max-width:900px) {
-      .toolbar,.grid,.mapper-head,.mapping-row,.score-grid,.metrics,.admin-toolbar,.axis-row,.tuning-row { grid-template-columns:1fr; }
-      .score.hero strong { font-size:48px; }
+    .axis-row { display:grid; grid-template-columns:1fr .65fr .7fr .7fr .7fr auto; gap:8px; align-items:end; }
+    .axis-sliders { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; grid-column:1 / -1; }
+    .tag { display:inline-flex; align-items:center; width:max-content; gap:6px; padding:4px 8px; border-radius:999px; background:#eef4fb; color:var(--blue); font-size:12px; font-weight:800; }
+    .tag.warn { background:#fff1ee; color:var(--red); }
+    @media (max-width:960px) {
+      .topbar,.toolbar,.grid,.mapper-head,.mapping-row,.metrics,.score-grid,.admin-toolbar,.axis-row,.axis-sliders,.batch-grid { grid-template-columns:1fr; }
+      .score.hero strong { font-size:46px; }
     }
   </style>
 </head>
@@ -68,61 +73,93 @@
     <header class="topbar">
       <div>
         <h1>Leesin 데이터 품질 인증</h1>
-        <p class="subtitle">CSV 하나를 하나의 데이터 군집으로 취급하고, row 반복 관측값을 axis별 mean cluster vector로 집계해 같은 Experiment Goal의 Peer Group과 비교합니다.</p>
+        <p class="subtitle">CSV 파일 하나를 하나의 데이터 군집으로 보고, CSV row 반복 관측값을 axis별 Welford mean vector로 요약해 같은 Experiment Goal + Axis Peer Group과 비교합니다.</p>
+        <span id="demo-status" class="tag"></span>
       </div>
-      <button class="ghost" id="settings-button" type="button">설정</button>
+      <button class="ghost" id="settings-button" type="button">설정 / 감사</button>
     </header>
 
     <section class="toolbar">
       <label>Experiment Goal<select id="goal-select"></select></label>
-      <label>Target CSV<input id="file-input" type="file" accept=".csv,.tsv,.txt"></label>
+      <label>CSV / TSV / TXT files<input id="file-input" type="file" accept=".csv,.tsv,.txt" multiple></label>
       <button class="primary" id="run-analysis" type="button" disabled>분석</button>
-      <button class="secondary" id="reset-button" type="button">초기화</button>
+      <button class="secondary" id="save-selected" type="button" disabled>선택 저장</button>
+      <button class="ghost" id="reset-button" type="button">초기화</button>
     </section>
 
     <section class="grid">
       <div class="panel">
-        <div class="panel-head"><div><h2>Column Mapping</h2><p>분석할 axis를 체크하고 CSV column과 1:1로 연결하세요.</p></div></div>
+        <div class="panel-head"><div><h2>Column Mapping</h2><p class="small">각 파일은 독립 cluster입니다. Batch 분석은 저장 전 기존 Peer Group만 기준으로 사용합니다.</p></div></div>
         <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
         <div class="mapper-head"><span>Axis</span><span>CSV Column</span></div>
         <div id="mapping-box"></div>
-        <div class="hint" id="mapper-hint">파일을 업로드하면 mapping을 확인할 수 있습니다.</div>
+        <div class="notice" id="storage-note"></div>
         <div class="error" id="user-error-box"></div>
-        <div class="storage" id="storage-note"></div>
       </div>
+
       <div class="panel" id="report-panel">
-        <div class="panel-head"><div><h2>인증 리포트</h2><p>이질성과 confidence를 분리해서 보여줍니다.</p></div></div>
-        <div id="report-content" class="empty">분석을 실행하면 결과와 감점 원인이 여기에 표시됩니다.</div>
+        <div class="panel-head">
+          <div><h2>분석 리포트</h2><p class="small">이질성(heterogeneity)과 신뢰도(confidence)는 분리 표시됩니다.</p></div>
+          <div class="export-actions">
+            <button class="secondary" data-export="json" type="button" disabled>JSON</button>
+            <button class="secondary" data-export="csv" type="button" disabled>CSV</button>
+            <button class="secondary" data-export="html" type="button" disabled>HTML</button>
+          </div>
+        </div>
+        <div id="report-content" class="empty">분석을 실행하면 결과가 여기에 표시됩니다.</div>
       </div>
+    </section>
+
+    <section class="panel" id="batch-panel" style="display:none;">
+      <div class="panel-head">
+        <div><h2>Batch Upload Preview</h2><p class="small">파일명은 이 화면에서만 임시 표시되며 저장 record에는 포함되지 않습니다.</p></div>
+        <span class="tag" id="batch-id"></span>
+      </div>
+      <div id="batch-list" class="batch-list"></div>
     </section>
   </main>
 
   <dialog id="settings-modal">
     <div class="modal-head">
-      <div><strong>Experiment Goal / 저장 군집 관리</strong><div class="small">Goal과 비식별 cluster vector만 저장됩니다. 원본 CSV는 저장하지 않습니다.</div></div>
+      <div><strong>Experiment Goal / Cluster Audit</strong><div class="small">원본 CSV, 파일명, unmapped column, 개인정보 column은 저장하지 않습니다.</div></div>
       <button class="ghost" id="settings-close" type="button">닫기</button>
     </div>
     <div class="modal-body">
-      <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off" placeholder="Render ADMIN_TOKEN"></label>
+      <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off"></label>
+      <div class="notice" id="demo-note"></div>
       <div class="admin-toolbar">
         <label>Existing Goal<select id="admin-goal-select"></select></label>
         <button class="secondary" id="admin-new-goal" type="button">새 Goal</button>
         <button class="danger" id="admin-delete-goal" type="button">Goal 삭제</button>
       </div>
-      <label>Experiment Goal Name<input id="admin-goal-name" placeholder="예: 진공 유지 품질 인증"></label>
+      <label>Experiment Goal Name<input id="admin-goal-name"></label>
       <div>
-        <h3>Axis</h3>
-        <div id="axis-editor"></div>
+        <h3>Axis editor</h3>
+        <div id="axis-editor" class="axis-editor"></div>
         <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
       </div>
+      <div id="goal-bin-preview" class="notice"></div>
       <button class="primary" id="admin-save-goal" type="button">Goal 저장</button>
       <div>
         <h3>저장된 군집</h3>
-        <div class="small">삭제하면 해당 cluster vector가 Peer Group에서 제외됩니다.</div>
+        <div class="small">삭제 전 영향 분석과 현재 기준 재평가를 확인할 수 있습니다.</div>
         <div id="cluster-list" class="cluster-list"></div>
       </div>
       <div class="success" id="admin-success-box"></div>
       <div class="error" id="admin-error-box"></div>
+    </div>
+  </dialog>
+
+  <dialog id="audit-modal">
+    <div class="modal-head">
+      <div><strong id="audit-title">Cluster Audit</strong><div class="small" id="audit-subtitle"></div></div>
+      <button class="ghost" id="audit-close" type="button">닫기</button>
+    </div>
+    <div class="modal-body">
+      <div id="audit-content"></div>
+      <div class="row-actions">
+        <button class="danger" id="confirm-delete-cluster" type="button" style="display:none;">영향 확인 후 삭제</button>
+      </div>
     </div>
   </dialog>
 
@@ -131,61 +168,48 @@
     const state = {
       goals: bootstrap.goals || [],
       clusters: bootstrap.clusters || [],
+      peerSubsetCounts: bootstrap.peerSubsetCounts || {},
+      goalBinPreview: bootstrap.goalBinPreview || {},
       adminAllowed: Boolean(bootstrap.adminAllowed),
       adminAuthRequired: Boolean(bootstrap.adminAuthRequired),
       adminToken: '',
       selectedGoalId: bootstrap.goals?.[0]?.id || '',
-      fileName: '',
-      headers: [],
-      rows: [],
+      files: [],
       selectedAxes: {},
       axisMapping: {},
       report: null,
+      batch: null,
       draftGoal: null,
-      tuningReportKey: '',
-      tuning: null,
+      pendingDeleteId: '',
     };
 
     const $ = id => document.getElementById(id);
-    function escapeHtml(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-    function goalById(id) { return state.goals.find(goal => goal.id === id) || null; }
-    function clone(value) { return JSON.parse(JSON.stringify(value)); }
-    function blankGoal() { return { id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()] }; }
-    function blankAxis() { return { name:'', unit:'', domainMin:0, domainMax:100, resolution:1 }; }
-    function axisLabel(axis) { return axis.unit ? `${axis.name} (${axis.unit})` : axis.name; }
-    function normalizeKey(value) { return String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣]+/g,''); }
-    function selectedAxes(goal) { return goal ? goal.axes.filter(axis => state.selectedAxes[axis.name]) : []; }
-    function selectedAxisNames(goal) { return selectedAxes(goal).map(axis => axis.name); }
-    function formatNumber(value, decimals=2) { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; }
-    function formatPercent(value, decimals=0) { return `${formatNumber(Number(value)*100, decimals)}%`; }
-    function numberOr(value, fallback) { const n=Number(value); return Number.isFinite(n) ? n : fallback; }
-    function clamp(value, min, max) { return max < min ? min : Math.min(max, Math.max(min, value)); }
+    const escapeHtml = value => String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    const clone = value => JSON.parse(JSON.stringify(value));
+    const goalById = id => state.goals.find(goal => goal.id === id) || null;
+    const blankAxis = () => ({ name:'', unit:'', domainMin:0, domainMax:100, resolution:1 });
+    const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()] });
+    const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
+    const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
+    const axisLabel = axis => axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
+    const normalizeKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣]/g,'');
+    const selectedAxes = goal => goal ? goal.axes.filter(axis => state.selectedAxes[axis.name]) : [];
+    const selectedAxisNames = goal => selectedAxes(goal).map(axis => axis.name);
+    const adminHeaders = () => { const headers = {'Content-Type':'application/json'}; if (state.adminToken) headers['X-Admin-Token']=state.adminToken; return headers; };
 
-    function resetSelection(goal, keepRows=true) {
-      state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
-      state.axisMapping = buildSuggestedMapping(goal, state.headers);
-      if (!keepRows) { state.fileName=''; state.headers=[]; state.rows=[]; }
-      state.report = null; state.tuning = null; state.tuningReportKey = '';
-    }
-
-    function buildSuggestedMapping(goal, headers) {
-      if (!goal || headers.length === 0) return {};
-      const byKey = new Map(headers.map(header => [normalizeKey(header), header]));
-      const used = new Set(); const mapping = {};
-      goal.axes.forEach((axis, index) => {
-        const exact = byKey.get(normalizeKey(axis.name));
-        const fallback = exact && !used.has(exact) ? exact : (headers.find(header => !used.has(header)) || headers[index] || '');
-        mapping[axis.name] = fallback; if (fallback) used.add(fallback);
-      });
-      return mapping;
+    function setError(message) { $('user-error-box').textContent = message || ''; $('user-error-box').style.display = message ? 'block' : 'none'; }
+    function setAdminMessage(kind, message) {
+      $('admin-success-box').style.display='none'; $('admin-error-box').style.display='none';
+      if (!message) return;
+      const box = kind === 'success' ? $('admin-success-box') : $('admin-error-box');
+      box.textContent = message; box.style.display = 'block';
     }
 
     function detectDelimiter(text, fileName) {
-      if (fileName.endsWith('.tsv')) return '\t';
+      if (String(fileName).toLowerCase().endsWith('.tsv')) return '\t';
       const firstLine = text.split(/\r?\n/, 1)[0] || '';
       return firstLine.includes('\t') && !firstLine.includes(',') ? '\t' : ',';
     }
-
     function parseDelimitedText(text, delimiter) {
       const rows=[]; let row=[]; let cell=''; let quoted=false; const clean=text.replace(/^\uFEFF/,'');
       for (let i=0; i<clean.length; i+=1) {
@@ -197,229 +221,403 @@
       }
       row.push(cell.trim()); if (row.some(v => v !== '')) rows.push(row);
       const headers=(rows.shift() || []).map(header => header.trim()).filter(Boolean);
-      const records=rows.map(values => { const record={}; headers.forEach((header, index) => { record[header]=values[index] ?? ''; }); return record; });
+      const records=rows.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ''])));
       return { headers, rows: records };
+    }
+    function buildSuggestedMapping(goal, headers) {
+      if (!goal || !headers.length) return {};
+      const byKey = new Map(headers.map(header => [normalizeKey(header), header]));
+      const used = new Set(); const mapping = {};
+      goal.axes.forEach((axis, index) => {
+        const exact = byKey.get(normalizeKey(axis.name));
+        const fallback = exact && !used.has(exact) ? exact : (headers.find(header => !used.has(header)) || headers[index] || '');
+        mapping[axis.name] = fallback; if (fallback) used.add(fallback);
+      });
+      return mapping;
+    }
+
+    function resetSelection(goal, keepFiles=false) {
+      state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
+      if (!keepFiles) state.files = [];
+      const first = state.files[0];
+      state.axisMapping = first ? buildSuggestedMapping(goal, first.headers) : {};
+      state.report = null; state.batch = null;
+      renderAll();
     }
 
     function validationMessage() {
-      const goal=goalById(state.selectedGoalId);
-      if (!goal) return 'Experiment Goal을 먼저 선택하세요.';
-      const selected=selectedAxes(goal);
-      if (selected.length === 0) return '분석할 Axis를 하나 이상 체크하세요.';
-      if (state.rows.length === 0) return 'CSV/TSV 파일을 먼저 업로드하세요.';
-      const mapped=[];
+      const goal = goalById(state.selectedGoalId);
+      if (!goal) return 'Experiment Goal을 선택하세요.';
+      if (!state.files.length) return 'CSV/TSV/TXT 파일을 업로드하세요.';
+      const selected = selectedAxes(goal);
+      if (!selected.length) return '분석할 Axis를 하나 이상 선택하세요.';
+      const firstHeaders = state.files[0]?.headers || [];
       for (const axis of selected) {
-        const header=state.axisMapping[axis.name];
-        if (!header || !state.headers.includes(header)) return `${axis.name} Axis에 연결할 CSV column을 선택하세요.`;
-        mapped.push(header);
+        const header = state.axisMapping[axis.name];
+        if (!header || !firstHeaders.includes(header)) return `${axis.name} Axis에 연결할 CSV column을 선택하세요.`;
       }
-      if (mapped.length !== new Set(mapped).size) return '하나의 CSV column을 여러 Axis에 중복 연결할 수 없습니다.';
       return '';
     }
-
-    function setError(message) { $('user-error-box').textContent=message || ''; $('user-error-box').style.display=message ? 'block' : 'none'; }
-    function setAdminMessage(kind, message) {
-      $('admin-success-box').style.display='none'; $('admin-error-box').style.display='none';
-      if (!message) return; const box = kind === 'success' ? $('admin-success-box') : $('admin-error-box');
-      box.textContent=message; box.style.display='block';
-    }
-    function adminHeaders() { const headers={'Content-Type':'application/json'}; if (state.adminToken) headers['X-Admin-Token']=state.adminToken; return headers; }
-
-    function updateAnalyzeButton() {
-      const message=validationMessage(); const ready=!message; const button=$('run-analysis');
-      button.disabled=!ready; button.title=ready ? '선택한 mapping으로 분석합니다.' : message;
-      $('mapper-hint').textContent=ready ? 'Mapping이 완료되었습니다. 분석을 누르면 리포트가 갱신됩니다.' : message;
-      if (!ready && state.rows.length > 0) setError(message); if (ready) setError('');
+    function updateButtons() {
+      const message = validationMessage();
+      $('run-analysis').disabled = Boolean(message);
+      $('run-analysis').title = message || '분석 실행';
+      $('save-selected').disabled = !(state.batch?.items || []).some(item => item.saveable && item.selected);
+      document.querySelectorAll('[data-export]').forEach(button => button.disabled = !state.report);
     }
 
     function renderGoalSelects() {
-      const options=state.goals.map(goal => `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.name)}</option>`).join('');
-      $('goal-select').innerHTML=options || '<option value="">Goal 없음</option>'; $('goal-select').value=state.selectedGoalId;
-      $('admin-goal-select').innerHTML=options || '<option value="">Goal 없음</option>'; $('admin-goal-select').value=state.draftGoal?.id || state.selectedGoalId;
+      const options = state.goals.map(goal => `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.name)}</option>`).join('');
+      $('goal-select').innerHTML = options || '<option value="">Goal 없음</option>'; $('goal-select').value = state.selectedGoalId;
+      $('admin-goal-select').innerHTML = options || '<option value="">Goal 없음</option>'; $('admin-goal-select').value = state.draftGoal?.id || state.selectedGoalId;
     }
-
     function renderStorageNote() {
-      const storage=bootstrap.storage || {}; const defs=bootstrap.domainDefinitions || {};
+      const storage = bootstrap.storage || {};
+      $('demo-status').className = storage.demoPeerGroupEnabled ? 'tag warn' : 'tag';
+      $('demo-status').textContent = `Demo Peer Group: ${storage.demoPeerGroupEnabled ? 'ON (개발/시연용)' : 'OFF (기본값)'}`;
       $('storage-note').innerHTML = `
-        <strong>저장 기준</strong>
-        <span>Goal 설정: ${escapeHtml(storage.goalStoreFile || 'goal_store.json')}</span>
-        <span>데이터 군집: ${escapeHtml(storage.clusterStoreFile || 'data_cluster_store.json')}에 axis 숫자 벡터만 저장합니다.</span>
-        <span>${escapeHtml(defs.cluster || '')}</span>
+        <strong>저장 정책</strong><br>
+        저장: ${escapeHtml((storage.savedItems || []).join(', '))}<br>
+        미저장: ${escapeHtml((storage.unsavedItems || []).join(', '))}<br>
+        Demo Peer Group 기본값은 false이며, 현재 ${storage.demoPeerGroupEnabled ? '포함됨' : '포함되지 않음'}.
       `;
+      $('demo-note').innerHTML = `Demo Peer Group은 개발/시연용입니다. 현재 <strong>${storage.demoPeerGroupEnabled ? 'ON' : 'OFF'}</strong>이며 기본값은 false입니다. 실제 인증 기준망에는 기본적으로 섞이지 않습니다.`;
     }
-
     function renderMapping() {
-      const goal=goalById(state.selectedGoalId); const box=$('mapping-box');
-      if (!goal) { box.innerHTML='<div class="empty">등록된 Goal이 없습니다.</div>'; updateAnalyzeButton(); return; }
-      box.innerHTML=goal.axes.map(axis => `
+      const goal = goalById(state.selectedGoalId);
+      const first = state.files[0];
+      $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}` : '아직 업로드된 파일이 없습니다.';
+      if (!goal) { $('mapping-box').innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>'; return; }
+      $('mapping-box').innerHTML = goal.axes.map(axis => `
         <div class="mapping-row">
           <label class="axis-toggle"><input type="checkbox" data-axis-toggle="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] ? 'checked' : ''}><span>${escapeHtml(axisLabel(axis))}</span></label>
-          <label><select data-axis-map="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] && state.headers.length ? '' : 'disabled'}>
+          <label><select data-axis-map="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] && first ? '' : 'disabled'}>
             <option value="">column 선택</option>
-            ${state.headers.map(header => `<option value="${escapeHtml(header)}" ${state.axisMapping[axis.name] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}
+            ${(first?.headers || []).map(header => `<option value="${escapeHtml(header)}" ${state.axisMapping[axis.name] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}
           </select></label>
         </div>`).join('');
-      $('file-meta-box').textContent = state.fileName ? `${state.fileName} · ${state.rows.length} rows · ${state.headers.join(', ')}` : '아직 업로드된 파일이 없습니다.';
-      updateAnalyzeButton();
     }
 
-    function renderAdmin() {
-      state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
-      $('admin-goal-name').value = state.draftGoal.name || '';
-      $('axis-editor').innerHTML = (state.draftGoal.axes || []).map((axis, index) => `
-        <div class="axis-row">
-          <label>Axis<input data-axis-field="name" data-index="${index}" value="${escapeHtml(axis.name || '')}"></label>
-          <label>Unit<input data-axis-field="unit" data-index="${index}" value="${escapeHtml(axis.unit || '')}"></label>
-          <label>Min<input data-axis-field="domainMin" data-index="${index}" type="number" step="any" value="${Number(axis.domainMin ?? 0)}"></label>
-          <label>Max<input data-axis-field="domainMax" data-index="${index}" type="number" step="any" value="${Number(axis.domainMax ?? 100)}"></label>
-          <label>Resolution<input data-axis-field="resolution" data-index="${index}" type="number" step="any" value="${Number(axis.resolution ?? 1)}"></label>
-          <button class="danger" type="button" data-axis-remove="${index}">삭제</button>
+    function renderBatch() {
+      const panel = $('batch-panel');
+      if (!state.batch) { panel.style.display='none'; return; }
+      panel.style.display = '';
+      $('batch-id').textContent = state.batch.sourceBatchId || '';
+      $('batch-list').innerHTML = (state.batch.items || []).map((item, index) => `
+        <div class="batch-item">
+          <div class="batch-grid">
+            <input type="checkbox" data-batch-select="${index}" ${item.selected ? 'checked' : ''} ${item.saveable ? '' : 'disabled'}>
+            <strong>${escapeHtml(item.displayName)}</strong>
+            <span>${escapeHtml(item.rowCount ?? '-')} rows</span>
+            <span>${escapeHtml(item.axisMappingStatus || '-')}</span>
+            <span>${escapeHtml((item.clusterVector || []).map(v => formatNumber(v,4)).join(', ') || '-')}</span>
+            <span>${item.duplicate ? 'duplicate' : 'unique'}</span>
+            <span>${item.saveable ? 'saveable' : 'blocked'}</span>
+          </div>
+          <div class="small">fingerprint: ${escapeHtml(item.fingerprint || '-')}</div>
+          <div class="small">analysis: ${item.analysisSuccess ? `ok · H ${formatPercent(item.analysisSummary?.heterogeneity,1)} · C ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer N ${escapeHtml(item.analysisSummary?.peer_group_size)}` : `failed · peer N ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
         </div>`).join('');
-      renderGoalSelects(); renderClusterList();
-    }
-
-    function renderClusterList() {
-      const clusters=state.clusters || [];
-      $('cluster-list').innerHTML = clusters.length ? clusters.map(cluster => `
-        <div class="cluster-item">
-          <div class="bar-meta"><strong>${escapeHtml(cluster.goalName || cluster.goalId)}</strong><span>${escapeHtml(cluster.rowCount)} rows</span></div>
-          <div class="small">${escapeHtml(cluster.id)} · ${escapeHtml(cluster.peerGroupKey || '')}</div>
-          <div class="small">${escapeHtml((cluster.axisNames || []).join(', '))} = ${escapeHtml((cluster.values || []).map(v => formatNumber(v, 4)).join(', '))}</div>
-          <button class="danger" type="button" data-cluster-delete="${escapeHtml(cluster.id)}">군집 삭제</button>
-        </div>`).join('') : '<div class="empty">저장된 군집이 없습니다.</div>';
-    }
-
-    function renderIssue(message) {
-      $('report-content').className='';
-      $('report-content').innerHTML = `<div class="reason down"><strong>분석을 완료하지 못했습니다</strong><br>${escapeHtml(message)}</div><div class="small">새 Goal은 같은 Experiment Goal과 Axis 구성의 누적 군집이 충분히 쌓이기 전까지 분석이 제한될 수 있습니다.</div>`;
-      $('report-panel').scrollIntoView({ behavior:'smooth', block:'start' });
-    }
-
-    function reportTuningKey(report) { return `${report.meta?.peer_group_key || ''}|${(report.visualizations?.targetVector || []).join('|')}`; }
-    function ensureTuning(report) {
-      const key=reportTuningKey(report); if (state.tuning && state.tuningReportKey === key) return;
-      state.tuningReportKey=key; state.tuning={ axes:(report.meta?.axes || []).map(axis => {
-        const baseMin=numberOr(axis.domainMin,0); const baseMax=numberOr(axis.domainMax,baseMin+1); const baseResolution=Math.max(Math.abs(numberOr(axis.resolution,1)), .000001);
-        return { baseMin, baseMax, baseResolution, domainMin:baseMin, domainMax:baseMax, resolution:baseResolution };
-      })};
-    }
-    function normalizeTuningControl(c) {
-      const span=Math.max(c.baseResolution, c.baseMax-c.baseMin);
-      c.resolution=clamp(numberOr(c.resolution,c.baseResolution), c.baseResolution, span);
-      c.domainMin=clamp(numberOr(c.domainMin,c.baseMin), c.baseMin, c.baseMax-c.resolution);
-      c.domainMax=clamp(numberOr(c.domainMax,c.baseMax), c.domainMin+c.resolution, c.baseMax);
-    }
-    function tunedMetrics(report) {
-      ensureTuning(report); const rows=report.visualizations?.peerRows || []; const controls=state.tuning.axes; controls.forEach(normalizeTuningControl);
-      const binCounts=controls.map(c => Math.max(1, Math.ceil(Math.max(c.resolution,c.domainMax-c.domainMin)/c.resolution)));
-      const totalBins=binCounts.reduce((p,c) => p*c, 1); const occupied=new Map(); let validRows=0;
-      rows.forEach(row => { const parts=[]; let valid=true; controls.forEach((c,i) => {
-        const v=Number(row[i]); if (!Number.isFinite(v) || v<c.domainMin || v>c.domainMax) { valid=false; return; }
-        parts.push(String(clamp(Math.floor((v-c.domainMin)/c.resolution),0,binCounts[i]-1)));
-      }); if (!valid || parts.length !== controls.length) return; validRows += 1; const key=parts.join('|'); occupied.set(key,(occupied.get(key)||0)+1); });
-      const occupiedCount=occupied.size; const coverage=totalBins ? occupiedCount/totalBins : 0; let equitability=0;
-      if (occupiedCount > 1 && validRows > 0) { let entropy=0; occupied.forEach(count => { const p=count/validRows; if (p>0) entropy -= p*Math.log(p); }); equitability=entropy/Math.log(occupiedCount); }
-      const confidence=Math.pow(Math.max(0, numberOr(report.result?.sample_size_Z,0)*coverage*equitability), 1/3)*numberOr(report.result?.w_eff,1);
-      return { coverage, equitability, confidence, occupiedCount, totalBins, validRows };
-    }
-    function renderAxisHistogram(report,index) {
-      ensureTuning(report); const c=state.tuning.axes[index]; const rows=report.visualizations?.peerRows || []; const target=Number(report.visualizations?.targetVector?.[index]);
-      const span=Math.max(c.resolution, c.domainMax-c.domainMin); const binCount=Math.min(Math.max(1,Math.ceil(span/c.resolution)),48); const counts=Array.from({length:binCount},()=>0);
-      rows.forEach(row => { const v=Number(row[index]); if (!Number.isFinite(v) || v<c.domainMin || v>c.domainMax) return; counts[Math.floor(clamp((v-c.domainMin)/span,0,.999999)*binCount)] += 1; });
-      const max=Math.max(1,...counts); const left=24,right=306,bottom=92,top=12,width=right-left; const bars=counts.map((count,i) => { const h=(bottom-top)*(count/max); const x=left+i*(width/binCount); return `<rect x="${formatNumber(x,2)}" y="${formatNumber(bottom-h,2)}" width="${formatNumber(Math.max(1,width/binCount-2),2)}" height="${formatNumber(h,2)}" fill="#315f9f" opacity=".72"></rect>`; }).join('');
-      const tx=Number.isFinite(target) ? left+clamp((target-c.domainMin)/span,0,1)*width : NaN; const line=Number.isFinite(tx) ? `<line x1="${formatNumber(tx,2)}" y1="${top}" x2="${formatNumber(tx,2)}" y2="${bottom}" stroke="#b4473a" stroke-width="3"></line>` : '';
-      return `<svg class="mini-svg" viewBox="0 0 330 110"><line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#d9e2e8"></line>${bars}${line}<text x="${left}" y="106" fill="#5f6f7e" font-size="10">${formatNumber(c.domainMin,2)}</text><text x="${right}" y="106" fill="#5f6f7e" font-size="10" text-anchor="end">${formatNumber(c.domainMax,2)}</text></svg>`;
-    }
-    function renderTuningPanel(report) {
-      ensureTuning(report); if (!report.visualizations?.peerRows?.length) return ''; const m=tunedMetrics(report); const axes=report.meta?.axes || [];
-      return `<div class="tuning-panel" id="tuning-panel"><div class="tuning-head"><div><h3>비교 전용 Domain / Resolution</h3><div class="small">기본 Goal은 저장하지 않고 현재 리포트의 Coverage, Equitability, Confidence 미리보기만 다시 계산합니다.</div></div><button class="secondary" id="reset-tuning" type="button">기본값</button></div><div class="metrics"><div class="metric"><span class="small">Tuned Confidence</span><strong id="tuned-confidence">${formatPercent(m.confidence,0)}</strong></div><div class="metric"><span class="small">Tuned Coverage</span><strong id="tuned-coverage">${formatPercent(m.coverage,1)}</strong></div><div class="metric"><span class="small">Tuned Equitability</span><strong id="tuned-equitability">${formatPercent(m.equitability,0)}</strong></div><div class="metric"><span class="small">Occupied Bins</span><strong id="tuned-bins">${m.occupiedCount}/${m.totalBins}</strong></div></div>${state.tuning.axes.map((c,index) => { normalizeTuningControl(c); const axis=axes[index] || {}; const label=axis.unit ? `${axis.name} (${axis.unit})` : axis.name; const resMax=Math.max(c.baseResolution,c.baseMax-c.baseMin); return `<div class="tuning-axis"><div class="bar-meta"><strong>${escapeHtml(label)}</strong><span>Target ${escapeHtml(formatNumber(report.visualizations?.targetVector?.[index],4))}</span></div><div id="tune-graph-${index}">${renderAxisHistogram(report,index)}</div><div class="tuning-row"><span>Domain Min</span><input type="range" data-tune-index="${index}" data-tune-field="domainMin" min="${c.baseMin}" max="${Math.max(c.baseMin,c.baseMax-c.resolution)}" step="${c.baseResolution}" value="${c.domainMin}"><span class="tuning-value" id="tune-min-value-${index}">${formatNumber(c.domainMin,4)}</span></div><div class="tuning-row"><span>Domain Max</span><input type="range" data-tune-index="${index}" data-tune-field="domainMax" min="${Math.min(c.baseMax,c.baseMin+c.resolution)}" max="${c.baseMax}" step="${c.baseResolution}" value="${c.domainMax}"><span class="tuning-value" id="tune-max-value-${index}">${formatNumber(c.domainMax,4)}</span></div><div class="tuning-row"><span>Resolution</span><input type="range" data-tune-index="${index}" data-tune-field="resolution" min="${c.baseResolution}" max="${resMax}" step="${c.baseResolution}" value="${c.resolution}"><span class="tuning-value" id="tune-res-value-${index}">${formatNumber(c.resolution,4)}</span></div></div>`; }).join('')}</div>`;
-    }
-    function refreshTuningOutput(report) {
-      if (!report || !$('tuning-panel')) return; const m=tunedMetrics(report); $('tuned-confidence').textContent=formatPercent(m.confidence,0); $('tuned-coverage').textContent=formatPercent(m.coverage,1); $('tuned-equitability').textContent=formatPercent(m.equitability,0); $('tuned-bins').textContent=`${m.occupiedCount}/${m.totalBins}`;
-      state.tuning.axes.forEach((c,index) => { normalizeTuningControl(c); $(`tune-min-value-${index}`).textContent=formatNumber(c.domainMin,4); $(`tune-max-value-${index}`).textContent=formatNumber(c.domainMax,4); $(`tune-res-value-${index}`).textContent=formatNumber(c.resolution,4); const g=$(`tune-graph-${index}`); if (g) g.innerHTML=renderAxisHistogram(report,index); });
     }
 
     function renderReport(report) {
-      state.report=report; const result=report.result; const reasons=report.confidenceReasons || [];
-      const savedText=report.savedDataCluster ? `저장 군집 ${report.savedDataCluster.id} · ${report.savedDataCluster.isNew ? '신규 저장' : '중복 감지'}` : '데이터 군집 저장 비활성화';
-      $('report-content').className=''; $('report-content').innerHTML = `
-        <div class="score-grid"><div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Peer Group ${escapeHtml(String(report.meta.peer_group_size))} clusters</div></div><div class="score"><small>Heterogeneity</small><strong>${formatPercent(result.heterogeneity,1)}</strong><div class="small">p-value ${formatNumber(result.p_value,4)} · Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div></div></div>
-        <div class="report-body"><div class="metrics"><div class="metric"><span class="small">Sample Z</span><strong>${formatPercent(result.sample_size_Z,0)}</strong></div><div class="metric"><span class="small">Coverage C</span><strong>${formatPercent(result.coverage_C,1)}</strong></div><div class="metric"><span class="small">Equitability E</span><strong>${formatPercent(result.equitability_E,0)}</strong></div><div class="metric"><span class="small">w_eff</span><strong>${formatPercent(result.w_eff,0)}</strong></div></div><div class="small">D² ${formatNumber(result.D2,4)} · Peer Group Key ${escapeHtml(report.meta.peer_group_key || '')}</div><div><h3>Axis별 Contribution</h3>${(result.contributions || []).map(item => `<div class="bar-card"><div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${formatNumber(item.percent,1)}%</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(item.percent || 0))}%"></div></div></div>`).join('')}</div><div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div><div><h3>Confidence 감점 원인</h3>${reasons.map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div><div class="small">Target rows ${escapeHtml(String(report.meta.target_rows))} · Summary method ${escapeHtml(report.meta.summary_method || 'mean')}</div><div class="small">${escapeHtml(savedText)}</div>${renderTuningPanel(report)}</div>`;
-      refreshTuningOutput(report); $('report-panel').scrollIntoView({ behavior:'smooth', block:'start' });
+      state.report = report;
+      const result = report.result || {};
+      const warnings = result.outOfDomainWarnings || [];
+      const ablations = result.axisAblationSensitivity || [];
+      $('report-content').className = '';
+      $('report-content').innerHTML = `
+        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => `${escapeHtml(w.role)} ${escapeHtml(w.axis)}=${escapeHtml(w.value)} outside [${escapeHtml(w.domainMin)}, ${escapeHtml(w.domainMax)}]${w.clusterId ? ` · ${escapeHtml(w.clusterId)}` : ''}`).join('<br>')}</div>` : ''}
+        <div class="score-grid">
+          <div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Peer Group ${escapeHtml(report.meta?.peer_group_size ?? '-')} clusters</div></div>
+          <div class="score"><small>Heterogeneity</small><strong>${formatPercent(result.heterogeneity,1)}</strong><div class="small">p-value ${formatNumber(result.p_value,4)} · Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div></div>
+        </div>
+        <div class="report-body">
+          <div class="metrics">
+            <div class="metric"><span class="small">Sample Z</span><strong>${formatPercent(result.sample_size_Z,0)}</strong></div>
+            <div class="metric"><span class="small">Coverage C</span><strong>${formatPercent(result.coverage_C,1)}</strong></div>
+            <div class="metric"><span class="small">Equitability E</span><strong>${formatPercent(result.equitability_E,0)}</strong></div>
+            <div class="metric"><span class="small">w_eff</span><strong>${formatPercent(result.w_eff,0)}</strong></div>
+          </div>
+          <div class="small">D² ${formatNumber(result.D2,4)} · Demo peer included: ${escapeHtml(report.meta?.demo_peer_group_included)} · Analysis ${escapeHtml(report.meta?.analysis_timestamp || '')}</div>
+          <div><h3>Axis별 Contribution</h3>${(result.contributions || []).map(item => `<div class="pill"><div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${formatNumber(item.percent,1)}%</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(item.percent || 0))}%"></div></div></div>`).join('')}</div>
+          <div><h3>Axis Ablation Sensitivity</h3>${ablations.map(item => `<div class="pill"><strong>${escapeHtml(item.removedAxis)}</strong> · ${escapeHtml(item.status)}${item.status === 'ok' ? ` · H ${formatPercent(item.heterogeneity_without_axis,1)} · C ${formatPercent(item.confidence_without_axis,0)} · ΔD² ${formatNumber(item.delta_D2,4)}<br><span class="small">${escapeHtml(item.interpretation || '')}</span>` : ''}</div>`).join('') || '<div class="empty">결과 없음</div>'}</div>
+          <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
+          <div><h3>Confidence Reasons</h3>${(report.confidenceReasons || []).map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div>
+        </div>`;
+      updateButtons();
+      $('report-panel').scrollIntoView({ behavior:'smooth', block:'start' });
+    }
+    function renderIssue(message) {
+      $('report-content').className = '';
+      $('report-content').innerHTML = `<div class="reason down"><strong>분석 실패</strong><br>${escapeHtml(message)}</div>`;
+      updateButtons();
     }
 
-    async function handleFileUpload(file) {
+    function computeGoalPreview(goal) {
+      if (!goal) return null;
+      const axes = goal.axes || [];
+      const matching = state.clusters.filter(cluster => cluster.goalId === goal.id && axes.every(axis => (cluster.axisNames || []).includes(axis.name)));
+      const axisBins = axes.map(axis => {
+        const totalBins = Math.max(1, Math.ceil((Number(axis.domainMax) - Number(axis.domainMin)) / Number(axis.resolution || 1)));
+        const occupied = new Set();
+        matching.forEach(cluster => {
+          const idx = (cluster.axisNames || []).indexOf(axis.name);
+          const value = Number((cluster.values || [])[idx]);
+          if (!Number.isFinite(value)) return;
+          const clipped = Math.min(Math.max(value, Number(axis.domainMin)), Number(axis.domainMax) - Number.EPSILON);
+          occupied.add(Math.max(0, Math.min(totalBins - 1, Math.floor((clipped - Number(axis.domainMin)) / Number(axis.resolution || 1)))));
+        });
+        return { axis:axis.name, totalBins, occupiedBins:occupied.size, coverage: totalBins ? occupied.size / totalBins : 0 };
+      });
+      const totalBins = axisBins.reduce((product, item) => product * item.totalBins, 1);
+      const multi = new Set();
+      matching.forEach(cluster => {
+        const key = axes.map(axis => {
+          const idx = (cluster.axisNames || []).indexOf(axis.name);
+          const value = Number((cluster.values || [])[idx]);
+          const bins = Math.max(1, Math.ceil((Number(axis.domainMax) - Number(axis.domainMin)) / Number(axis.resolution || 1)));
+          const clipped = Math.min(Math.max(value, Number(axis.domainMin)), Number(axis.domainMax) - Number.EPSILON);
+          return Math.max(0, Math.min(bins - 1, Math.floor((clipped - Number(axis.domainMin)) / Number(axis.resolution || 1))));
+        }).join('|');
+        if (key) multi.add(key);
+      });
+      return { axisBins, totalBins, occupiedBins:multi.size, estimatedCoverage: totalBins ? multi.size / totalBins : 0, warning: totalBins > 100000 ? 'Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.' : '' };
+    }
+    function renderGoalPreview() {
+      const preview = computeGoalPreview(state.draftGoal);
+      if (!preview) { $('goal-bin-preview').innerHTML = ''; return; }
+      $('goal-bin-preview').innerHTML = `
+        <strong>Bin Preview</strong><br>
+        전체: ${preview.occupiedBins}/${preview.totalBins} bins · estimated coverage ${formatPercent(preview.estimatedCoverage,2)}
+        ${preview.warning ? `<div class="tag warn">${escapeHtml(preview.warning)}</div>` : ''}
+        ${(preview.axisBins || []).map(item => `<div class="small">${escapeHtml(item.axis)}: ${item.occupiedBins}/${item.totalBins} bins · ${formatPercent(item.coverage,1)}</div>`).join('')}
+      `;
+    }
+    function renderAdmin() {
+      state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
+      $('admin-goal-name').value = state.draftGoal.name || '';
+      $('axis-editor').innerHTML = (state.draftGoal.axes || []).map((axis, index) => {
+        const res = Math.max(Math.abs(Number(axis.resolution) || 1), 0.000001);
+        const min = Number(axis.domainMin ?? 0); const max = Number(axis.domainMax ?? 100);
+        return `<div class="axis-card">
+          <div class="axis-row">
+            <label>Axis<input data-axis-field="name" data-index="${index}" value="${escapeHtml(axis.name || '')}"></label>
+            <label>Unit<input data-axis-field="unit" data-index="${index}" value="${escapeHtml(axis.unit || '')}"></label>
+            <label>Min<input data-axis-field="domainMin" data-index="${index}" type="number" step="any" value="${min}"></label>
+            <label>Max<input data-axis-field="domainMax" data-index="${index}" type="number" step="any" value="${max}"></label>
+            <label>Resolution<input data-axis-field="resolution" data-index="${index}" type="number" step="any" value="${res}"></label>
+            <button class="danger" type="button" data-axis-remove="${index}">삭제</button>
+          </div>
+          <div class="axis-sliders">
+            <label>Min slider<input data-axis-field="domainMin" data-index="${index}" type="range" min="${min - res * 20}" max="${Math.max(min, max - res)}" step="${res}" value="${min}"></label>
+            <label>Max slider<input data-axis-field="domainMax" data-index="${index}" type="range" min="${Math.min(max, min + res)}" max="${max + res * 20}" step="${res}" value="${max}"></label>
+            <label>Resolution slider<input data-axis-field="resolution" data-index="${index}" type="range" min="${res}" max="${Math.max(res, max - min)}" step="${res}" value="${res}"></label>
+          </div>
+        </div>`;
+      }).join('');
+      renderGoalSelects();
+      renderGoalPreview();
+      renderClusterList();
+    }
+    function renderClusterList() {
+      const clusters = state.clusters || [];
+      $('cluster-list').innerHTML = clusters.length ? clusters.map(cluster => `
+        <div class="cluster-item">
+          <div class="bar-meta"><strong>${escapeHtml(cluster.goalName || cluster.goalId)}</strong><span>${escapeHtml(cluster.uploadedAt || cluster.createdAt || '-')}</span></div>
+          <div class="small">${escapeHtml(cluster.id)} · ${escapeHtml(cluster.peerGroupKey || '')}</div>
+          <div class="small">${escapeHtml((cluster.axisNames || []).join(', '))} = ${escapeHtml((cluster.values || []).map(v => formatNumber(v,4)).join(', '))} · rows ${escapeHtml(cluster.rowCount)}</div>
+          <div class="small">upload snapshot: peer N ${escapeHtml(cluster.peerGroupSizeAtUpload ?? '-')} · H ${formatPercent(cluster.heterogeneityAtUpload,1)} · C ${formatPercent(cluster.confidenceAtUpload,0)}</div>
+          <div class="cluster-actions">
+            <button class="secondary" type="button" data-cluster-reeval="${escapeHtml(cluster.id)}">현재 재평가</button>
+            <button class="danger" type="button" data-cluster-impact="${escapeHtml(cluster.id)}">삭제 영향 분석</button>
+          </div>
+        </div>`).join('') : '<div class="empty">저장된 군집이 없습니다.</div>';
+    }
+    function renderAll() {
+      renderStorageNote(); renderGoalSelects(); renderMapping(); renderBatch(); updateButtons();
+    }
+
+    async function handleFiles(fileList) {
       try {
-        const text=await file.text(); const parsed=parseDelimitedText(text, detectDelimiter(text,file.name));
-        if (!parsed.headers.length) throw new Error('CSV header를 찾을 수 없습니다.'); if (!parsed.rows.length) throw new Error('데이터 row를 찾을 수 없습니다.');
-        const goal=goalById(state.selectedGoalId); state.fileName=file.name; state.headers=parsed.headers; state.rows=parsed.rows; state.axisMapping=buildSuggestedMapping(goal,parsed.headers); state.report=null; state.tuning=null; state.tuningReportKey=''; setError(''); $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과와 감점 원인이 여기에 표시됩니다.'; renderMapping();
-      } catch (error) { state.fileName=''; state.headers=[]; state.rows=[]; const detail=error.message || '파일을 읽는 중 오류가 발생했습니다.'; setError(detail); renderIssue(detail); renderMapping(); }
+        const files = Array.from(fileList || []);
+        if (!files.length) return;
+        const goal = goalById(state.selectedGoalId);
+        state.files = [];
+        for (const file of files) {
+          const text = await file.text();
+          const parsed = parseDelimitedText(text, detectDelimiter(text, file.name));
+          if (!parsed.headers.length || !parsed.rows.length) throw new Error(`${file.name}: header 또는 row가 없습니다.`);
+          state.files.push({ displayName:file.name, headers:parsed.headers, rows:parsed.rows, axisMapping:buildSuggestedMapping(goal, parsed.headers) });
+        }
+        state.axisMapping = buildSuggestedMapping(goal, state.files[0].headers);
+        state.batch = null; state.report = null; setError('');
+        $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과가 여기에 표시됩니다.';
+        renderAll();
+      } catch (error) { setError(error.message || '파일을 읽는 중 오류가 발생했습니다.'); renderIssue(error.message || '파일 오류'); }
     }
-
+    function filePayloads(goal) {
+      return state.files.map((file, index) => {
+        const useGlobal = index === 0;
+        return { displayName:file.displayName, rows:file.rows, axisMapping:useGlobal ? state.axisMapping : buildSuggestedMapping(goal, file.headers) };
+      });
+    }
     async function runAnalysis() {
-      const message=validationMessage(); if (message) { setError(message); updateAnalyzeButton(); return; }
-      const button=$('run-analysis'); const goal=goalById(state.selectedGoalId); button.disabled=true; button.textContent='분석 중...'; setError('');
+      const message = validationMessage(); if (message) { setError(message); return; }
+      const goal = goalById(state.selectedGoalId);
+      $('run-analysis').disabled = true; $('run-analysis').textContent = '분석 중...'; setError('');
       try {
-        const response=await fetch('/api/analyze',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) });
-        const data=await response.json(); if (!response.ok) { if (data.clusters) state.clusters=data.clusters; throw new Error(data.error || '분석 요청 중 오류가 발생했습니다.'); }
-        state.clusters = data.clusters || state.clusters; renderReport(data);
-      } catch (error) { const detail=error.message || '분석 요청 중 오류가 발생했습니다.'; setError(detail); renderIssue(detail); }
-      finally { button.textContent='분석'; updateAnalyzeButton(); }
+        if (state.files.length === 1) {
+          const response = await fetch('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) });
+          const data = await response.json(); if (!response.ok) throw new Error(data.error || '분석 실패');
+          state.clusters = data.clusters || state.clusters; state.batch = null; renderReport(data); renderAll();
+        } else {
+          const response = await fetch('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) });
+          const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Batch 분석 실패');
+          data.items = (data.items || []).map(item => ({ ...item, selected:Boolean(item.saveable) }));
+          state.batch = data; state.clusters = data.clusters || state.clusters; renderBatch();
+          const firstOk = data.items.find(item => item.analysisSuccess);
+          if (firstOk) renderReport({ meta:data.meta, result:firstOk.result, summary:firstOk.summary || [], confidenceReasons:firstOk.confidenceReasons || [], visualizations:{ targetVector:firstOk.clusterVector || [] } });
+        }
+      } catch (error) { setError(error.message || '분석 중 오류가 발생했습니다.'); renderIssue(error.message || '분석 실패'); }
+      finally { $('run-analysis').textContent = '분석'; updateButtons(); }
+    }
+    async function saveSelectedBatch() {
+      const records = (state.batch?.items || []).filter(item => item.selected && item.saveable).map(item => item.pendingRecord);
+      if (!records.length) return;
+      try {
+        const response = await fetch('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ records }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Batch 저장 실패');
+        state.clusters = data.clusters || state.clusters;
+        state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
+        renderAll(); setAdminMessage('success', `${data.saved.length}개 cluster 저장 처리 완료`);
+      } catch (error) { setError(error.message || 'Batch 저장 실패'); }
+    }
+    async function exportReport(format) {
+      if (!state.report) return;
+      const response = await fetch('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) });
+      const data = await response.json(); if (!response.ok) { setError(data.error || 'Export 실패'); return; }
+      const blob = new Blob([data.content], { type:data.mime || 'text/plain' });
+      const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = data.filename || `leesin_report.${format}`; link.click(); URL.revokeObjectURL(link.href);
     }
 
-    function syncDraftFromAdminForm() { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.name=$('admin-goal-name').value.trim(); state.draftGoal.K_m=Number(state.draftGoal.K_m || 10); }
+    function syncDraftFromAdminForm() { state.draftGoal = state.draftGoal || blankGoal(); state.draftGoal.name = $('admin-goal-name').value.trim(); state.draftGoal.K_m = Number(state.draftGoal.K_m || 10); }
     async function saveGoal() {
       syncDraftFromAdminForm();
       try {
-        const response=await fetch('/api/admin/goals',{ method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
-        const data=await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 저장 중 오류가 발생했습니다.');
-        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderGoalSelects(); renderMapping(); renderAdmin(); setAdminMessage('success','Goal을 저장했습니다.');
-      } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 중 오류가 발생했습니다.'); }
+        const response = await fetch('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 저장 실패');
+        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
+      } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); }
     }
     async function deleteGoal() {
-      if (!state.draftGoal?.id) return; if (!confirm('이 Goal을 삭제할까요? 저장된 군집은 자동 삭제되지 않습니다.')) return;
+      if (!state.draftGoal?.id || !confirm('이 Goal을 삭제할까요? 저장된 cluster는 자동 삭제되지 않습니다.')) return;
       try {
-        const response=await fetch('/api/admin/goals/delete',{ method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) });
-        const data=await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 삭제 중 오류가 발생했습니다.');
-        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderGoalSelects(); renderMapping(); renderAdmin(); setAdminMessage('success','Goal을 삭제했습니다.');
-      } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 중 오류가 발생했습니다.'); }
+        const response = await fetch('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 삭제 실패');
+        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
+      } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); }
     }
-    async function deleteCluster(id) {
-      const cluster=state.clusters.find(item => item.id === id); if (!cluster) return;
-      if (!confirm(`저장된 군집 ${id}를 삭제할까요? 이 cluster vector는 Peer Group에서 제외됩니다.`)) return;
+    function renderImpact(data) {
+      const d = data.deltas || {};
+      $('audit-title').textContent = '삭제 영향 분석';
+      $('audit-subtitle').textContent = data.cluster?.id || '';
+      $('audit-content').innerHTML = `
+        <div class="metrics">
+          <div class="metric"><span class="small">Peer Group N</span><strong>${escapeHtml((d.peerGroupN || [data.currentAll?.peerGroupSize, data.withoutCluster?.peerGroupSize]).join(' → '))}</strong></div>
+          <div class="metric"><span class="small">Δconfidence</span><strong>${formatNumber(d.deltaConfidence,4)}</strong></div>
+          <div class="metric"><span class="small">Δcoverage</span><strong>${formatNumber(d.deltaCoverage,4)}</strong></div>
+          <div class="metric"><span class="small">Δequitability</span><strong>${formatNumber(d.deltaEquitability,4)}</strong></div>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span class="small">Δheterogeneity</span><strong>${formatNumber(d.deltaHeterogeneity,4)}</strong></div>
+          <div class="metric"><span class="small">ΔD²</span><strong>${formatNumber(d.deltaD2,4)}</strong></div>
+          <div class="metric"><span class="small">Δcenter_norm</span><strong>${formatNumber(d.deltaCenterNorm,4)}</strong></div>
+          <div class="metric"><span class="small">bin_uniqueness</span><strong>${data.binUniqueness ? 'yes' : 'no'}</strong></div>
+        </div>
+        ${!data.withoutCluster?.ok ? `<div class="reason down">삭제 후 재평가 제한: ${escapeHtml(data.withoutCluster?.error || '')}</div>` : ''}`;
+      state.pendingDeleteId = data.cluster?.id || '';
+      $('confirm-delete-cluster').style.display = state.pendingDeleteId ? '' : 'none';
+      $('audit-modal').showModal();
+    }
+    async function showImpact(id) {
       try {
-        const response=await fetch('/api/admin/clusters/delete',{ method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
-        const data=await response.json(); if (!response.ok) throw new Error(data.error || '군집 삭제 중 오류가 발생했습니다.');
-        state.clusters=data.clusters || []; renderClusterList(); setAdminMessage('success','군집을 삭제했습니다.');
-      } catch (error) { setAdminMessage('error', error.message || '군집 삭제 중 오류가 발생했습니다.'); }
+        const response = await fetch('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || '영향 분석 실패');
+        renderImpact(data);
+      } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); }
+    }
+    async function confirmDeleteCluster() {
+      if (!state.pendingDeleteId || !confirm('영향 분석을 확인했습니다. 이 cluster를 삭제할까요?')) return;
+      try {
+        const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || '삭제 실패');
+        state.clusters = data.clusters || []; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderClusterList(); renderGoalPreview(); setAdminMessage('success','Cluster가 삭제되었습니다.');
+      } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); }
+    }
+    function renderReevaluation(item) {
+      const uploaded = item.uploaded || {}; const current = item.current || {};
+      $('audit-title').textContent = '업로드 당시 결과 vs 현재 재평가';
+      $('audit-subtitle').textContent = item.clusterId || '';
+      $('confirm-delete-cluster').style.display = 'none';
+      $('audit-content').innerHTML = `
+        <div class="pill">uploadedAt: ${escapeHtml(item.uploadedAt || '-')}</div>
+        <div class="metrics">
+          <div class="metric"><span class="small">Peer N</span><strong>${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</strong></div>
+          <div class="metric"><span class="small">Heterogeneity</span><strong>${formatPercent(uploaded.heterogeneity,1)} → ${formatPercent(current.heterogeneity,1)}</strong></div>
+          <div class="metric"><span class="small">Confidence</span><strong>${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</strong></div>
+          <div class="metric"><span class="small">D²</span><strong>${formatNumber(uploaded.D2,3)} → ${formatNumber(current.D2,3)}</strong></div>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span class="small">p-value</span><strong>${formatNumber(uploaded.pValue,4)} → ${formatNumber(current.p_value,4)}</strong></div>
+          <div class="metric"><span class="small">Engine</span><strong>${escapeHtml(uploaded.engine ?? '-')} → ${escapeHtml(current.engine ?? '-')}</strong></div>
+          <div class="metric"><span class="small">Δconfidence</span><strong>${formatNumber(item.confidenceDelta,4)}</strong></div>
+          <div class="metric"><span class="small">Δheterogeneity</span><strong>${formatNumber(item.heterogeneityDelta,4)}</strong></div>
+        </div>
+        ${(item.interpretation || []).map(message => `<div class="pill">${escapeHtml(message)}</div>`).join('')}
+        ${item.error ? `<div class="reason down">${escapeHtml(item.error)}</div>` : ''}`;
+      $('audit-modal').showModal();
+    }
+    async function showReevaluation(id) {
+      try {
+        const response = await fetch('/api/admin/clusters/reevaluate', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || '재평가 실패');
+        renderReevaluation((data.items || [])[0]);
+      } catch (error) { setAdminMessage('error', error.message || '재평가 실패'); }
     }
 
     function bindEvents() {
       $('settings-button').addEventListener('click', () => { setAdminMessage('', ''); renderAdmin(); $('settings-modal').showModal(); });
       $('settings-close').addEventListener('click', () => $('settings-modal').close());
-      $('admin-token-input').addEventListener('input', event => { state.adminToken=event.target.value; });
-      $('admin-goal-name').addEventListener('input', event => { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.name=event.target.value; });
-      $('goal-select').addEventListener('change', event => { state.selectedGoalId=event.target.value; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderMapping(); });
-      $('file-input').addEventListener('change', event => { const file=event.target.files?.[0]; if (file) handleFileUpload(file); });
-      $('reset-button').addEventListener('click', () => { $('file-input').value=''; resetSelection(goalById(state.selectedGoalId), false); $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과와 감점 원인이 여기에 표시됩니다.'; setError(''); renderMapping(); });
-      $('mapping-box').addEventListener('change', event => { const toggle=event.target.dataset.axisToggle; const axis=event.target.dataset.axisMap; if (toggle) state.selectedAxes[toggle]=event.target.checked; if (axis) state.axisMapping[axis]=event.target.value; state.report=null; state.tuning=null; state.tuningReportKey=''; renderMapping(); });
-      $('report-content').addEventListener('input', event => { if (!event.target.dataset.tuneField) return; ensureTuning(state.report); const c=state.tuning.axes[Number(event.target.dataset.tuneIndex)]; c[event.target.dataset.tuneField]=Number(event.target.value); normalizeTuningControl(c); refreshTuningOutput(state.report); });
-      $('report-content').addEventListener('click', event => { if (event.target.id !== 'reset-tuning' || !state.report) return; state.tuning=null; state.tuningReportKey=''; renderReport(state.report); });
+      $('audit-close').addEventListener('click', () => $('audit-modal').close());
+      $('admin-token-input').addEventListener('input', event => { state.adminToken = event.target.value; });
+      $('goal-select').addEventListener('change', event => { state.selectedGoalId = event.target.value; state.draftGoal = clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); });
+      $('file-input').addEventListener('change', event => handleFiles(event.target.files));
+      $('reset-button').addEventListener('click', () => { $('file-input').value=''; state.report=null; resetSelection(goalById(state.selectedGoalId), false); $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과가 여기에 표시됩니다.'; setError(''); });
+      $('mapping-box').addEventListener('change', event => { const toggle=event.target.dataset.axisToggle; const axis=event.target.dataset.axisMap; if (toggle) state.selectedAxes[toggle]=event.target.checked; if (axis) state.axisMapping[axis]=event.target.value; state.report=null; state.batch=null; renderAll(); });
       $('run-analysis').addEventListener('click', runAnalysis);
+      $('save-selected').addEventListener('click', saveSelectedBatch);
+      document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', () => exportReport(button.dataset.export)));
+      $('batch-list').addEventListener('change', event => { const index=event.target.dataset.batchSelect; if (index === undefined) return; state.batch.items[Number(index)].selected = event.target.checked; updateButtons(); });
       $('admin-goal-select').addEventListener('change', event => { state.draftGoal=clone(goalById(event.target.value) || blankGoal()); renderAdmin(); });
       $('admin-new-goal').addEventListener('click', () => { state.draftGoal=blankGoal(); renderAdmin(); });
+      $('admin-goal-name').addEventListener('input', event => { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.name=event.target.value; });
       $('axis-add-button').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
-      $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); });
+      $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); renderGoalPreview(); });
+      $('axis-editor').addEventListener('change', () => renderAdmin());
       $('axis-editor').addEventListener('click', event => { const index=event.target.dataset.axisRemove; if (index === undefined) return; syncDraftFromAdminForm(); state.draftGoal.axes.splice(Number(index),1); if (!state.draftGoal.axes.length) state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
-      $('cluster-list').addEventListener('click', event => { const id=event.target.dataset.clusterDelete; if (id) deleteCluster(id); });
-      $('admin-save-goal').addEventListener('click', saveGoal); $('admin-delete-goal').addEventListener('click', deleteGoal);
+      $('admin-save-goal').addEventListener('click', saveGoal);
+      $('admin-delete-goal').addEventListener('click', deleteGoal);
+      $('cluster-list').addEventListener('click', event => { const impact=event.target.dataset.clusterImpact; const reeval=event.target.dataset.clusterReeval; if (impact) showImpact(impact); if (reeval) showReevaluation(reeval); });
+      $('confirm-delete-cluster').addEventListener('click', confirmDeleteCluster);
     }
 
     function init() {
-      const goal=goalById(state.selectedGoalId); state.draftGoal=clone(goal || blankGoal()); resetSelection(goal, true);
-      $('settings-button').style.display=(state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
-      $('admin-token-wrap').style.display=state.adminAuthRequired ? '' : 'none';
-      renderStorageNote(); renderGoalSelects(); renderMapping(); bindEvents();
+      const goal = goalById(state.selectedGoalId);
+      state.draftGoal = clone(goal || blankGoal());
+      state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
+      $('settings-button').style.display = (state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
+      $('admin-token-wrap').style.display = state.adminAuthRequired ? '' : 'none';
+      renderAll(); bindEvents();
     }
     init();
   </script>

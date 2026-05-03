@@ -12,7 +12,7 @@ from models import DiagnosisResult, ExperimentConfig
 
 
 class BinGridTracker:
-    """Tracks multidimensional occupied bins using a hashmap keyed by bin coordinates."""
+    """Tracks occupied multidimensional bins with a hashmap keyed by bin coordinates."""
 
     def __init__(self, domain_range: list[tuple[float, float]], resolution: list[float]):
         self.domain_range = domain_range
@@ -23,13 +23,21 @@ class BinGridTracker:
         clipped = min(max(value, lo), hi - np.finfo(float).eps)
         return int(np.floor((clipped - lo) / step))
 
-    def add(self, row: np.ndarray) -> None:
-        indices = [
+    def bin_indices(self, row: np.ndarray | list[float]) -> list[int]:
+        return [
             self._bin_index(float(value), lo, hi, step)
             for value, (lo, hi), step in zip(row, self.domain_range, self.resolution)
         ]
-        key = json.dumps(indices, separators=(",", ":"))
+
+    def bin_key(self, row: np.ndarray | list[float]) -> str:
+        return json.dumps(self.bin_indices(row), separators=(",", ":"))
+
+    def add(self, row: np.ndarray) -> None:
+        key = self.bin_key(row)
         self._bins[key] = self._bins.get(key, 0) + 1
+
+    def count_for(self, row: np.ndarray | list[float]) -> int:
+        return self._bins.get(self.bin_key(row), 0)
 
     @property
     def total_bins(self) -> int:
