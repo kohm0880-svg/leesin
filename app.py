@@ -27,7 +27,6 @@ from storage import (
     cluster_fingerprint,
     cluster_fingerprint_payload,
     delete_peer_cluster,
-    demo_peer_rows,
     explain_peer_filter,
     get_peer_group,
     init_database,
@@ -46,7 +45,6 @@ from storage import (
     should_save_data_clusters,
     storage_label,
     utc_now_iso,
-    use_demo_peer_group,
     validate_goal,
 )
 
@@ -359,9 +357,6 @@ def analysis_peer_rows(
     exclude_cluster_id: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    if use_demo_peer_group():
-        for index, values in enumerate(demo_peer_rows(goal, axis_names), start=1):
-            rows.append({"id": f"demo_peer_{index}", "source": "demo", "values": [float(value) for value in values]})
     for cluster in load_peer_clusters(str(goal["id"]), axis_names, exclude_cluster_id):
         rows.append({"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]})
     return rows
@@ -670,6 +665,8 @@ def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
         "confidenceReasons": confidence_reasons(result),
         "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result),
         "clusters": list_cluster_summaries(),
+        "peerCounts": bootstrap_peer_counts(),
+        "peerSubsetCounts": bootstrap_peer_subset_counts(),
         "savedDataCluster": None
         if saved_cluster is None
         else {
@@ -754,8 +751,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
 
     summary = build_summary(result)
-    summary.append(f"Peer Group Key is '{key}'. One CSV file is stored as one sanitized data cluster.")
-    summary.append(f"Demo Peer Group included: {use_demo_peer_group()}.")
+    summary.append("Peer Group uses only saved clusters that match the selected Experiment Goal and Axis configuration.")
     if analysis["warnings"]:
         summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
     if saved_cluster:
@@ -777,7 +773,6 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "config": asdict(config),
             "cluster_definition": dataset_meta["cluster_definition"],
             "analysis_timestamp": analysis["snapshot"]["analysisTimestamp"],
-            "demo_peer_group_included": use_demo_peer_group(),
             "storage_policy": "Raw upload rows, filenames, and unmapped columns are not stored.",
         },
         "result": result_payload,
@@ -785,6 +780,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         "confidenceReasons": confidence_reasons(result, analysis["warnings"]),
         "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result),
         "clusters": list_cluster_summaries(),
+        "peerCounts": bootstrap_peer_counts(),
+        "peerSubsetCounts": bootstrap_peer_subset_counts(),
         "savedDataCluster": None
         if saved_cluster is None
         else {
@@ -916,11 +913,12 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
             "goal_id": goal["id"],
             "axis_names": axis_names,
             "peer_group_key": peer_group_key(str(goal["id"]), axis_names),
-            "demo_peer_group_included": use_demo_peer_group(),
             "storage_policy": "Batch preview keeps display names only in browser memory; saved records contain sanitized numeric vectors only.",
         },
         "items": items,
         "clusters": list_cluster_summaries(),
+        "peerCounts": bootstrap_peer_counts(),
+        "peerSubsetCounts": bootstrap_peer_subset_counts(),
     }
 
 
@@ -1110,7 +1108,6 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "mardia_kurt_stat",
             "mardia_kurt_pval",
             "b2p",
-            "demo_peer_group_included",
             "analysis_timestamp",
             "contributions",
             "axis_ablation_sensitivity",
@@ -1144,7 +1141,6 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "mardia_kurt_stat": result.get("mardia_kurt_stat"),
                 "mardia_kurt_pval": result.get("mardia_kurt_pval"),
                 "b2p": result.get("b2p"),
-                "demo_peer_group_included": meta.get("demo_peer_group_included"),
                 "analysis_timestamp": meta.get("analysis_timestamp"),
                 "contributions": json.dumps(result.get("contributions", []), ensure_ascii=False),
                 "axis_ablation_sensitivity": json.dumps(result.get("axisAblationSensitivity", []), ensure_ascii=False),
@@ -1241,8 +1237,6 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
             "goalStoreFile": storage_label(GOAL_STORE_PATH),
             "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
             "clusterCount": len(load_cluster_store()),
-            "demoPeerGroupEnabled": use_demo_peer_group(),
-            "demoPeerGroupDefault": False,
             "savedItems": ["Experiment Goal 설정", "비식별 numeric cluster vector"],
             "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
         },
@@ -1354,7 +1348,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"deleted": True, "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts()})
                 return
         except Exception as exc:
-            self._send_json({"error": str(exc), "clusters": list_cluster_summaries()}, status=HTTPStatus.BAD_REQUEST)
+            self._send_json(
+                {
+                    "error": str(exc),
+                    "clusters": list_cluster_summaries(),
+                    "peerCounts": bootstrap_peer_counts(),
+                    "peerSubsetCounts": bootstrap_peer_subset_counts(),
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 

@@ -1,39 +1,39 @@
 # Leesin Deployment Guide
 
-Leesin은 실험 목적(Experiment Goal)을 최우선 분류 기준으로 삼는 데이터 품질 인증 시스템입니다.
+Leesin은 Experiment Goal별로 저장된 실제 데이터 군집을 Peer Group으로 사용해 CSV 데이터 품질을 진단하는 앱입니다.
 
 - CSV 파일 하나 = 하나의 데이터 군집(cluster)
 - CSV 내부 row = 해당 군집의 반복 관측값
-- 각 CSV는 axis별 대표값(mean)으로 하나의 cluster vector가 됨
-- Peer Group은 반드시 같은 `goalId`와 같은 Axis 구성의 저장 군집만 사용
-- 이질성(`heterogeneity`)과 신뢰도(`confidence`)는 분리 계산
+- 각 CSV는 axis별 대표값(mean)으로 요약되어 하나의 cluster vector가 됩니다.
+- Peer Group은 같은 Experiment Goal과 호환되는 Axis 구성을 가진 저장 cluster record만 사용합니다.
+- 시연용 peer 기준망은 제공하지 않습니다.
+- 기존 Mardia test, Mahalanobis, SSCM, spatial rank 기반 분석 로직은 유지됩니다.
 
 ## 1. Before You Push
 
 - `Lee_sin.venv/`, `.vscode/`, runtime JSON store는 GitHub에 올리지 마세요.
 - `goal_store.json`과 `data_cluster_store.json`은 런타임 데이터입니다.
 - Remote admin writes require `ADMIN_TOKEN` on Render. Keep `ALLOW_REMOTE_ADMIN=false`.
-- `USE_DEMO_PEER_GROUP` 기본값은 `false`입니다.
+- `SAVE_DATA_CLUSTERS=true`이면 분석/저장 과정에서 sanitized numeric cluster vector가 저장됩니다.
 
-## 2. Demo Peer Group Policy
+## 2. Peer Group Policy
 
-Demo Peer Group은 개발/시연용 기준망입니다.
+Peer Group은 오직 저장된 실제 cluster record로 구성됩니다.
 
-- 기본값: `USE_DEMO_PEER_GROUP=false`
-- 실제 인증용 분석에는 기본적으로 포함되지 않음
-- 설정/리포트 meta에 demo peer group 포함 여부가 표시됨
-- 시연이 필요할 때만 환경변수 `USE_DEMO_PEER_GROUP=true`로 켜세요.
+- 저장된 cluster가 없거나 수가 부족하면 분석은 제한되며 사용자에게 안내 메시지를 보여줍니다.
+- 기본 goal template인 `DEFAULT_GOALS`는 유지되지만, 실제 peer 판단에는 저장 cluster만 쓰입니다.
+- batch preview와 reevaluation, impact analysis도 저장 cluster만 기준으로 동작합니다.
+- 같은 batch 안에서 새로 만든 cluster들은 서로의 분석 기준에 포함되지 않습니다.
+- batch save가 끝난 뒤 다음 분석부터 저장 cluster가 Peer Group 후보에 포함됩니다.
 
 ## 3. Stored Cluster Schema
 
 저장되는 `ClusterRecord`는 원본 CSV가 아니라 비식별 numeric axis vector입니다.
 
-- core: `id`, `goalId`, `goalName`, `axisNames`, `axisSignature`, `peerGroupKey`, `values`
+- core: internal `id`, `goalId`, `goalName`, `axisNames`, `axisSignature`, internal peer key, `values`
 - Welford summary: `valuesMean`, `valuesVariance`, `valuesStd`, `rowCount`, `summaryMethod`
-- audit: `createdAt`, `uploadedAt`, `sourceBatchId`, `fingerprint`, `storagePolicy`
-- upload snapshot: `analysisAtUpload`와 flat aliases such as `peerGroupSizeAtUpload`, `confidenceAtUpload`, `D2AtUpload`
-
-기존 `data_cluster_store.json`은 backward compatible하게 normalize됩니다. 누락된 새 필드는 `None` 또는 안전한 기본값으로 채워집니다.
+- audit: `createdAt`, `uploadedAt`, `sourceBatchId`, internal fingerprint, `storagePolicy`
+- upload snapshot: `analysisAtUpload` and aliases such as `peerGroupSizeAtUpload`, `confidenceAtUpload`, `D2AtUpload`
 
 저장하지 않는 항목:
 
@@ -42,42 +42,64 @@ Demo Peer Group은 개발/시연용 기준망입니다.
 - unmapped column
 - 개인정보 column
 
-## 4. Batch Upload Policy
+중복 방지는 기존 fingerprint 정책을 유지합니다. 같은 goal, axis, values, rowCount, summaryMethod 조합은 중복 저장하지 않습니다.
 
-Batch Upload는 여러 CSV/TSV/TXT 파일을 동시에 선택할 수 있게 합니다.
+## 4. Saved Clusters UI
 
-- 각 파일은 독립적인 하나의 cluster로 처리
-- Batch preview에서 row count, axis mapping, cluster vector, fingerprint, duplicate 여부, save 가능 여부, 분석 요약을 표시
-- 사용자가 체크한 cluster만 저장
-- 저장 record에는 `sourceBatchId`가 추가됨
-- 이번 batch 안의 cluster들은 서로의 분석 기준에 포함되지 않음
-- 저장 완료 후 다음 분석부터 Peer Group에 포함됨
+메인 화면에는 별도의 “저장된 군집” 섹션이 있습니다.
 
-중복 방지는 기존 fingerprint 정책을 유지합니다. 같은 `goalId`, `peerGroupKey`, `axisNames`, `values`, `rowCount`, `summaryMethod`이면 중복 저장하지 않습니다.
+- Experiment Goal별 필터와 전체 보기 옵션 제공
+- 선택한 goal에 속한 군집만 즉시 표시
+- “저장된 군집 N개” 형태의 개수 표시
+- 각 cluster는 카드로 표시
+- 화면 표시명은 goal별 순번을 사용합니다. 예: `진공 유지 품질 인증 - 군집 1`
+- 기본 화면에서는 `cluster_xxx`, internal peer key, fingerprint, raw JSON을 표시하지 않습니다.
+- 카드에는 goal name, axis 목록, axis 대표값, rowCount, 업로드 날짜, upload 당시 요약값을 표시합니다.
+- 삭제, 재평가, 영향 분석 액션을 카드에서 바로 실행할 수 있습니다.
 
-## 5. Audit, Deletion, Reevaluation
+## 5. Batch Upload Policy
 
-Cluster audit snapshot은 업로드 당시 결과와 현재 기준 재평가를 분리해 보존합니다.
+Batch upload는 여러 CSV/TSV/TXT 파일을 동시에 preview하고 저장할 수 있게 합니다.
 
-- 업로드 당시: `analysisAtUpload`
-- 현재 재평가: 현재 누적 Peer Group 기준
-- 자기 자신을 target으로 재평가할 때는 `exclude_cluster_id`로 자기 자신을 Peer Group에서 제외
+- 각 파일은 독립적인 하나의 cluster로 처리됩니다.
+- Batch preview에서는 row count, axis mapping, cluster vector, duplicate 여부, save 가능 여부, 분석 요약을 보여줍니다.
+- 사용자가 체크한 cluster만 저장합니다.
+- 같은 batch 안의 cluster들은 업로드 당시 서로의 분석 기준에 포함되지 않습니다.
+- 저장 완료 후 다음 분석부터 Peer Group에 포함됩니다.
 
-삭제 전 영향 분석은 leave-one-out 방식으로 계산합니다.
+## 6. Audit, Deletion, Reevaluation
 
-- Peer Group N 변화
-- `Δconfidence`, `Δcoverage`, `Δequitability`, `Δheterogeneity`, `ΔD2`
-- `Δcenter_norm = ||center_all - center_without_cluster||`
-- `bin_uniqueness`
+저장된 군집 카드는 다음 액션을 제공합니다.
 
-## 6. Analysis Extensions
+- 삭제: 확인 후 삭제하며 목록과 count를 자동 갱신합니다.
+- 재평가: 업로드 당시 snapshot과 현재 Peer Group 기준 결과를 비교합니다.
+- 영향 분석: 삭제 전후의 Peer Group N, confidence, coverage, equitability, heterogeneity, D2 변화를 계산합니다.
 
-- 기존 contribution 계산은 유지됩니다: `diff * (covariance_inv @ diff)` 기반 percent contribution.
-- Axis Ablation Sensitivity가 추가되었습니다. 각 axis를 하나씩 제외하고 재분석하여 `delta_heterogeneity`, `delta_confidence`, `delta_D2`를 표시합니다.
-- p=1 또는 sample 부족 시 `insufficient dimension/sample`로 안전하게 처리합니다.
-- Target 또는 peer 값이 Domain Range 밖이면 out-of-domain warning을 표시합니다. Bin 계산의 clipping 정책은 유지하되, clipping 사실과 axis/value/domain/source를 리포트에 노출합니다.
+결과는 기본적으로 숫자를 보기 좋게 반올림해서 표시하고 raw JSON 덤프를 보여주지 않습니다.
 
-## 7. Report Export
+## 7. UI/UX Improvements
+
+주요 비동기 버튼에는 loading state가 적용되어 있습니다.
+
+- 분석 실행
+- batch preview
+- batch save
+- goal 저장/삭제
+- cluster 삭제
+- impact analysis
+- reevaluate
+- report export
+
+요청 중에는 버튼이 비활성화되고 spinner와 진행 문구가 표시됩니다. 성공/실패 후에는 버튼 상태가 복구되어 중복 요청을 막습니다.
+
+## 8. Analysis Extensions
+
+- Contribution 계산은 `diff * (covariance_inv @ diff)` 기반 percent contribution을 유지합니다.
+- Axis Ablation Sensitivity는 각 axis를 제외하고 재계산한 delta heterogeneity, confidence, D2를 표시합니다.
+- p=1 또는 sample 부족은 `insufficient dimension/sample`로 안전하게 처리합니다.
+- Target 또는 peer 값이 Domain Range 밖이면 out-of-domain warning을 표시합니다.
+
+## 9. Report Export
 
 분석 결과는 다음 형식으로 export할 수 있습니다.
 
@@ -85,9 +107,9 @@ Cluster audit snapshot은 업로드 당시 결과와 현재 기준 재평가를 
 - CSV summary: 핵심 수치와 JSON-encoded detail fields
 - HTML: standalone report dump
 
-Export에는 goal, axis/domain/resolution, target vector, peer group size, engine, Mardia 결과, D2, p-value, heterogeneity, confidence, coverage/equitability/sample size, contributions, axis ablation, out-of-domain warnings, confidence reasons, summary, timestamp, demo peer 포함 여부가 포함됩니다.
+Export에는 goal, axis/domain/resolution, target vector, peer group size, engine, Mardia 결과, D2, p-value, heterogeneity, confidence, coverage/equitability/sample size, contributions, axis ablation, out-of-domain warnings, confidence reasons, summary, timestamp가 포함됩니다.
 
-## 8. Goal Editor Bin Preview
+## 10. Goal Editor Bin Preview
 
 Goal editor는 숫자 입력과 slider를 함께 제공합니다.
 
@@ -97,14 +119,7 @@ Goal editor는 숫자 입력과 slider를 함께 제공합니다.
 - 전체 multidimensional bins, occupied bins, estimated coverage 표시
 - `total bins > 100000`이면 resolution 과세분화 경고 표시
 
-## 9. Optimizations
-
-- `app.build_cluster_vector`: CSV row를 Welford algorithm으로 streaming mean/variance/std 계산
-- `stats_engine.BinGridTracker`: hashmap 기반 multidimensional bin tracking
-- `stats_engine.regularized_sscm_inverse`: Sherman-Morrison update로 SSCM inverse 계산
-- `stats_engine.DataQualityAnalyzer._compute_heterogeneity`: covariance/SSCM interaction을 반영한 contribution 유지
-
-## 10. API
+## 11. API
 
 기존 `/api/analyze`는 유지됩니다.
 
@@ -112,9 +127,10 @@ Goal editor는 숫자 입력과 slider를 함께 제공합니다.
 - `POST /api/admin/clusters/batch-save`
 - `POST /api/admin/clusters/impact`
 - `POST /api/admin/clusters/reevaluate`
+- `POST /api/admin/clusters/delete`
 - `POST /api/export/report`
 
-## 11. Deploy On Render
+## 12. Deploy On Render
 
 This repo includes `render.yaml`.
 
@@ -127,7 +143,7 @@ This repo includes `render.yaml`.
 
 If `DATABASE_URL` is set, Leesin stores Goal/Cluster payloads in PostgreSQL via `psycopg2`; otherwise it writes JSON files under `LEESIN_STORE_DIR`.
 
-## 12. Local Run
+## 13. Local Run
 
 ```powershell
 .\run_app.ps1
@@ -139,11 +155,10 @@ Run tests:
 .\Lee_sin.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-## 13. Peer Group Debug Checklist
+## 14. Peer Group Debug Checklist
 
 Use this when saved clusters exist but analysis reports a very small Peer Group N.
 
-- Keep `USE_DEMO_PEER_GROUP=false`.
 - Create a Goal with 4 axes.
 - Batch upload and save 6 CSV files for that Goal and those 4 axes.
 - Confirm the batch-save response reports `compatiblePeerCountForSelectedAxes=6`.

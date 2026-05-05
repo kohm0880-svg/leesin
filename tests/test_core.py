@@ -60,8 +60,11 @@ class CoreBehaviorTests(unittest.TestCase):
         np.testing.assert_allclose(peers, np.array([[10.0, 20.0]]))
         self.assertEqual(diagnostics["compatibleAxisCount"], 1)
 
-    def test_demo_peer_group_default_is_disabled(self) -> None:
-        self.assertFalse(storage.use_demo_peer_group())
+    def test_peer_group_uses_only_saved_clusters(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        with patch("storage.load_cluster_store", return_value=[]):
+            with self.assertRaises(ValueError):
+                storage.get_peer_group(goal, ["x", "y"])
 
     def test_selected_axis_subset_uses_same_goal_clusters(self) -> None:
         clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["a", "b", "c"], "values": [1, 2, 3], "rowCount": 2}]

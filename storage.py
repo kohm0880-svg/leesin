@@ -51,39 +51,6 @@ DEFAULT_GOALS = [
 ]
 
 
-SAMPLE_PEER_LIBRARY = {
-    "goal_thermal|temperature|pressure|flow_rate": [
-        [101.2, 49.8, 24.5],
-        [98.7, 51.1, 26.0],
-        [103.5, 53.2, 24.9],
-        [96.8, 47.5, 25.4],
-        [100.9, 50.7, 23.8],
-        [99.5, 48.9, 24.1],
-        [104.1, 54.5, 25.7],
-        [97.9, 46.8, 24.9],
-        [102.7, 52.2, 26.3],
-        [101.8, 49.5, 24.7],
-        [98.9, 48.2, 23.5],
-        [95.6, 45.1, 22.8],
-        [105.0, 55.4, 27.2],
-        [103.1, 51.8, 25.5],
-        [99.7, 50.0, 24.0],
-    ],
-    "goal_vacuum|vacuum_level|hold_time|leak_rate": [
-        [52.0, 120.0, 2.1],
-        [55.5, 135.0, 1.8],
-        [49.8, 110.0, 2.4],
-        [57.2, 140.0, 1.5],
-        [53.9, 128.0, 1.9],
-        [51.0, 118.0, 2.2],
-        [56.1, 144.0, 1.6],
-        [54.2, 132.0, 1.8],
-        [50.6, 115.0, 2.0],
-        [58.0, 150.0, 1.4],
-    ],
-}
-
-
 ANALYSIS_AT_UPLOAD_KEYS = {
     "analysisTimestamp": None,
     "peerGroupSize": None,
@@ -458,10 +425,6 @@ def should_save_data_clusters() -> bool:
     return os.environ.get("SAVE_DATA_CLUSTERS", "true").lower() in {"1", "true", "yes", "on"}
 
 
-def use_demo_peer_group() -> bool:
-    return os.environ.get("USE_DEMO_PEER_GROUP", "false").lower() in {"1", "true", "yes", "on"}
-
-
 def _extract_selected_values(cluster: dict[str, Any], selected_axis_names: list[str]) -> list[float] | None:
     values, _reason = extract_selected_values_with_reason(cluster, selected_axis_names)
     return values
@@ -605,31 +568,15 @@ def load_peer_clusters(
     return rows
 
 
-def demo_peer_rows(goal: dict[str, Any], selected_axis_names: list[str]) -> list[list[float]]:
-    key = peer_group_key(str(goal["id"]), [axis["name"] for axis in goal["axes"]])
-    rows = SAMPLE_PEER_LIBRARY.get(key, [])
-    if not rows:
-        return []
-    name_to_index = {normalize_axis_name(axis["name"]): index for index, axis in enumerate(goal["axes"])}
-    try:
-        indices = [name_to_index[normalize_axis_name(name)] for name in selected_axis_names]
-    except KeyError as exc:
-        raise ValueError(f"Selected axis '{exc.args[0]}' does not belong to this Goal.") from exc
-    return [[float(row[index]) for index in indices] for row in rows]
-
-
 def get_peer_group(
     goal: dict[str, Any],
     selected_axis_names: list[str],
     exclude_cluster_id: str | None = None,
 ) -> np.ndarray:
-    stored = [
+    rows = [
         [float(value) for value in cluster["values"]]
         for cluster in load_peer_clusters(str(goal["id"]), selected_axis_names, exclude_cluster_id)
     ]
-    rows = list(stored)
-    if use_demo_peer_group():
-        rows = demo_peer_rows(goal, selected_axis_names) + rows
     if not rows:
         raise ValueError(
             "이 Experiment Goal과 Axis 구성이 정확히 같은 누적 군집만 Peer Group으로 사용됩니다. "
@@ -654,8 +601,7 @@ def peer_group_subset_counts(goal: dict[str, Any]) -> dict[str, int]:
         for subset in itertools.combinations(axis_names, size):
             names = list(subset)
             stored_count = len(load_peer_clusters(str(goal["id"]), names))
-            demo_count = len(demo_peer_rows(goal, names)) if use_demo_peer_group() else 0
-            counts[axis_subset_key(names)] = stored_count + demo_count
+            counts[axis_subset_key(names)] = stored_count
     return counts
 
 

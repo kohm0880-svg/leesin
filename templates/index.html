@@ -23,6 +23,7 @@
     input[type="range"] { padding:0; accent-color:var(--teal); }
     button { cursor:pointer; font-weight:800; white-space:nowrap; }
     button:disabled { cursor:not-allowed; opacity:.55; }
+    button.is-loading { display:inline-flex; align-items:center; justify-content:center; gap:6px; }
     .primary { border:0; color:#fff; background:var(--teal); }
     .secondary { color:var(--blue); background:#eef4fb; }
     .danger { color:var(--red); background:#fff1ee; }
@@ -44,13 +45,25 @@
     .score strong { display:block; font-size:42px; line-height:1; }
     .score.hero strong { font-size:58px; }
     .metric strong { display:block; font-size:20px; }
-    .report-body,.cluster-list,.batch-list,.axis-editor { display:grid; gap:12px; margin-top:12px; }
+    .report-body,.cluster-list,.saved-cluster-list,.batch-list,.axis-editor { display:grid; gap:12px; margin-top:12px; }
     .bar-meta { display:flex; justify-content:space-between; gap:10px; margin-bottom:6px; font-size:14px; }
     .bar-track { height:10px; border-radius:999px; background:#dce5ea; overflow:hidden; }
     .bar-fill { height:100%; border-radius:inherit; background:var(--gold); }
     .reason.down { color:var(--red); background:#fff1ee; }
-    .batch-item,.cluster-item { display:grid; gap:8px; border:1px solid var(--line); background:#fff; }
+    .batch-item,.cluster-item,.cluster-card { display:grid; gap:10px; border:1px solid var(--line); background:#fff; }
     .batch-grid { display:grid; grid-template-columns:auto 1.2fr repeat(5,minmax(95px,.6fr)); gap:8px; align-items:center; font-size:13px; }
+    .cluster-toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; justify-content:flex-end; }
+    .cluster-toolbar label { min-width:220px; }
+    .cluster-card { border-radius:10px; padding:14px; }
+    .cluster-card-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+    .cluster-card-title { display:grid; gap:4px; }
+    .axis-values { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
+    .axis-value { border:1px solid var(--line); border-radius:9px; padding:9px 10px; background:#fbfdfe; }
+    .inline-metrics { display:flex; flex-wrap:wrap; gap:8px; }
+    .inline-metrics .tag { background:#f7f9fb; color:var(--ink); border:1px solid var(--line); }
+    .cluster-result { border:1px solid var(--line); border-radius:10px; padding:12px; background:#fbfdfe; }
+    .spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; display:inline-block; animation:spin .8s linear infinite; vertical-align:-2px; }
+    @keyframes spin { to { transform:rotate(360deg); } }
     .cluster-actions,.export-actions,.row-actions { display:flex; flex-wrap:wrap; gap:8px; }
     .cluster-actions button,.export-actions button,.row-actions button,.panel-head button { width:auto; }
     dialog { width:min(980px, calc(100% - 28px)); padding:0; }
@@ -64,6 +77,8 @@
     .tag.warn { background:#fff1ee; color:var(--red); }
     @media (max-width:960px) {
       .topbar,.toolbar,.grid,.mapper-head,.mapping-row,.metrics,.score-grid,.admin-toolbar,.axis-row,.axis-sliders,.batch-grid { grid-template-columns:1fr; }
+      .cluster-card-head,.cluster-toolbar { display:grid; grid-template-columns:1fr; justify-content:stretch; }
+      .cluster-toolbar label { min-width:0; }
       .score.hero strong { font-size:46px; }
     }
   </style>
@@ -74,7 +89,7 @@
       <div>
         <h1>Leesin 데이터 품질 인증</h1>
         <p class="subtitle">CSV 파일 하나를 하나의 데이터 군집으로 보고, CSV row 반복 관측값을 axis별 Welford mean vector로 요약해 같은 Experiment Goal + Axis Peer Group과 비교합니다.</p>
-        <span id="demo-status" class="tag"></span>
+        <span id="peer-status" class="tag"></span>
       </div>
       <button class="ghost" id="settings-button" type="button">설정 / 감사</button>
     </header>
@@ -117,6 +132,22 @@
       </div>
       <div id="batch-list" class="batch-list"></div>
     </section>
+
+    <section class="panel" id="saved-clusters-panel">
+      <div class="panel-head">
+        <div>
+          <h2>저장된 군집</h2>
+          <p class="small">저장된 실제 cluster record만 Peer Group 후보로 사용됩니다.</p>
+        </div>
+        <div class="cluster-toolbar">
+          <label>Experiment Goal 필터<select id="cluster-goal-filter"></select></label>
+          <span class="tag" id="cluster-count">저장된 군집 0개</span>
+        </div>
+      </div>
+      <div class="success" id="cluster-success-box"></div>
+      <div class="error" id="cluster-error-box"></div>
+      <div id="saved-cluster-list" class="saved-cluster-list"></div>
+    </section>
   </main>
 
   <dialog id="settings-modal">
@@ -126,7 +157,6 @@
     </div>
     <div class="modal-body">
       <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off"></label>
-      <div class="notice" id="demo-note"></div>
       <div class="admin-toolbar">
         <label>Existing Goal<select id="admin-goal-select"></select></label>
         <button class="secondary" id="admin-new-goal" type="button">새 Goal</button>
@@ -182,6 +212,8 @@
       batch: null,
       draftGoal: null,
       pendingDeleteId: '',
+      clusterGoalFilter: 'all',
+      clusterResults: {},
     };
 
     const $ = id => document.getElementById(id);
@@ -203,12 +235,59 @@
       return Number(state.peerSubsetCounts?.[goal.id]?.[key] ?? 0);
     };
     const adminHeaders = () => { const headers = {'Content-Type':'application/json'}; if (state.adminToken) headers['X-Admin-Token']=state.adminToken; return headers; };
+    const clusterGoalName = cluster => cluster.goalName || goalById(cluster.goalId)?.name || '삭제되었거나 알 수 없는 Goal';
+    const clusterDateValue = cluster => Date.parse(cluster.uploadedAt || cluster.createdAt || '') || 0;
+    const sortedClusters = clusters => [...(clusters || [])].sort((a,b) => clusterDateValue(b) - clusterDateValue(a));
+    const formatDate = value => {
+      const date = new Date(value || '');
+      if (Number.isNaN(date.getTime())) return '-';
+      return new Intl.DateTimeFormat('ko-KR', { dateStyle:'medium', timeStyle:'short' }).format(date);
+    };
+    function buildClusterNameMap(clusters=state.clusters) {
+      const counters = {};
+      const names = {};
+      sortedClusters(clusters).forEach(cluster => {
+        const goalName = clusterGoalName(cluster);
+        const goalKey = cluster.goalId || goalName;
+        counters[goalKey] = (counters[goalKey] || 0) + 1;
+        names[cluster.id] = `${goalName} - 군집 ${counters[goalKey]}`;
+      });
+      return names;
+    }
+    const clusterDisplayName = id => buildClusterNameMap()[id] || '저장된 군집';
+    function setButtonDisabled(button, disabled) {
+      if (!button || button.dataset.loading === 'true') return;
+      button.disabled = Boolean(disabled);
+    }
+    function setButtonLoading(button, isLoading, loadingText='처리 중...') {
+      if (!button) return;
+      if (isLoading) {
+        if (button.dataset.loading === 'true') return;
+        button.dataset.originalHtml = button.innerHTML;
+        button.dataset.loading = 'true';
+        button.classList.add('is-loading');
+        button.disabled = true;
+        button.innerHTML = `<span class="spinner"></span>${escapeHtml(loadingText)}`;
+        return;
+      }
+      if (button.dataset.originalHtml) button.innerHTML = button.dataset.originalHtml;
+      delete button.dataset.originalHtml;
+      delete button.dataset.loading;
+      button.classList.remove('is-loading');
+      button.disabled = false;
+    }
 
     function setError(message) { $('user-error-box').textContent = message || ''; $('user-error-box').style.display = message ? 'block' : 'none'; }
     function setAdminMessage(kind, message) {
       $('admin-success-box').style.display='none'; $('admin-error-box').style.display='none';
       if (!message) return;
       const box = kind === 'success' ? $('admin-success-box') : $('admin-error-box');
+      box.textContent = message; box.style.display = 'block';
+    }
+    function setClusterMessage(kind, message) {
+      $('cluster-success-box').style.display='none'; $('cluster-error-box').style.display='none';
+      if (!message) return;
+      const box = kind === 'success' ? $('cluster-success-box') : $('cluster-error-box');
       box.textContent = message; box.style.display = 'block';
     }
 
@@ -267,10 +346,10 @@
     }
     function updateButtons() {
       const message = validationMessage();
-      $('run-analysis').disabled = Boolean(message);
+      setButtonDisabled($('run-analysis'), Boolean(message));
       $('run-analysis').title = message || '분석 실행';
-      $('save-selected').disabled = !(state.batch?.items || []).some(item => item.saveable && item.selected);
-      document.querySelectorAll('[data-export]').forEach(button => button.disabled = !state.report);
+      setButtonDisabled($('save-selected'), !(state.batch?.items || []).some(item => item.saveable && item.selected));
+      document.querySelectorAll('[data-export]').forEach(button => setButtonDisabled(button, !state.report));
     }
 
     function renderGoalSelects() {
@@ -280,15 +359,14 @@
     }
     function renderStorageNote() {
       const storage = bootstrap.storage || {};
-      $('demo-status').className = storage.demoPeerGroupEnabled ? 'tag warn' : 'tag';
-      $('demo-status').textContent = `Demo Peer Group: ${storage.demoPeerGroupEnabled ? 'ON (개발/시연용)' : 'OFF (기본값)'}`;
+      $('peer-status').className = 'tag';
+      $('peer-status').textContent = `저장된 군집 ${state.clusters.length}개`;
       $('storage-note').innerHTML = `
         <strong>저장 정책</strong><br>
         저장: ${escapeHtml((storage.savedItems || []).join(', '))}<br>
         미저장: ${escapeHtml((storage.unsavedItems || []).join(', '))}<br>
-        Demo Peer Group 기본값은 false이며, 현재 ${storage.demoPeerGroupEnabled ? '포함됨' : '포함되지 않음'}.
+        Peer Group은 저장된 실제 군집 중 같은 Experiment Goal과 Axis 구성을 가진 항목만 사용합니다.
       `;
-      $('demo-note').innerHTML = `Demo Peer Group은 개발/시연용입니다. 현재 <strong>${storage.demoPeerGroupEnabled ? 'ON' : 'OFF'}</strong>이며 기본값은 false입니다. 실제 인증 기준망에는 기본적으로 섞이지 않습니다.`;
     }
     function renderMapping() {
       const goal = goalById(state.selectedGoalId);
@@ -310,7 +388,7 @@
       const panel = $('batch-panel');
       if (!state.batch) { panel.style.display='none'; return; }
       panel.style.display = '';
-      $('batch-id').textContent = state.batch.sourceBatchId || '';
+      $('batch-id').textContent = `${(state.batch.items || []).length} file(s)`;
       $('batch-list').innerHTML = (state.batch.items || []).map((item, index) => `
         <div class="batch-item">
           <div class="batch-grid">
@@ -322,7 +400,6 @@
             <span>${item.duplicate ? 'duplicate' : 'unique'}</span>
             <span>${item.saveable ? 'saveable' : 'blocked'}</span>
           </div>
-          <div class="small">fingerprint: ${escapeHtml(item.fingerprint || '-')}</div>
           <div class="small">analysis: ${item.analysisSuccess ? `ok · H ${formatPercent(item.analysisSummary?.heterogeneity,1)} · C ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer N ${escapeHtml(item.analysisSummary?.peer_group_size)}` : `failed · peer N ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
         </div>`).join('');
     }
@@ -334,7 +411,7 @@
       const ablations = result.axisAblationSensitivity || [];
       $('report-content').className = '';
       $('report-content').innerHTML = `
-        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => `${escapeHtml(w.role)} ${escapeHtml(w.axis)}=${escapeHtml(w.value)} outside [${escapeHtml(w.domainMin)}, ${escapeHtml(w.domainMax)}]${w.clusterId ? ` · ${escapeHtml(w.clusterId)}` : ''}`).join('<br>')}</div>` : ''}
+        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => `${escapeHtml(w.role)} ${escapeHtml(w.axis)}=${escapeHtml(w.value)} outside [${escapeHtml(w.domainMin)}, ${escapeHtml(w.domainMax)}]`).join('<br>')}</div>` : ''}
         <div class="score-grid">
           <div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Peer Group ${escapeHtml(report.meta?.peer_group_size ?? '-')} clusters</div></div>
           <div class="score"><small>Heterogeneity</small><strong>${formatPercent(result.heterogeneity,1)}</strong><div class="small">p-value ${formatNumber(result.p_value,4)} · Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div></div>
@@ -346,7 +423,7 @@
             <div class="metric"><span class="small">Equitability E</span><strong>${formatPercent(result.equitability_E,0)}</strong></div>
             <div class="metric"><span class="small">w_eff</span><strong>${formatPercent(result.w_eff,0)}</strong></div>
           </div>
-          <div class="small">D² ${formatNumber(result.D2,4)} · Demo peer included: ${escapeHtml(report.meta?.demo_peer_group_included)} · Analysis ${escapeHtml(report.meta?.analysis_timestamp || '')}</div>
+          <div class="small">D² ${formatNumber(result.D2,4)} · Analysis ${escapeHtml(report.meta?.analysis_timestamp || '')}</div>
           <div><h3>Axis별 Contribution</h3>${(result.contributions || []).map(item => `<div class="pill"><div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${formatNumber(item.percent,1)}%</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(item.percent || 0))}%"></div></div></div>`).join('')}</div>
           <div><h3>Axis Ablation Sensitivity</h3>${ablations.map(item => `<div class="pill"><strong>${escapeHtml(item.removedAxis)}</strong> · ${escapeHtml(item.status)}${item.status === 'ok' ? ` · H ${formatPercent(item.heterogeneity_without_axis,1)} · C ${formatPercent(item.confidence_without_axis,0)} · ΔD² ${formatNumber(item.delta_D2,4)}<br><span class="small">${escapeHtml(item.interpretation || '')}</span>` : ''}</div>`).join('') || '<div class="empty">결과 없음</div>'}</div>
           <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
@@ -427,22 +504,101 @@
       renderGoalPreview();
       renderClusterList();
     }
+    function renderClusterGoalFilter() {
+      const counts = {};
+      (state.clusters || []).forEach(cluster => { counts[cluster.goalId] = (counts[cluster.goalId] || 0) + 1; });
+      const total = (state.clusters || []).length;
+      const goalOptions = state.goals.map(goal => `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.name)} (${counts[goal.id] || 0})</option>`).join('');
+      const currentExists = state.clusterGoalFilter === 'all' || state.goals.some(goal => goal.id === state.clusterGoalFilter);
+      if (!currentExists) state.clusterGoalFilter = 'all';
+      $('cluster-goal-filter').innerHTML = `<option value="all">전체 보기 (${total})</option>${goalOptions}`;
+      $('cluster-goal-filter').value = state.clusterGoalFilter;
+    }
+    function renderClusterResult(cluster) {
+      const result = state.clusterResults?.[cluster.id];
+      if (!result) return '';
+      if (result.type === 'impact') {
+        const d = result.data?.deltas || {};
+        return `<div class="cluster-result">
+          <strong>영향 분석 결과</strong>
+          <div class="inline-metrics">
+            <span class="tag">Peer N ${escapeHtml((d.peerGroupN || [result.data?.currentAll?.peerGroupSize, result.data?.withoutCluster?.peerGroupSize]).join(' → '))}</span>
+            <span class="tag">Confidence ${formatNumber(d.deltaConfidence,4)}</span>
+            <span class="tag">Coverage ${formatNumber(d.deltaCoverage,4)}</span>
+            <span class="tag">Equitability ${formatNumber(d.deltaEquitability,4)}</span>
+            <span class="tag">Heterogeneity ${formatNumber(d.deltaHeterogeneity,4)}</span>
+          </div>
+          ${!result.data?.withoutCluster?.ok ? `<div class="reason down">삭제 후 재평가 제한: ${escapeHtml(result.data?.withoutCluster?.error || '')}</div>` : ''}
+        </div>`;
+      }
+      if (result.type === 'reeval') {
+        const item = result.data || {};
+        const uploaded = item.uploaded || {};
+        const current = item.current || {};
+        return `<div class="cluster-result">
+          <strong>재평가 결과</strong>
+          <div class="inline-metrics">
+            <span class="tag">Peer N ${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</span>
+            <span class="tag">H ${formatPercent(uploaded.heterogeneity,1)} → ${formatPercent(current.heterogeneity,1)}</span>
+            <span class="tag">C ${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</span>
+            <span class="tag">ΔC ${formatNumber(item.confidenceDelta,4)}</span>
+            <span class="tag">ΔH ${formatNumber(item.heterogeneityDelta,4)}</span>
+          </div>
+          ${(item.interpretation || []).map(message => `<div class="pill">${escapeHtml(message)}</div>`).join('')}
+          ${item.error ? `<div class="reason down">${escapeHtml(item.error)}</div>` : ''}
+        </div>`;
+      }
+      return '';
+    }
+    function renderClusterCards(clusters) {
+      const names = buildClusterNameMap();
+      return sortedClusters(clusters).map(cluster => {
+        const values = (cluster.valuesMean || []).length ? cluster.valuesMean : (cluster.values || []);
+        const axisValues = (cluster.axisNames || []).map((axisName, index) => `
+          <div class="axis-value"><span class="small">${escapeHtml(axisName)}</span><strong>${formatNumber(values[index],4)}</strong></div>
+        `).join('');
+        const uploadMetrics = [
+          cluster.peerGroupSizeAtUpload == null ? '' : `<span class="tag">Upload Peer N ${escapeHtml(cluster.peerGroupSizeAtUpload)}</span>`,
+          cluster.heterogeneityAtUpload == null ? '' : `<span class="tag">H ${formatPercent(cluster.heterogeneityAtUpload,1)}</span>`,
+          cluster.confidenceAtUpload == null ? '' : `<span class="tag">C ${formatPercent(cluster.confidenceAtUpload,0)}</span>`,
+        ].filter(Boolean).join('');
+        return `<div class="cluster-card">
+          <div class="cluster-card-head">
+            <div class="cluster-card-title">
+              <strong>${escapeHtml(names[cluster.id] || '저장된 군집')}</strong>
+              <span class="small">${escapeHtml(clusterGoalName(cluster))} · ${escapeHtml(formatDate(cluster.uploadedAt || cluster.createdAt))}</span>
+            </div>
+            <span class="tag">rows ${escapeHtml(cluster.rowCount ?? '-')}</span>
+          </div>
+          <div class="axis-values">${axisValues || '<div class="empty">Axis 대표값이 없습니다.</div>'}</div>
+          ${uploadMetrics ? `<div class="inline-metrics">${uploadMetrics}</div>` : ''}
+          ${renderClusterResult(cluster)}
+          <div class="cluster-actions">
+            <button class="secondary" type="button" data-cluster-reeval="${escapeHtml(cluster.id)}">재평가</button>
+            <button class="secondary" type="button" data-cluster-impact="${escapeHtml(cluster.id)}">영향 분석</button>
+            <button class="danger" type="button" data-cluster-delete="${escapeHtml(cluster.id)}">삭제</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
+    function filteredClusters() {
+      const clusters = state.clusters || [];
+      if (state.clusterGoalFilter === 'all') return clusters;
+      return clusters.filter(cluster => cluster.goalId === state.clusterGoalFilter);
+    }
+    function renderSavedClusters() {
+      renderClusterGoalFilter();
+      const clusters = filteredClusters();
+      $('cluster-count').textContent = `저장된 군집 ${clusters.length}개`;
+      $('peer-status').textContent = `저장된 군집 ${(state.clusters || []).length}개`;
+      $('saved-cluster-list').innerHTML = clusters.length ? renderClusterCards(clusters) : '<div class="empty">저장된 군집이 없습니다. CSV 분석 또는 batch save 후 여기에 표시됩니다.</div>';
+    }
     function renderClusterList() {
       const clusters = state.clusters || [];
-      $('cluster-list').innerHTML = clusters.length ? clusters.map(cluster => `
-        <div class="cluster-item">
-          <div class="bar-meta"><strong>${escapeHtml(cluster.goalName || cluster.goalId)}</strong><span>${escapeHtml(cluster.uploadedAt || cluster.createdAt || '-')}</span></div>
-          <div class="small">${escapeHtml(cluster.id)} · ${escapeHtml(cluster.peerGroupKey || '')}</div>
-          <div class="small">${escapeHtml((cluster.axisNames || []).join(', '))} = ${escapeHtml((cluster.values || []).map(v => formatNumber(v,4)).join(', '))} · rows ${escapeHtml(cluster.rowCount)}</div>
-          <div class="small">upload snapshot: peer N ${escapeHtml(cluster.peerGroupSizeAtUpload ?? '-')} · H ${formatPercent(cluster.heterogeneityAtUpload,1)} · C ${formatPercent(cluster.confidenceAtUpload,0)}</div>
-          <div class="cluster-actions">
-            <button class="secondary" type="button" data-cluster-reeval="${escapeHtml(cluster.id)}">현재 재평가</button>
-            <button class="danger" type="button" data-cluster-impact="${escapeHtml(cluster.id)}">삭제 영향 분석</button>
-          </div>
-        </div>`).join('') : '<div class="empty">저장된 군집이 없습니다.</div>';
+      $('cluster-list').innerHTML = clusters.length ? renderClusterCards(clusters) : '<div class="empty">저장된 군집이 없습니다.</div>';
     }
     function renderAll() {
-      renderStorageNote(); renderGoalSelects(); renderMapping(); renderBatch(); updateButtons();
+      renderStorageNote(); renderGoalSelects(); renderMapping(); renderBatch(); renderSavedClusters(); updateButtons();
     }
 
     async function handleFiles(fileList) {
@@ -469,29 +625,33 @@
         return { displayName:file.displayName, rows:file.rows, axisMapping:useGlobal ? state.axisMapping : buildSuggestedMapping(goal, file.headers) };
       });
     }
-    async function runAnalysis() {
+    async function runAnalysis(button=$('run-analysis')) {
       const message = validationMessage(); if (message) { setError(message); return; }
+      if (button.dataset.loading === 'true') return;
       const goal = goalById(state.selectedGoalId);
-      $('run-analysis').disabled = true; $('run-analysis').textContent = '분석 중...'; setError('');
+      setButtonLoading(button, true, state.files.length === 1 ? '분석 중...' : 'Batch preview 중...');
+      setError(''); setClusterMessage('', '');
       try {
         if (state.files.length === 1) {
           const response = await fetch('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) });
-          const data = await response.json(); if (!response.ok) throw new Error(data.error || '분석 실패');
-          state.clusters = data.clusters || state.clusters; state.batch = null; renderReport(data); renderAll();
+          const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
+          state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderReport(data); renderAll();
         } else {
           const response = await fetch('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) });
-          const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Batch 분석 실패');
+          const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || 'Batch 분석 실패'); }
           data.items = (data.items || []).map(item => ({ ...item, selected:Boolean(item.saveable) }));
-          state.batch = data; state.clusters = data.clusters || state.clusters; renderBatch();
+          state.batch = data; state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderBatch(); renderSavedClusters();
           const firstOk = data.items.find(item => item.analysisSuccess);
           if (firstOk) renderReport({ meta:data.meta, result:firstOk.result, summary:firstOk.summary || [], confidenceReasons:firstOk.confidenceReasons || [], visualizations:{ targetVector:firstOk.clusterVector || [] } });
         }
       } catch (error) { setError(error.message || '분석 중 오류가 발생했습니다.'); renderIssue(error.message || '분석 실패'); }
-      finally { $('run-analysis').textContent = '분석'; updateButtons(); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
-    async function saveSelectedBatch() {
+    async function saveSelectedBatch(button=$('save-selected')) {
       const records = (state.batch?.items || []).filter(item => item.selected && item.saveable).map(item => item.pendingRecord);
       if (!records.length) return;
+      if (button.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '저장 중...');
       try {
         const goal = goalById(state.selectedGoalId);
         const response = await fetch('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxisNames:selectedAxisNames(goal), records }) });
@@ -500,38 +660,49 @@
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
         state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
-        renderAll(); renderClusterList(); renderGoalPreview(); setAdminMessage('success', `${data.saved.length}개 cluster 저장 처리 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`);
-      } catch (error) { setError(error.message || 'Batch 저장 실패'); }
+        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 군집 저장 완료`); setAdminMessage('success', `${data.saved.length}개 군집 저장 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`);
+      } catch (error) { setError(error.message || 'Batch 저장 실패'); setClusterMessage('error', error.message || 'Batch 저장 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
-    async function exportReport(format) {
+    async function exportReport(format, button=null) {
       if (!state.report) return;
-      const response = await fetch('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) });
-      const data = await response.json(); if (!response.ok) { setError(data.error || 'Export 실패'); return; }
-      const blob = new Blob([data.content], { type:data.mime || 'text/plain' });
-      const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = data.filename || `leesin_report.${format}`; link.click(); URL.revokeObjectURL(link.href);
+      if (button?.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '내보내는 중...');
+      try {
+        const response = await fetch('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) });
+        const data = await response.json(); if (!response.ok) { setError(data.error || 'Export 실패'); return; }
+        const blob = new Blob([data.content], { type:data.mime || 'text/plain' });
+        const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = data.filename || `leesin_report.${format}`; link.click(); URL.revokeObjectURL(link.href);
+      } finally { setButtonLoading(button, false); updateButtons(); }
     }
 
     function syncDraftFromAdminForm() { state.draftGoal = state.draftGoal || blankGoal(); state.draftGoal.name = $('admin-goal-name').value.trim(); state.draftGoal.K_m = Number(state.draftGoal.K_m || 10); }
-    async function saveGoal() {
+    async function saveGoal(button=$('admin-save-goal')) {
       syncDraftFromAdminForm();
+      if (button.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '저장 중...');
       try {
         const response = await fetch('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 저장 실패');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
-    async function deleteGoal() {
-      if (!state.draftGoal?.id || !confirm('이 Goal을 삭제할까요? 저장된 cluster는 자동 삭제되지 않습니다.')) return;
+    async function deleteGoal(button=$('admin-delete-goal')) {
+      if (!state.draftGoal?.id || !confirm('이 Goal을 삭제할까요? 저장된 군집은 자동 삭제되지 않습니다.')) return;
+      if (button.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '삭제 중...');
       try {
         const response = await fetch('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 삭제 실패');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
     function renderImpact(data) {
       const d = data.deltas || {};
-      $('audit-title').textContent = '삭제 영향 분석';
-      $('audit-subtitle').textContent = data.cluster?.id || '';
+      $('audit-title').textContent = '영향 분석';
+      $('audit-subtitle').textContent = clusterDisplayName(data.cluster?.id);
       $('audit-content').innerHTML = `
         <div class="metrics">
           <div class="metric"><span class="small">Peer Group N</span><strong>${escapeHtml((d.peerGroupN || [data.currentAll?.peerGroupSize, data.withoutCluster?.peerGroupSize]).join(' → '))}</strong></div>
@@ -550,25 +721,53 @@
       $('confirm-delete-cluster').style.display = state.pendingDeleteId ? '' : 'none';
       $('audit-modal').showModal();
     }
-    async function showImpact(id) {
+    async function showImpact(id, button=null) {
+      if (button?.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '분석 중...');
       try {
         const response = await fetch('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || '영향 분석 실패');
-        renderImpact(data);
-      } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); }
+        state.clusterResults[id] = { type:'impact', data };
+        renderSavedClusters(); renderClusterList(); renderImpact(data);
+      } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); setClusterMessage('error', error.message || '영향 분석 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
-    async function confirmDeleteCluster() {
-      if (!state.pendingDeleteId || !confirm('영향 분석을 확인했습니다. 이 cluster를 삭제할까요?')) return;
+    async function confirmDeleteCluster(button=$('confirm-delete-cluster')) {
+      const displayName = clusterDisplayName(state.pendingDeleteId);
+      if (!state.pendingDeleteId || !confirm(`${displayName}을 삭제할까요?`)) return;
+      if (button.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '삭제 중...');
       try {
         const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || '삭제 실패');
-        state.clusters = data.clusters || []; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderAll(); renderClusterList(); renderGoalPreview(); setAdminMessage('success','Cluster가 삭제되었습니다.');
-      } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); }
+        state.clusters = data.clusters || []; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; delete state.clusterResults[state.pendingDeleteId]; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${displayName} 삭제 완료`); setAdminMessage('success', `${displayName} 삭제 완료`);
+      } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); setClusterMessage('error', error.message || '삭제 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
+    }
+    async function deleteCluster(id, button=null) {
+      const displayName = clusterDisplayName(id);
+      if (!id || !confirm(`${displayName}을 삭제할까요?`)) return;
+      if (button?.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '삭제 중...');
+      try {
+        const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || '삭제 실패');
+        state.clusters = data.clusters || [];
+        state.peerCounts = data.peerCounts || state.peerCounts;
+        state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
+        delete state.clusterResults[id];
+        renderAll(); renderClusterList(); renderGoalPreview();
+        setClusterMessage('success', `${displayName} 삭제 완료`);
+        setAdminMessage('success', `${displayName} 삭제 완료`);
+      } catch (error) {
+        setClusterMessage('error', error.message || '삭제 실패');
+        setAdminMessage('error', error.message || '삭제 실패');
+      } finally { setButtonLoading(button, false); updateButtons(); }
     }
     function renderReevaluation(item) {
       const uploaded = item.uploaded || {}; const current = item.current || {};
       $('audit-title').textContent = '업로드 당시 결과 vs 현재 재평가';
-      $('audit-subtitle').textContent = item.clusterId || '';
+      $('audit-subtitle').textContent = clusterDisplayName(item.clusterId);
       $('confirm-delete-cluster').style.display = 'none';
       $('audit-content').innerHTML = `
         <div class="pill">uploadedAt: ${escapeHtml(item.uploadedAt || '-')}</div>
@@ -588,12 +787,27 @@
         ${item.error ? `<div class="reason down">${escapeHtml(item.error)}</div>` : ''}`;
       $('audit-modal').showModal();
     }
-    async function showReevaluation(id) {
+    async function showReevaluation(id, button=null) {
+      if (button?.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '재평가 중...');
       try {
         const response = await fetch('/api/admin/clusters/reevaluate', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || '재평가 실패');
-        renderReevaluation((data.items || [])[0]);
-      } catch (error) { setAdminMessage('error', error.message || '재평가 실패'); }
+        const item = (data.items || [])[0];
+        state.clusterResults[id] = { type:'reeval', data:item };
+        renderSavedClusters(); renderClusterList(); renderReevaluation(item);
+      } catch (error) { setAdminMessage('error', error.message || '재평가 실패'); setClusterMessage('error', error.message || '재평가 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
+    }
+    function handleClusterAction(event) {
+      const button = event.target.closest('button');
+      if (!button) return;
+      const impact = button.dataset.clusterImpact;
+      const reeval = button.dataset.clusterReeval;
+      const deleteId = button.dataset.clusterDelete;
+      if (impact) showImpact(impact, button);
+      if (reeval) showReevaluation(reeval, button);
+      if (deleteId) deleteCluster(deleteId, button);
     }
 
     function bindEvents() {
@@ -605,9 +819,11 @@
       $('file-input').addEventListener('change', event => handleFiles(event.target.files));
       $('reset-button').addEventListener('click', () => { $('file-input').value=''; state.report=null; resetSelection(goalById(state.selectedGoalId), false); $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과가 여기에 표시됩니다.'; setError(''); });
       $('mapping-box').addEventListener('change', event => { const toggle=event.target.dataset.axisToggle; const axis=event.target.dataset.axisMap; if (toggle) state.selectedAxes[toggle]=event.target.checked; if (axis) state.axisMapping[axis]=event.target.value; state.report=null; state.batch=null; renderAll(); });
-      $('run-analysis').addEventListener('click', runAnalysis);
-      $('save-selected').addEventListener('click', saveSelectedBatch);
-      document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', () => exportReport(button.dataset.export)));
+      $('cluster-goal-filter').addEventListener('change', event => { state.clusterGoalFilter = event.target.value || 'all'; renderSavedClusters(); });
+      $('saved-cluster-list').addEventListener('click', handleClusterAction);
+      $('run-analysis').addEventListener('click', event => runAnalysis(event.currentTarget));
+      $('save-selected').addEventListener('click', event => saveSelectedBatch(event.currentTarget));
+      document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', event => exportReport(button.dataset.export, event.currentTarget)));
       $('batch-list').addEventListener('change', event => { const index=event.target.dataset.batchSelect; if (index === undefined) return; state.batch.items[Number(index)].selected = event.target.checked; updateButtons(); });
       $('admin-goal-select').addEventListener('change', event => { state.draftGoal=clone(goalById(event.target.value) || blankGoal()); renderAdmin(); });
       $('admin-new-goal').addEventListener('click', () => { state.draftGoal=blankGoal(); renderAdmin(); });
@@ -616,10 +832,10 @@
       $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); renderGoalPreview(); });
       $('axis-editor').addEventListener('change', () => renderAdmin());
       $('axis-editor').addEventListener('click', event => { const index=event.target.dataset.axisRemove; if (index === undefined) return; syncDraftFromAdminForm(); state.draftGoal.axes.splice(Number(index),1); if (!state.draftGoal.axes.length) state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
-      $('admin-save-goal').addEventListener('click', saveGoal);
-      $('admin-delete-goal').addEventListener('click', deleteGoal);
-      $('cluster-list').addEventListener('click', event => { const impact=event.target.dataset.clusterImpact; const reeval=event.target.dataset.clusterReeval; if (impact) showImpact(impact); if (reeval) showReevaluation(reeval); });
-      $('confirm-delete-cluster').addEventListener('click', confirmDeleteCluster);
+      $('admin-save-goal').addEventListener('click', event => saveGoal(event.currentTarget));
+      $('admin-delete-goal').addEventListener('click', event => deleteGoal(event.currentTarget));
+      $('cluster-list').addEventListener('click', handleClusterAction);
+      $('confirm-delete-cluster').addEventListener('click', event => confirmDeleteCluster(event.currentTarget));
     }
 
     function init() {
