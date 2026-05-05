@@ -36,6 +36,42 @@ class BinGridTracker:
         key = self.bin_key(row)
         self._bins[key] = self._bins.get(key, 0) + 1
 
+    def add_bin_counts(self, bin_counts: dict[str, int]) -> None:
+        for key, count in bin_counts.items():
+            try:
+                indices = json.loads(str(key))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(indices, list) or len(indices) != len(self.domain_range):
+                continue
+            try:
+                normalized_indices = [int(index) for index in indices]
+                increment = int(count)
+            except (TypeError, ValueError):
+                continue
+            axis_totals = [
+                max(1, int(math.ceil((hi - lo) / step)))
+                for (lo, hi), step in zip(self.domain_range, self.resolution)
+            ]
+            if any(index < 0 or index >= total for index, total in zip(normalized_indices, axis_totals)):
+                continue
+            normalized_key = json.dumps(normalized_indices, separators=(",", ":"))
+            if increment <= 0:
+                continue
+            self._bins[normalized_key] = self._bins.get(normalized_key, 0) + increment
+
+    @classmethod
+    def from_cluster_occupancies(
+        cls,
+        domain_range: list[tuple[float, float]],
+        resolution: list[float],
+        occupancies: list[dict[str, int]],
+    ) -> "BinGridTracker":
+        tracker = cls(domain_range, resolution)
+        for bin_counts in occupancies:
+            tracker.add_bin_counts(bin_counts)
+        return tracker
+
     def count_for(self, row: np.ndarray | list[float]) -> int:
         return self._bins.get(self.bin_key(row), 0)
 
@@ -49,6 +85,10 @@ class BinGridTracker:
     @property
     def occupied_bins(self) -> int:
         return len(self._bins)
+
+    @property
+    def observation_count(self) -> int:
+        return int(sum(self._bins.values()))
 
     @property
     def coverage(self) -> float:
@@ -146,7 +186,7 @@ class DataQualityAnalyzer:
         self.config = config
         self.p = len(config.axis_names)
         self._peers: list[np.ndarray] = []
-        self._grid = BinGridTracker(config.domain_range, config.resolution)
+        self._coverage_grid = BinGridTracker(config.domain_range, config.resolution)
 
     def add_peers(self, X: np.ndarray | list[list[float]]) -> None:
         rows = np.asarray(X, dtype=float)
@@ -155,7 +195,13 @@ class DataQualityAnalyzer:
         for row in rows:
             vector = np.asarray(row, dtype=float)
             self._peers.append(vector)
-            self._grid.add(vector)
+
+    def add_coverage_bin_counts(self, bin_counts: dict[str, int]) -> None:
+        self._coverage_grid.add_bin_counts(bin_counts)
+
+    def set_coverage_bin_counts(self, global_bin_counts: dict[str, int]) -> None:
+        self._coverage_grid = BinGridTracker(self.config.domain_range, self.config.resolution)
+        self._coverage_grid.add_bin_counts(global_bin_counts)
 
     def _select_engine(self, X: np.ndarray) -> tuple[str, bool | None, dict[str, float | bool]]:
         if len(X) < 10 or self.p < 2:
@@ -246,8 +292,8 @@ class DataQualityAnalyzer:
         # K_m is a Michaelis-Menten-shaped half-saturation constant:
         # Z = N / (N + K_m), so Z reaches 0.5 when N == K_m.
         sample_size_Z = count / (count + self.config.K_m)
-        coverage_C = self._grid.coverage
-        equitability_E = self._grid.equitability
+        coverage_C = self._coverage_grid.coverage
+        equitability_E = self._coverage_grid.equitability
         confidence = float((sample_size_Z * coverage_C * equitability_E) ** (1.0 / 3.0) * w_eff)
 
         return DiagnosisResult(
@@ -263,8 +309,8 @@ class DataQualityAnalyzer:
             equitability_E=equitability_E,
             w_eff=w_eff,
             confidence=confidence,
-            total_bins=self._grid.total_bins,
-            occupied_bins=self._grid.occupied_bins,
+            total_bins=self._coverage_grid.total_bins,
+            occupied_bins=self._coverage_grid.occupied_bins,
             mardia_skew_stat=float(mardia["skew_stat"]) if "skew_stat" in mardia else None,
             mardia_skew_pval=float(mardia["skew_pval"]) if "skew_pval" in mardia else None,
             mardia_kurt_stat=float(mardia["kurt_stat"]) if "kurt_stat" in mardia else None,

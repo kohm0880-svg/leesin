@@ -96,6 +96,49 @@ def normalize_optional_float_list(values: Any, size: int, default: float | None 
     return normalized
 
 
+def normalize_int_count_map(values: Any) -> dict[str, int]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key, value in values.items():
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        normalized[str(key)] = count
+    return normalized
+
+
+def normalize_axis_bin_occupancy(values: Any, axis_names: list[str]) -> dict[str, dict[str, int]]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, dict[str, int]] = {}
+    axis_lookup = {normalize_axis_name(name): str(name) for name in axis_names}
+    for raw_axis, counts in values.items():
+        axis_name = axis_lookup.get(normalize_axis_name(raw_axis), str(raw_axis))
+        count_map = normalize_int_count_map(counts)
+        if count_map:
+            normalized[axis_name] = count_map
+    return normalized
+
+
+def normalize_bin_occupancy_meta(meta: Any, row_count: int, bin_occupancy: dict[str, int]) -> dict[str, Any]:
+    source = meta if isinstance(meta, dict) else {}
+    valid_count = source.get("validMultidimensionalRowCount")
+    if valid_count is None:
+        valid_count = sum(bin_occupancy.values())
+    return {
+        "version": int(source.get("version") or 1),
+        "basis": str(source.get("basis") or ("row_level" if bin_occupancy else "unavailable")),
+        "validMultidimensionalRowCount": int(valid_count or 0),
+        "invalidRowCount": int(source.get("invalidRowCount") or 0),
+        "outOfDomainRowCount": int(source.get("outOfDomainRowCount") or 0),
+        "totalRows": int(source.get("totalRows") or row_count or 0),
+    }
+
+
 def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
     source = snapshot if isinstance(snapshot, dict) else {}
     normalized = dict(ANALYSIS_AT_UPLOAD_KEYS)
@@ -345,6 +388,9 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
         created_at = str(item.get("createdAt") or item.get("uploadedAt") or utc_now_iso())
         uploaded_at = str(item.get("uploadedAt") or created_at)
         analysis = normalize_analysis_snapshot(item.get("analysisAtUpload"))
+        bin_occupancy = normalize_int_count_map(item.get("binOccupancy"))
+        axis_bin_occupancy = normalize_axis_bin_occupancy(item.get("axisBinOccupancy"), axis_names)
+        bin_occupancy_meta = normalize_bin_occupancy_meta(item.get("binOccupancyMeta"), row_count, bin_occupancy)
         normalized = {
             "id": str(item.get("id") or f"cluster_{os.urandom(8).hex()}"),
             "goalId": goal_id,
@@ -357,6 +403,9 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "valuesVariance": normalize_optional_float_list(item.get("valuesVariance"), len(values), None),
             "valuesStd": normalize_optional_float_list(item.get("valuesStd"), len(values), None),
             "rowCount": row_count,
+            "binOccupancy": bin_occupancy,
+            "axisBinOccupancy": axis_bin_occupancy,
+            "binOccupancyMeta": bin_occupancy_meta,
             "createdAt": created_at,
             "uploadedAt": uploaded_at,
             "sourceBatchId": item.get("sourceBatchId") or item.get("source_batch_id"),
@@ -410,8 +459,8 @@ def save_cluster_store(clusters: list[dict[str, Any]]) -> None:
     normalized = [cluster for cluster in (_normalize_cluster(item) for item in clusters) if cluster]
     payload = {
         "version": 1,
-        "privacy": "Stores only mapped numeric axis vectors, row counts, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
-        "clusterDefinition": "One CSV file is one data cluster. CSV rows are repeated observations summarized into one cluster vector.",
+        "privacy": "Stores only mapped numeric axis vectors, row counts, row-level bin count summaries, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
+        "clusterDefinition": "One CSV file is one data cluster. CSV rows are repeated observations summarized into one cluster vector; coverage uses row-level bin occupancy summaries.",
         "clusters": normalized,
     }
     if _db_enabled():
@@ -560,6 +609,8 @@ def load_peer_clusters(
         if values is None:
             continue
         item = dict(cluster)
+        item["storedAxisNames"] = list(cluster.get("axisNames", []))
+        item["storedAxisSignature"] = str(cluster.get("axisSignature") or axis_subset_key(list(cluster.get("axisNames", []))))
         item["axisNames"] = list(selected_names)
         item["axisSignature"] = selected_key
         item["peerGroupKey"] = peer_group_key(wanted_goal_id, selected_names)
@@ -638,17 +689,27 @@ def list_cluster_summaries() -> list[dict[str, Any]]:
 
 
 def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
+    bin_occupancy = normalize_int_count_map(cluster.get("binOccupancy"))
+    axis_bin_occupancy = normalize_axis_bin_occupancy(cluster.get("axisBinOccupancy"), list(cluster.get("axisNames") or []))
+    bin_meta = normalize_bin_occupancy_meta(cluster.get("binOccupancyMeta"), int(cluster.get("rowCount", 0) or 0), bin_occupancy)
     return {
         "id": str(cluster.get("id", "")),
         "goalId": str(cluster.get("goalId", "")),
         "goalName": str(cluster.get("goalName", "")),
         "peerGroupKey": str(cluster.get("peerGroupKey", "")),
         "axisNames": list(cluster.get("axisNames") or []),
+        "axisSignature": str(cluster.get("axisSignature", "")),
         "values": [round(float(value), 6) for value in cluster.get("values", [])],
         "valuesMean": [None if value is None else round(float(value), 6) for value in cluster.get("valuesMean", [])],
         "valuesVariance": [None if value is None else round(float(value), 6) for value in cluster.get("valuesVariance", [])],
         "valuesStd": [None if value is None else round(float(value), 6) for value in cluster.get("valuesStd", [])],
         "rowCount": int(cluster.get("rowCount", 0) or 0),
+        "binOccupancy": bin_occupancy,
+        "axisBinOccupancy": axis_bin_occupancy,
+        "binOccupancyMeta": bin_meta,
+        "hasRowLevelBinOccupancy": bool(bin_occupancy),
+        "rowLevelValidCount": int(bin_meta.get("validMultidimensionalRowCount") or 0),
+        "rowLevelOccupiedBinCount": len(bin_occupancy),
         "createdAt": str(cluster.get("createdAt", "")),
         "uploadedAt": str(cluster.get("uploadedAt", cluster.get("createdAt", ""))),
         "sourceBatchId": cluster.get("sourceBatchId"),
@@ -661,4 +722,10 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "confidenceAtUpload": cluster.get("confidenceAtUpload"),
         "D2AtUpload": cluster.get("D2AtUpload"),
         "pValueAtUpload": cluster.get("pValueAtUpload"),
+        "sampleSizeZAtUpload": cluster.get("sampleSizeZAtUpload"),
+        "coverageCAtUpload": cluster.get("coverageCAtUpload"),
+        "equitabilityEAtUpload": cluster.get("equitabilityEAtUpload"),
+        "wEffAtUpload": cluster.get("wEffAtUpload"),
+        "totalBinsAtUpload": cluster.get("totalBinsAtUpload"),
+        "occupiedBinsAtUpload": cluster.get("occupiedBinsAtUpload"),
     }

@@ -68,6 +68,84 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
     }
 
 
+def bin_index_for_value(value: Any, domain_min: float, domain_max: float, resolution: float) -> tuple[int | None, str]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None, "invalid"
+    if not np.isfinite(numeric):
+        return None, "invalid"
+    if numeric < domain_min or numeric > domain_max:
+        return None, "out_of_domain"
+    total_bins = max(1, int(np.ceil((domain_max - domain_min) / resolution)))
+    if numeric == domain_max:
+        return total_bins - 1, "valid"
+    index = int(np.floor((numeric - domain_min) / resolution))
+    return max(0, min(total_bins - 1, index)), "valid"
+
+
+def compute_row_level_bin_occupancy(
+    rows: list[dict[str, Any]],
+    axis_mapping: dict[str, str],
+    selected_goal: dict[str, Any],
+) -> dict[str, Any]:
+    axes = selected_goal["axes"]
+    axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
+    bin_occupancy: dict[str, int] = {}
+    axis_bin_occupancy: dict[str, dict[str, int]] = {str(axis["name"]): {} for axis in axes}
+    valid_multidimensional = 0
+    invalid_rows = 0
+    out_of_domain_rows = 0
+
+    for row in rows:
+        multidimensional_indices: list[int] = []
+        row_has_invalid = False
+        row_has_out_of_domain = False
+        for axis in axes:
+            axis_name = str(axis["name"])
+            column = axis_mapping.get(axis_name) or axis_mapping_by_key.get(normalize_axis_name(axis_name))
+            raw_value = row.get(column, "") if column else ""
+            index, status = bin_index_for_value(
+                raw_value,
+                float(axis["domainMin"]),
+                float(axis["domainMax"]),
+                float(axis["resolution"]),
+            )
+            if status == "valid" and index is not None:
+                key = str(index)
+                axis_counts = axis_bin_occupancy[axis_name]
+                axis_counts[key] = axis_counts.get(key, 0) + 1
+                multidimensional_indices.append(index)
+            elif status == "invalid":
+                row_has_invalid = True
+            else:
+                row_has_out_of_domain = True
+
+        if row_has_invalid:
+            invalid_rows += 1
+            continue
+        if row_has_out_of_domain:
+            out_of_domain_rows += 1
+            continue
+        if len(multidimensional_indices) == len(axes):
+            key = json.dumps(multidimensional_indices, separators=(",", ":"))
+            bin_occupancy[key] = bin_occupancy.get(key, 0) + 1
+            valid_multidimensional += 1
+
+    return {
+        "bin_occupancy": bin_occupancy,
+        "axis_bin_occupancy": axis_bin_occupancy,
+        "bin_occupancy_meta": {
+            "version": 1,
+            "basis": "row_level",
+            "validMultidimensionalRowCount": valid_multidimensional,
+            "invalidRowCount": invalid_rows,
+            "outOfDomainRowCount": out_of_domain_rows,
+            "totalRows": len(rows),
+        },
+    }
+
+
 def build_cluster_vector(
     rows: list[dict[str, Any]],
     axis_mapping: dict[str, str],
@@ -92,6 +170,7 @@ def build_cluster_vector(
     counts = np.zeros(len(axes), dtype=int)
     columns = list(rows[0].keys()) if rows else []
     axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
+    occupancy = compute_row_level_bin_occupancy(rows, axis_mapping, selected_goal)
 
     for csv_row_number, row in enumerate(rows, start=2):
         for axis_index, axis in enumerate(axes):
@@ -102,10 +181,10 @@ def build_cluster_vector(
             raw_value = row.get(column, "")
             try:
                 numeric = float(raw_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Row {csv_row_number}, axis '{axis_name}', column '{column}' has non-numeric value: {raw_value!r}"
-                ) from exc
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(numeric):
+                continue
             counts[axis_index] += 1
             delta = numeric - means[axis_index]
             means[axis_index] += delta / counts[axis_index]
@@ -125,6 +204,9 @@ def build_cluster_vector(
         "values_mean": [round(float(value), 12) for value in means],
         "values_variance": [round(float(value), 12) for value in variance],
         "values_std": [round(float(value), 12) for value in std],
+        "bin_occupancy": occupancy["bin_occupancy"],
+        "axis_bin_occupancy": occupancy["axis_bin_occupancy"],
+        "bin_occupancy_meta": occupancy["bin_occupancy_meta"],
         "cluster_definition": "CSV file = one cluster; CSV rows = repeated observations summarized into one cluster vector.",
     }
 
@@ -233,13 +315,13 @@ def confidence_reasons(result: DiagnosisResult, warnings: list[dict[str, Any]] |
             "label": "Coverage",
             "score": round(float(result.coverage_C), 4),
             "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage는 사용자가 설정한 Domain Range와 Resolution 기준에서 Peer Group이 실험 공간을 얼마나 점유했는지를 나타내는 상대적 대표성 지표입니다.",
+            "message": "Coverage는 저장된 peer cluster들의 row-level bin occupancy가 Domain grid를 얼마나 점유했는지 나타냅니다.",
         },
         {
             "label": "Equitability",
             "score": round(float(result.equitability_E), 4),
             "impact": "down" if result.equitability_E < 0.5 else "stable",
-            "message": "점유된 bin 안에서 Peer Group cluster vector들이 얼마나 균형 있게 분포하는지 반영합니다.",
+            "message": "Equitability는 점유된 row-level bins 안에서 observation count가 얼마나 균등한지 반영합니다.",
         },
     ]
     if result.w_eff < 0.7:
@@ -278,11 +360,11 @@ def build_summary(result: DiagnosisResult) -> list[str]:
         messages.append("Sample Size가 부족합니다. 같은 Experiment Goal과 Axis 구성의 누적 군집을 더 확보하세요.")
     if result.coverage_C < 0.3:
         messages.append(
-            "Coverage가 낮습니다. 현재 전체 bin 수가 Peer Group 수에 비해 큽니다. "
+            "Coverage가 낮습니다. 저장된 peer cluster의 row-level bin occupancy가 아직 domain grid를 충분히 점유하지 못했습니다. "
             "Domain Range가 너무 넓거나 Resolution이 현재 데이터 규모에 비해 너무 세밀할 수 있습니다."
         )
     if result.equitability_E < 0.5:
-        messages.append("Equitability가 낮습니다. 일부 bin에 Peer Group cluster vector가 몰려 있습니다.")
+        messages.append("Equitability가 낮습니다. 점유된 row-level bin 안의 observation count가 일부 bin에 치우쳐 있습니다.")
     if result.w_eff < 0.7:
         messages.append("Engine Robustness가 낮아 최종 confidence가 보수적으로 반영되었습니다.")
     return messages
@@ -313,6 +395,19 @@ def make_cluster_record(
         "valuesVariance": dataset_meta.get("values_variance", [None for _ in values]),
         "valuesStd": dataset_meta.get("values_std", [None for _ in values]),
         "rowCount": int(dataset_meta["row_count"]),
+        "binOccupancy": dataset_meta.get("bin_occupancy", {}),
+        "axisBinOccupancy": dataset_meta.get("axis_bin_occupancy", {}),
+        "binOccupancyMeta": dataset_meta.get(
+            "bin_occupancy_meta",
+            {
+                "version": 1,
+                "basis": "row_level",
+                "validMultidimensionalRowCount": 0,
+                "invalidRowCount": 0,
+                "outOfDomainRowCount": 0,
+                "totalRows": int(dataset_meta["row_count"]),
+            },
+        ),
         "createdAt": now,
         "uploadedAt": now,
         "sourceBatchId": source_batch_id,
@@ -362,10 +457,82 @@ def analysis_peer_rows(
     return rows
 
 
+def analysis_peer_clusters(
+    goal: dict[str, Any],
+    axis_names: list[str],
+    exclude_cluster_id: str | None = None,
+) -> list[dict[str, Any]]:
+    return load_peer_clusters(str(goal["id"]), axis_names, exclude_cluster_id)
+
+
 def peer_matrix(rows: list[dict[str, Any]]) -> np.ndarray:
     if not rows:
         return np.empty((0, 0), dtype=float)
     return np.asarray([row["values"] for row in rows], dtype=float)
+
+
+def merge_count_maps(target: dict[str, int], source: dict[str, Any]) -> None:
+    for key, value in (source or {}).items():
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        target[str(key)] = target.get(str(key), 0) + count
+
+
+def count_map_total(source: dict[str, Any]) -> int:
+    total = 0
+    for value in (source or {}).values():
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            total += count
+    return total
+
+
+def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_axis_names: list[str]) -> dict[str, Any]:
+    selected_signature = axis_subset_key(selected_axis_names)
+    bin_counts: dict[str, int] = {}
+    axis_bin_counts: dict[str, dict[str, int]] = {}
+    eligible_count = 0
+    legacy_excluded = 0
+    axis_signature_excluded = 0
+    row_level_observation_count = 0
+
+    for cluster in peer_clusters:
+        stored_signature = str(cluster.get("storedAxisSignature") or cluster.get("axisSignature") or "")
+        if stored_signature != selected_signature:
+            axis_signature_excluded += 1
+            continue
+        cluster_bin_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
+        if not cluster_bin_counts:
+            legacy_excluded += 1
+            continue
+        eligible_count += 1
+        merge_count_maps(bin_counts, cluster_bin_counts)
+        meta = cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {}
+        try:
+            row_level_observation_count += int(meta.get("validMultidimensionalRowCount") or count_map_total(cluster_bin_counts))
+        except (TypeError, ValueError):
+            row_level_observation_count += count_map_total(cluster_bin_counts)
+        for axis_name, counts in (cluster.get("axisBinOccupancy") or {}).items():
+            axis_counts = axis_bin_counts.setdefault(str(axis_name), {})
+            merge_count_maps(axis_counts, counts)
+
+    return {
+        "binCounts": bin_counts,
+        "axisBinCounts": axis_bin_counts,
+        "coverageBasis": "row_level_bin_occupancy",
+        "coverageEligibleClusterCount": eligible_count,
+        "coverageLegacyExcludedClusterCount": legacy_excluded,
+        "coverageAxisSignatureExcludedClusterCount": axis_signature_excluded,
+        "rowLevelObservationCount": row_level_observation_count,
+        "occupiedBins": len(bin_counts),
+    }
 
 
 def out_of_domain_warnings(
@@ -419,17 +586,20 @@ def analysis_snapshot(
     peer_group_size: int,
     warnings: list[dict[str, Any]] | None = None,
     error: str | None = None,
+    coverage_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if result is None:
         snapshot = normalize_analysis_snapshot({})
         snapshot["analysisTimestamp"] = utc_now_iso()
         snapshot["peerGroupSize"] = int(peer_group_size)
         snapshot["outOfDomainWarnings"] = warnings or []
+        if coverage_info:
+            snapshot.update({key: value for key, value in coverage_info.items() if key != "binCounts" and key != "axisBinCounts"})
         if error:
             snapshot["error"] = error
         return snapshot
     payload = result.to_payload(axis_names)
-    return normalize_analysis_snapshot(
+    snapshot = normalize_analysis_snapshot(
         {
             "analysisTimestamp": utc_now_iso(),
             "peerGroupSize": int(peer_group_size),
@@ -455,6 +625,9 @@ def analysis_snapshot(
             "outOfDomainWarnings": warnings or [],
         }
     )
+    if coverage_info:
+        snapshot.update({key: value for key, value in coverage_info.items() if key != "binCounts" and key != "axisBinCounts"})
+    return snapshot
 
 
 def axis_ablation_sensitivity(
@@ -559,126 +732,47 @@ def run_vector_analysis(
 ) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in selected_goal["axes"]]
     config = experiment_config_from_goal(selected_goal)
-    peer_rows = analysis_peer_rows(goal, axis_names, exclude_cluster_id)
+    peer_clusters = analysis_peer_clusters(goal, axis_names, exclude_cluster_id)
+    peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
     peer_group = peer_matrix(peer_rows)
     if peer_group.size == 0:
         peer_group = np.empty((0, len(axis_names)), dtype=float)
+    coverage_info = build_global_bin_counts(peer_clusters, axis_names)
     warnings = out_of_domain_warnings(selected_goal, target_vector, peer_group, peer_rows)
     analyzer = DataQualityAnalyzer(config)
     analyzer.add_peers(peer_group)
+    analyzer.add_coverage_bin_counts(coverage_info["binCounts"])
     result = analyzer.diagnose(target_vector)
     result_payload = result.to_payload(config.axis_names)
     result_payload["axisAblationSensitivity"] = axis_ablation_sensitivity(selected_goal, target_vector, peer_group, result)
     result_payload["outOfDomainWarnings"] = warnings
     result_payload["outOfDomainWarningCount"] = len(warnings)
+    result_payload["coverageBasis"] = coverage_info["coverageBasis"]
+    result_payload["coverageEligibleClusterCount"] = coverage_info["coverageEligibleClusterCount"]
+    result_payload["coverageLegacyExcludedClusterCount"] = coverage_info["coverageLegacyExcludedClusterCount"]
+    result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageAxisSignatureExcludedClusterCount"]
+    result_payload["rowLevelObservationCount"] = coverage_info["rowLevelObservationCount"]
     return {
         "config": config,
         "peerRows": peer_rows,
+        "peerClusters": peer_clusters,
         "peerGroup": peer_group,
+        "coverageInfo": {
+            **coverage_info,
+            "totalBins": result.total_bins,
+            "occupiedBins": result.occupied_bins,
+        },
         "warnings": warnings,
         "result": result,
         "resultPayload": result_payload,
-        "snapshot": analysis_snapshot(result, axis_names, len(peer_group), warnings),
+        "snapshot": analysis_snapshot(
+            result,
+            axis_names,
+            len(peer_group),
+            warnings,
+            coverage_info={**coverage_info, "totalBins": result.total_bins, "occupiedBins": result.occupied_bins},
+        ),
     }
-
-
-def analyze_request(payload: dict[str, Any]) -> dict[str, Any]:
-    goals = normalize_goals_for_display(load_goal_store())
-    goal_id = str(payload.get("goalId", ""))
-    goal = next((item for item in goals if item["id"] == goal_id), None)
-    if goal is None:
-        raise ValueError("선택한 Experiment Goal이 존재하지 않습니다.")
-
-    rows = payload.get("rows", [])
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("업로드된 CSV row가 비어 있습니다.")
-
-    axis_mapping = payload.get("axisMapping", {})
-    if not isinstance(axis_mapping, dict):
-        raise ValueError("Axis column mapping 정보가 없습니다.")
-
-    selected_axis_names = payload.get("selectedAxes")
-    if selected_axis_names is None:
-        selected_axis_names = [axis["name"] for axis in goal["axes"]]
-    if not isinstance(selected_axis_names, list):
-        raise ValueError("selectedAxes must be a list.")
-    selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
-    axis_names = [axis["name"] for axis in selected_goal["axes"]]
-    key = peer_group_key(str(goal["id"]), axis_names)
-
-    config = ExperimentConfig(
-        axis_names=axis_names,
-        domain_range=[(axis["domainMin"], axis["domainMax"]) for axis in selected_goal["axes"]],
-        resolution=[axis["resolution"] for axis in selected_goal["axes"]],
-        K_m=float(selected_goal.get("K_m", K_M)),
-    )
-
-    cluster_vector, dataset_meta = build_cluster_vector(rows, axis_mapping, selected_goal)
-    pending_cluster = make_cluster_record(goal, selected_goal, cluster_vector, dataset_meta)
-    saved_cluster = None
-    saved_cluster_is_new = False
-
-    try:
-        peer_group = get_peer_group(goal, axis_names)
-        analyzer = DataQualityAnalyzer(config)
-        analyzer.add_peers(peer_group)
-        result = analyzer.diagnose(cluster_vector)
-    except ValueError as exc:
-        if should_save_data_clusters():
-            saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
-        stored_count = len(load_peer_clusters(str(goal["id"]), axis_names))
-        saved_text = "저장했습니다" if saved_cluster_is_new else "이미 저장되어 있습니다"
-        raise ValueError(
-            "이 Experiment Goal과 Axis 구성이 정확히 같은 누적 군집만 Peer Group으로 사용됩니다. "
-            f"현재 저장된 Peer Group N={stored_count}, 필요한 최소 N={len(axis_names) + 1}. "
-            f"이번 CSV 군집은 원본 없이 axis 숫자 벡터로 {saved_text}. "
-            f"새 Goal은 충분한 과거 군집이 쌓이기 전까지 분석 신뢰도가 낮거나 분석이 제한될 수 있습니다. 내부 사유: {exc}"
-        ) from exc
-
-    if should_save_data_clusters():
-        saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
-
-    summary = build_summary(result)
-    summary.append(f"Peer Group Key는 '{key}'입니다. CSV 파일 하나는 하나의 데이터 군집으로 저장됩니다.")
-    if saved_cluster:
-        status = "새 군집으로 저장했습니다" if saved_cluster_is_new else "이미 저장된 군집이라 중복 저장하지 않았습니다"
-        summary.append(f"업로드 원본은 저장하지 않고 axis 숫자 벡터만 {status}.")
-
-    return {
-        "meta": {
-            "experiment_goal": goal["name"],
-            "goal_id": goal["id"],
-            "peer_group_key": key,
-            "target_rows": dataset_meta["row_count"],
-            "uploaded_columns": dataset_meta["columns"],
-            "summary_method": dataset_meta["summary_method"],
-            "peer_group_size": int(len(peer_group)),
-            "axis_names": config.axis_names,
-            "axes": selected_goal["axes"],
-            "available_axes": goal["axes"],
-            "config": asdict(config),
-            "cluster_definition": dataset_meta["cluster_definition"],
-            "storage_policy": "Raw upload rows, filenames, and unmapped columns are not stored.",
-        },
-        "result": result.to_payload(config.axis_names),
-        "summary": summary,
-        "confidenceReasons": confidence_reasons(result),
-        "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result),
-        "clusters": list_cluster_summaries(),
-        "peerCounts": bootstrap_peer_counts(),
-        "peerSubsetCounts": bootstrap_peer_subset_counts(),
-        "savedDataCluster": None
-        if saved_cluster is None
-        else {
-            "id": saved_cluster["id"],
-            "isNew": saved_cluster_is_new,
-            "axisNames": saved_cluster["axisNames"],
-            "rowCount": saved_cluster["rowCount"],
-            "storeFile": storage_label(CLUSTER_STORE_PATH),
-            "storagePolicy": saved_cluster["storagePolicy"],
-        },
-    }
-
 
 def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
@@ -711,17 +805,23 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         analysis = run_vector_analysis(goal, selected_goal, cluster_vector)
     except ValueError as exc:
-        peer_rows = analysis_peer_rows(goal, axis_names)
+        peer_clusters = analysis_peer_clusters(goal, axis_names)
+        peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
         peer_group = peer_matrix(peer_rows)
         if peer_group.size == 0:
             peer_group = np.empty((0, len(axis_names)), dtype=float)
+        coverage_info = build_global_bin_counts(peer_clusters, axis_names)
+        coverage_info["totalBins"] = BinGridTracker(
+            [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
+            [float(axis["resolution"]) for axis in selected_goal["axes"]],
+        ).total_bins
         warnings = out_of_domain_warnings(selected_goal, cluster_vector, peer_group, peer_rows)
         pending_cluster = make_cluster_record(
             goal,
             selected_goal,
             cluster_vector,
             dataset_meta,
-            analysis_at_upload=analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc)),
+            analysis_at_upload=analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc), coverage_info=coverage_info),
         )
         if should_save_data_clusters():
             saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
@@ -773,6 +873,13 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "config": asdict(config),
             "cluster_definition": dataset_meta["cluster_definition"],
             "analysis_timestamp": analysis["snapshot"]["analysisTimestamp"],
+            "coverageBasis": analysis["coverageInfo"]["coverageBasis"],
+            "coverageEligibleClusterCount": analysis["coverageInfo"]["coverageEligibleClusterCount"],
+            "coverageLegacyExcludedClusterCount": analysis["coverageInfo"]["coverageLegacyExcludedClusterCount"],
+            "coverageAxisSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageAxisSignatureExcludedClusterCount"],
+            "rowLevelObservationCount": analysis["coverageInfo"]["rowLevelObservationCount"],
+            "occupiedBins": analysis["coverageInfo"]["occupiedBins"],
+            "totalBins": analysis["coverageInfo"]["totalBins"],
             "storage_policy": "Raw upload rows, filenames, and unmapped columns are not stored.",
         },
         "result": result_payload,
@@ -859,6 +966,8 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                             "confidence": result_payload["confidence"],
                             "engine": result_payload["engine"],
                             "peer_group_size": len(analysis["peerGroup"]),
+                            "coverage_eligible_cluster_count": analysis["coverageInfo"]["coverageEligibleClusterCount"],
+                            "row_level_observation_count": analysis["coverageInfo"]["rowLevelObservationCount"],
                         },
                         "result": result_payload,
                         "confidenceReasons": confidence_reasons(analysis["result"], analysis["warnings"]),
@@ -866,18 +975,26 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
             except ValueError as exc:
-                peer_rows = analysis_peer_rows(goal, axis_names)
+                peer_clusters = analysis_peer_clusters(goal, axis_names)
+                peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
                 peer_group = peer_matrix(peer_rows)
                 if peer_group.size == 0:
                     peer_group = np.empty((0, len(axis_names)), dtype=float)
+                coverage_info = build_global_bin_counts(peer_clusters, axis_names)
+                coverage_info["totalBins"] = BinGridTracker(
+                    [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
+                    [float(axis["resolution"]) for axis in selected_goal["axes"]],
+                ).total_bins
                 warnings = out_of_domain_warnings(selected_goal, cluster_vector, peer_group, peer_rows)
-                snapshot = analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc))
+                snapshot = analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc), coverage_info=coverage_info)
                 item_payload["analysisError"] = str(exc)
                 item_payload["analysisSummary"] = {
                     "heterogeneity": None,
                     "confidence": None,
                     "engine": None,
                     "peer_group_size": len(peer_group),
+                    "coverage_eligible_cluster_count": coverage_info["coverageEligibleClusterCount"],
+                    "row_level_observation_count": coverage_info["rowLevelObservationCount"],
                 }
 
             record = make_cluster_record(
@@ -1182,17 +1299,13 @@ def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
 def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in goal["axes"]]
     stored_clusters = load_peer_clusters(str(goal["id"]), axis_names)
-    rows = np.asarray([cluster["values"] for cluster in stored_clusters], dtype=float) if stored_clusters else np.empty((0, len(axis_names)))
+    coverage_info = build_global_bin_counts(stored_clusters, axis_names)
     axis_previews = []
     total_bins = 1
     for axis_index, axis in enumerate(goal["axes"]):
         total = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
         total_bins *= total
-        if len(rows):
-            distribution = build_axis_distribution(rows[:, axis_index], float(axis["domainMin"]), float(axis["domainMax"]), float(axis["resolution"]))
-            occupied = distribution["occupiedBins"]
-        else:
-            occupied = 0
+        occupied = len((coverage_info["axisBinCounts"].get(str(axis["name"])) or {}))
         axis_previews.append(
             {
                 "axis": axis["name"],
@@ -1201,18 +1314,26 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
                 "coverage": occupied / total if total else 0.0,
             }
         )
-    tracker = BinGridTracker(
-        [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in goal["axes"]],
-        [float(axis["resolution"]) for axis in goal["axes"]],
-    )
-    for row in rows:
-        tracker.add(row)
+    occupied_bins = len(coverage_info["binCounts"])
+    warnings = []
+    if total_bins > 100000:
+        warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
+    if coverage_info["coverageLegacyExcludedClusterCount"]:
+        warnings.append("일부 기존 군집은 row-level bin 정보가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.")
+    if coverage_info["coverageAxisSignatureExcludedClusterCount"]:
+        warnings.append("Axis 구성이 다른 군집은 row-level coverage 계산에서 제외되고 heterogeneity peer로만 사용할 수 있습니다.")
     return {
+        "basis": coverage_info["coverageBasis"],
         "axisBins": axis_previews,
         "totalBins": total_bins,
-        "occupiedBins": tracker.occupied_bins,
-        "estimatedCoverage": tracker.occupied_bins / total_bins if total_bins else 0.0,
-        "warning": "Resolution may be too fine for the current data volume." if total_bins > 100000 else "",
+        "occupiedBins": occupied_bins,
+        "estimatedCoverage": occupied_bins / total_bins if total_bins else 0.0,
+        "coverageEligibleClusterCount": coverage_info["coverageEligibleClusterCount"],
+        "coverageLegacyExcludedClusterCount": coverage_info["coverageLegacyExcludedClusterCount"],
+        "coverageAxisSignatureExcludedClusterCount": coverage_info["coverageAxisSignatureExcludedClusterCount"],
+        "rowLevelObservationCount": coverage_info["rowLevelObservationCount"],
+        "warning": " ".join(warnings),
+        "warnings": warnings,
     }
 
 
@@ -1237,12 +1358,12 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
             "goalStoreFile": storage_label(GOAL_STORE_PATH),
             "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
             "clusterCount": len(load_cluster_store()),
-            "savedItems": ["Experiment Goal 설정", "비식별 numeric cluster vector"],
+            "savedItems": ["Experiment Goal 설정", "비식별 numeric cluster vector", "row-level bin count summary"],
             "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
         },
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 하나의 데이터 군집으로 취급됩니다. CSV 내부 row들은 해당 군집의 반복 관측값이며, 시스템은 row들을 axis별 대표값으로 집계하여 하나의 cluster vector를 만듭니다.",
-            "coverage": "Coverage는 절대적인 데이터 품질 점수가 아니라, 사용자가 설정한 Domain Range와 Resolution 기준에서 Peer Group이 실험 공간을 얼마나 점유했는지를 나타내는 상대적 대표성 지표입니다.",
+            "coverage": "Coverage와 Equitability는 cluster 대표값이 아니라 저장된 row-level bin occupancy summary 기준으로 계산됩니다.",
             "K_m": "K_m은 Sample Size confidence가 0.5에 도달하는 Peer Group 수를 의미하는 half-saturation constant입니다. Z=N/(N+K_m), N=K_m일 때 Z=0.5입니다.",
         },
     }

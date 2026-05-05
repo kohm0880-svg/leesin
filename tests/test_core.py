@@ -25,6 +25,8 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(meta["values_mean"], [2.0, 12.0])
         self.assertEqual(meta["values_variance"], [2.0, 8.0])
         self.assertEqual(meta["values_std"], [1.414213562373, 2.828427124746])
+        self.assertIn("bin_occupancy", meta)
+        self.assertEqual(meta["bin_occupancy_meta"]["totalRows"], 2)
 
     def test_same_axes_different_goal_id_are_separated(self) -> None:
         clusters = [
@@ -73,12 +75,82 @@ class CoreBehaviorTests(unittest.TestCase):
             peers = storage.get_peer_group(goal, ["a", "c"])
         np.testing.assert_allclose(peers, np.array([[1.0, 3.0]]))
 
-    def test_coverage_occupied_bins_do_not_exceed_peer_count(self) -> None:
+    def test_coverage_uses_row_level_bins_while_sample_size_uses_cluster_count(self) -> None:
         config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
         analyzer = DataQualityAnalyzer(config)
         peers = np.array([[1, 1], [2, 2], [2.1, 2.1], [3, 3]], dtype=float)
         analyzer.add_peers(peers)
-        self.assertLessEqual(analyzer._grid.occupied_bins, len(peers))
+        analyzer.add_coverage_bin_counts(
+            {
+                "[0,0]": 10,
+                "[1,1]": 12,
+                "[2,2]": 8,
+                "[3,3]": 6,
+                "[4,4]": 5,
+                "[5,5]": 4,
+            }
+        )
+        result = analyzer.diagnose([4, 4])
+        self.assertEqual(result.occupied_bins, 6)
+        self.assertGreater(result.occupied_bins, len(peers))
+        self.assertAlmostEqual(result.sample_size_Z, len(peers) / (len(peers) + config.K_m))
+
+    def test_row_level_bin_occupancy_counts_valid_invalid_and_out_of_domain_rows(self) -> None:
+        goal = {
+            "id": "goal_a",
+            "name": "A",
+            "K_m": 10.0,
+            "axes": [
+                {**axis("x"), "resolution": 5.0},
+                {**axis("y"), "resolution": 5.0},
+            ],
+        }
+        rows = [
+            {"x_col": "0", "y_col": "0"},
+            {"x_col": "4.9", "y_col": "10"},
+            {"x_col": "10", "y_col": "10"},
+            {"x_col": "bad", "y_col": "2"},
+            {"x_col": "11", "y_col": "2"},
+        ]
+        _vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
+        occupancy = meta["bin_occupancy"]
+        occupancy_meta = meta["bin_occupancy_meta"]
+        self.assertEqual(sum(occupancy.values()), occupancy_meta["validMultidimensionalRowCount"])
+        self.assertEqual(occupancy_meta["validMultidimensionalRowCount"], 3)
+        self.assertEqual(occupancy_meta["invalidRowCount"], 1)
+        self.assertEqual(occupancy_meta["outOfDomainRowCount"], 1)
+        self.assertEqual(occupancy["[0,0]"], 1)
+        self.assertEqual(occupancy["[0,1]"], 1)
+        self.assertEqual(occupancy["[1,1]"], 1)
+
+    def test_legacy_clusters_remain_heterogeneity_peers_but_not_coverage_peers(self) -> None:
+        clusters = [
+            {"id": "legacy", "storedAxisSignature": storage.axis_subset_key(["x", "y"]), "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 3},
+            {
+                "id": "eligible",
+                "storedAxisSignature": storage.axis_subset_key(["x", "y"]),
+                "axisNames": ["x", "y"],
+                "values": [2, 2],
+                "rowCount": 3,
+                "binOccupancy": {"[0,0]": 2, "[1,1]": 1},
+                "axisBinOccupancy": {"x": {"0": 2, "1": 1}, "y": {"0": 2, "1": 1}},
+                "binOccupancyMeta": {"validMultidimensionalRowCount": 3},
+            },
+            {
+                "id": "axis_mismatch",
+                "storedAxisSignature": storage.axis_subset_key(["x", "y", "z"]),
+                "axisNames": ["x", "y"],
+                "values": [3, 3],
+                "rowCount": 3,
+                "binOccupancy": {"[0,0,0]": 3},
+            },
+        ]
+        coverage = app.build_global_bin_counts(clusters, ["x", "y"])
+        self.assertEqual(coverage["coverageEligibleClusterCount"], 1)
+        self.assertEqual(coverage["coverageLegacyExcludedClusterCount"], 1)
+        self.assertEqual(coverage["coverageAxisSignatureExcludedClusterCount"], 1)
+        self.assertEqual(coverage["rowLevelObservationCount"], 3)
+        self.assertEqual(coverage["occupiedBins"], 2)
 
     def test_heterogeneity_increases_with_d2(self) -> None:
         config = ExperimentConfig(["x", "y"], [(-10, 10), (-10, 10)], [1, 1])
@@ -106,9 +178,13 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertGreater(far.D2, near.D2)
         self.assertGreater(far.heterogeneity, near.heterogeneity)
 
-    def test_non_numeric_value_reports_row_and_axis(self) -> None:
+    def test_non_numeric_values_are_excluded_from_row_level_bins(self) -> None:
         goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
-        with self.assertRaisesRegex(ValueError, "Row 2.*axis 'x'.*bad"):
+        vector, meta = app.build_cluster_vector([{"x_col": "1"}, {"x_col": "bad"}], {"x": "x_col"}, goal)
+        np.testing.assert_allclose(vector, np.array([1.0]))
+        self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 1)
+        self.assertEqual(meta["bin_occupancy_meta"]["invalidRowCount"], 1)
+        with self.assertRaisesRegex(ValueError, "numeric row"):
             app.build_cluster_vector([{"x_col": "bad"}], {"x": "x_col"}, goal)
 
     def test_batch_analysis_uses_only_preexisting_peer_group(self) -> None:
