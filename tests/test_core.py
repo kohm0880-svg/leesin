@@ -123,6 +123,52 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(occupancy["[0,1]"], 1)
         self.assertEqual(occupancy["[1,1]"], 1)
 
+    def test_three_hundred_rows_bin_occupancy_matches_valid_row_count(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [{**axis("x"), "domainMax": 300.0, "resolution": 10.0}]}
+        rows = [{"x_col": str(index)} for index in range(300)]
+        _vector, meta = app.build_cluster_vector(rows, {"x": "x_col"}, goal)
+        self.assertEqual(sum(meta["bin_occupancy"].values()), 300)
+        self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 300)
+        self.assertEqual(meta["cluster_vector_row_count"], 300)
+
+    def test_cluster_vector_uses_multidimensional_numeric_rows(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        rows = [
+            {"x_col": "1", "y_col": "bad"},
+            {"x_col": "3", "y_col": "5"},
+            {"x_col": "5", "y_col": "7"},
+        ]
+        vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
+        np.testing.assert_allclose(vector, np.array([4.0, 6.0]))
+        self.assertEqual(meta["cluster_vector_row_count"], 2)
+        self.assertEqual(meta["axis_numeric_counts"], {"x": 3, "y": 2})
+        self.assertEqual(meta["bin_occupancy_meta"]["invalidRowCount"], 1)
+
+    def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
+        rows_a = [{"x_col": str(value)} for value in [2, 4, 6, 8]]
+        rows_b = [{"x_col": str(value)} for value in [1, 4, 7, 8]]
+        vector_a, meta_a = app.build_cluster_vector(rows_a, {"x": "x_col"}, goal)
+        vector_b, meta_b = app.build_cluster_vector(rows_b, {"x": "x_col"}, goal)
+        np.testing.assert_allclose(vector_a, vector_b)
+        record_a = app.make_cluster_record(goal, goal, vector_a, meta_a)
+        record_b = app.make_cluster_record(goal, goal, vector_b, meta_b)
+        self.assertNotEqual(record_a["binOccupancy"], record_b["binOccupancy"])
+        self.assertNotEqual(storage.cluster_fingerprint(record_a), storage.cluster_fingerprint(record_b))
+
+        backing_store: list[dict] = []
+
+        def save_store(clusters: list[dict]) -> None:
+            backing_store[:] = clusters
+
+        with patch("storage.load_cluster_store", side_effect=lambda: list(backing_store)), patch("storage.save_cluster_store", side_effect=save_store):
+            _saved_a, is_new_a = storage.save_peer_cluster(record_a)
+            _saved_b, is_new_b = storage.save_peer_cluster(record_b)
+
+        self.assertTrue(is_new_a)
+        self.assertTrue(is_new_b)
+        self.assertEqual(len(backing_store), 2)
+
     def test_legacy_clusters_remain_heterogeneity_peers_but_not_coverage_peers(self) -> None:
         clusters = [
             {"id": "legacy", "storedAxisSignature": storage.axis_subset_key(["x", "y"]), "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 3},
@@ -186,6 +232,38 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(meta["bin_occupancy_meta"]["invalidRowCount"], 1)
         with self.assertRaisesRegex(ValueError, "numeric row"):
             app.build_cluster_vector([{"x_col": "bad"}], {"x": "x_col"}, goal)
+
+    def test_report_visualizations_use_axis_bin_occupancy_when_available(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
+        analyzer = DataQualityAnalyzer(config)
+        peers = np.array([[1, 1], [2, 2], [3, 3]], dtype=float)
+        analyzer.add_peers(peers)
+        analyzer.add_coverage_bin_counts({"[0,0]": 3, "[1,1]": 4})
+        result = analyzer.diagnose([4, 4])
+        visualizations = app.build_report_visualizations(
+            goal,
+            peers,
+            np.array([4, 4]),
+            result,
+            {"axisBinCounts": {"x": {"0": 3, "1": 4}, "y": {"0": 3, "1": 4}}},
+        )
+        self.assertEqual(visualizations["coverage"]["basis"], "row_level_bin_occupancy")
+        self.assertEqual(visualizations["coverage"]["axes"][0]["basis"], "row_level_bin_occupancy")
+        self.assertEqual(visualizations["coverage"]["axes"][0]["bins"][:2], [3, 4])
+        self.assertEqual(visualizations["coverage"]["axes"][0]["observationCount"], 7)
+
+    def test_report_visualizations_mark_cluster_vector_fallback_for_legacy(self) -> None:
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
+        analyzer = DataQualityAnalyzer(config)
+        peers = np.array([[1, 1], [2, 2], [3, 3]], dtype=float)
+        analyzer.add_peers(peers)
+        analyzer.add_coverage_bin_counts({"[0,0]": 3})
+        result = analyzer.diagnose([4, 4])
+        visualizations = app.build_report_visualizations(goal, peers, np.array([4, 4]), result, {"axisBinCounts": {}})
+        self.assertEqual(visualizations["coverage"]["basis"], "cluster_vector_fallback")
+        self.assertEqual(visualizations["coverage"]["axes"][0]["basis"], "cluster_vector_fallback")
 
     def test_batch_analysis_uses_only_preexisting_peer_group(self) -> None:
         goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}

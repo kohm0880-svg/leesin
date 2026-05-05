@@ -139,6 +139,15 @@ def normalize_bin_occupancy_meta(meta: Any, row_count: int, bin_occupancy: dict[
     }
 
 
+def bin_occupancy_hash(values: Any) -> str:
+    count_map = normalize_int_count_map(values)
+    canonical = {
+        str(key): int(count)
+        for key, count in sorted(count_map.items(), key=lambda item: str(item[0]))
+    }
+    return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
     source = snapshot if isinstance(snapshot, dict) else {}
     normalized = dict(ANALYSIS_AT_UPLOAD_KEYS)
@@ -180,6 +189,7 @@ def cluster_fingerprint_payload(record: dict[str, Any]) -> dict[str, Any]:
         "values": [value for _axis_key, value in axis_value_pairs],
         "rowCount": int(record.get("rowCount", 1) or 1),
         "summaryMethod": str(record.get("summaryMethod") or "mean"),
+        "binOccupancyHash": str(record.get("binOccupancyHash") or bin_occupancy_hash(record.get("binOccupancy"))),
     }
 
 
@@ -391,6 +401,9 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
         bin_occupancy = normalize_int_count_map(item.get("binOccupancy"))
         axis_bin_occupancy = normalize_axis_bin_occupancy(item.get("axisBinOccupancy"), axis_names)
         bin_occupancy_meta = normalize_bin_occupancy_meta(item.get("binOccupancyMeta"), row_count, bin_occupancy)
+        cluster_vector_row_count = int(item.get("clusterVectorRowCount") or item.get("validMultidimensionalNumericRowCount") or row_count or 0)
+        axis_numeric_counts = normalize_int_count_map(item.get("axisNumericCounts"))
+        occupancy_hash = str(item.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy))
         normalized = {
             "id": str(item.get("id") or f"cluster_{os.urandom(8).hex()}"),
             "goalId": goal_id,
@@ -406,6 +419,10 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "binOccupancy": bin_occupancy,
             "axisBinOccupancy": axis_bin_occupancy,
             "binOccupancyMeta": bin_occupancy_meta,
+            "binOccupancyHash": occupancy_hash,
+            "clusterVectorRowCount": cluster_vector_row_count,
+            "clusterVectorBasis": str(item.get("clusterVectorBasis") or "valid_multidimensional_numeric_rows"),
+            "axisNumericCounts": axis_numeric_counts,
             "createdAt": created_at,
             "uploadedAt": uploaded_at,
             "sourceBatchId": item.get("sourceBatchId") or item.get("source_batch_id"),
@@ -707,9 +724,13 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "binOccupancy": bin_occupancy,
         "axisBinOccupancy": axis_bin_occupancy,
         "binOccupancyMeta": bin_meta,
+        "binOccupancyHash": str(cluster.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy)),
         "hasRowLevelBinOccupancy": bool(bin_occupancy),
         "rowLevelValidCount": int(bin_meta.get("validMultidimensionalRowCount") or 0),
         "rowLevelOccupiedBinCount": len(bin_occupancy),
+        "clusterVectorRowCount": int(cluster.get("clusterVectorRowCount") or cluster.get("validMultidimensionalNumericRowCount") or 0),
+        "clusterVectorBasis": str(cluster.get("clusterVectorBasis") or "valid_multidimensional_numeric_rows"),
+        "axisNumericCounts": normalize_int_count_map(cluster.get("axisNumericCounts")),
         "createdAt": str(cluster.get("createdAt", "")),
         "uploadedAt": str(cluster.get("uploadedAt", cluster.get("createdAt", ""))),
         "sourceBatchId": cluster.get("sourceBatchId"),

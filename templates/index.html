@@ -71,6 +71,9 @@
     .metric-pill,.status-badge { display:inline-flex; align-items:center; width:max-content; gap:6px; padding:4px 8px; border-radius:999px; background:#f7f9fb; color:var(--ink); border:1px solid var(--line); font-size:12px; font-weight:800; }
     .status-badge.warn { background:#fff1ee; color:var(--red); border-color:#f4c7bd; }
     .status-badge.ok { background:#edf8f3; color:var(--green); border-color:#bfe3d4; }
+    .mini-bin-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(12px,1fr)); gap:3px; align-items:end; min-height:34px; margin-top:8px; }
+    .mini-bin { min-height:4px; border-radius:3px 3px 0 0; background:#b6c7d6; }
+    .mini-bin.active { background:var(--teal); }
     .spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; display:inline-block; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
     .loading { opacity:.72; pointer-events:none; }
     @keyframes spin { to { transform:rotate(360deg); } }
@@ -125,7 +128,7 @@
       <div class="panel section-card" id="upload-section">
         <div class="panel-head"><div><h2>Column Mapping</h2><p class="small">각 파일은 독립 cluster입니다. Batch 분석은 저장 전 기존 Peer Group만 기준으로 사용합니다.</p></div></div>
         <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
-        <div class="mapper-head"><span>Axis</span><span>CSV Column</span></div>
+        <div class="mapper-head" id="mapper-head"><span>Axis</span><span>CSV Column</span></div>
         <div id="mapping-box"></div>
         <div class="notice" id="storage-note"></div>
         <div class="error" id="user-error-box"></div>
@@ -247,6 +250,7 @@
     const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()] });
     const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
     const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
+    const coverageBasisLabel = value => value === 'row_level_bin_occupancy' ? 'row-level bin occupancy' : (value === 'cluster_vector_fallback' ? 'cluster vector fallback' : String(value || '-'));
     const axisLabel = axis => axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
     const normalizeKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣_]/g,'');
     const selectedAxes = goal => goal ? goal.axes.filter(axis => state.selectedAxes[axis.name]) : [];
@@ -395,8 +399,13 @@
       const goal = goalById(state.selectedGoalId);
       const first = state.files[0];
       const peerCountText = goal ? ` · current Peer Group N ${currentPeerCount(goal)}` : '';
-      $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}${peerCountText}` : `아직 업로드된 파일이 없습니다.${peerCountText}`;
-      if (!goal) { $('mapping-box').innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>'; return; }
+      $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}${peerCountText}` : `파일을 업로드하면 Column Mapping을 펼칩니다.${peerCountText}`;
+      if (!goal) { $('mapper-head').style.display = 'none'; $('mapping-box').innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>'; return; }
+      $('mapper-head').style.display = first ? 'grid' : 'none';
+      if (!first) {
+        $('mapping-box').innerHTML = '<div class="empty">CSV/TSV/TXT 파일을 선택하면 axis mapping을 설정할 수 있습니다.</div>';
+        return;
+      }
       $('mapping-box').innerHTML = goal.axes.map(axis => `
         <div class="mapping-row">
           <label class="axis-toggle"><input type="checkbox" data-axis-toggle="${escapeHtml(axis.name)}" ${state.selectedAxes[axis.name] ? 'checked' : ''}><span>${escapeHtml(axisLabel(axis))}</span></label>
@@ -423,8 +432,36 @@
             <span>${item.duplicate ? 'duplicate' : 'unique'}</span>
             <span>${item.saveable ? 'saveable' : 'blocked'}</span>
           </div>
-          <div class="small">analysis: ${item.analysisSuccess ? `ok · H ${formatPercent(item.analysisSummary?.heterogeneity,1)} · C ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer N ${escapeHtml(item.analysisSummary?.peer_group_size)} · coverage clusters ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · peer N ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
+          <div class="small">analysis: ${item.analysisSuccess ? `ok · H ${formatPercent(item.analysisSummary?.heterogeneity,1)} · C ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer N ${escapeHtml(item.analysisSummary?.peer_group_size)} · vector rows ${escapeHtml(item.clusterVectorRowCount ?? '-')} · row-level valid ${escapeHtml(item.rowLevelValidCount ?? 0)} · coverage clusters ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · peer N ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
         </div>`).join('');
+    }
+
+    function renderMiniBins(bins) {
+      const values = (bins || []).slice(0, 40).map(value => Number(value) || 0);
+      if (!values.length) return '';
+      const max = Math.max(1, ...values);
+      return `<div class="mini-bin-grid">${values.map(value => {
+        const height = value ? Math.max(8, Math.round((value / max) * 34)) : 4;
+        return `<span class="mini-bin ${value ? 'active' : ''}" title="${escapeHtml(value)}" style="height:${height}px"></span>`;
+      }).join('')}</div>${(bins || []).length > 40 ? '<div class="small">처음 40개 bin만 표시</div>' : ''}`;
+    }
+    function renderCoverageAxisDistributions(visualizations) {
+      const axes = visualizations?.coverage?.axes || [];
+      if (!axes.length) return '';
+      return `<div><h3>Coverage Axis Distribution</h3>${axes.map(axis => `
+        <div class="pill">
+          <div class="bar-meta">
+            <span>${escapeHtml(axis.label || axis.axis)}</span>
+            <strong>${escapeHtml(axis.occupiedBins ?? 0)}/${escapeHtml(axis.totalBins ?? 0)} bins</strong>
+          </div>
+          <div class="inline-metrics">
+            <span class="metric-pill">${escapeHtml(coverageBasisLabel(axis.basis))}</span>
+            <span class="metric-pill">observations ${escapeHtml(axis.observationCount ?? 0)}</span>
+            <span class="metric-pill">coverage ${formatPercent(axis.coverage,1)}</span>
+          </div>
+          ${axis.fallbackReason ? `<div class="tag warn">${escapeHtml(axis.fallbackReason)}</div>` : ''}
+          ${renderMiniBins(axis.bins)}
+        </div>`).join('')}</div>`;
     }
 
     function renderReport(report) {
@@ -439,6 +476,7 @@
       const axisExcluded = result.coverageAxisSignatureExcludedClusterCount ?? meta.coverageAxisSignatureExcludedClusterCount ?? 0;
       const occupiedBins = result.occupied_bins ?? meta.occupiedBins ?? 0;
       const totalBins = result.total_bins ?? meta.totalBins ?? 0;
+      const visualizationBasis = report.visualizations?.coverage?.basis || result.coverageBasis || meta.coverageBasis || 'row_level_bin_occupancy';
       $('report-content').className = '';
       $('report-content').innerHTML = `
         ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => `${escapeHtml(w.role)} ${escapeHtml(w.axis)}=${escapeHtml(w.value)} outside [${escapeHtml(w.domainMin)}, ${escapeHtml(w.domainMax)}]`).join('<br>')}</div>` : ''}
@@ -457,6 +495,7 @@
             <strong>Coverage 기준</strong><br>
             저장된 peer cluster들의 row-level bin occupancy summary 기준입니다.
             <div class="inline-metrics" style="margin-top:8px;">
+              <span class="metric-pill">visualization ${escapeHtml(coverageBasisLabel(visualizationBasis))}</span>
               <span class="metric-pill">eligible clusters ${escapeHtml(eligibleClusters)}</span>
               <span class="metric-pill">row-level observations ${escapeHtml(rowLevelObservations)}</span>
               <span class="metric-pill">occupied bins ${escapeHtml(occupiedBins)}/${escapeHtml(totalBins)}</span>
@@ -466,6 +505,7 @@
             ${legacyExcluded ? '<div class="tag warn">row-level bin 정보가 없는 기존 군집은 coverage/equitability 계산에서 제외됩니다.</div>' : ''}
           </div>
           <div class="small">D² ${formatNumber(result.D2,4)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
+          ${renderCoverageAxisDistributions(report.visualizations)}
           <div><h3>Axis별 Contribution</h3>${(result.contributions || []).map(item => `<div class="pill"><div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${formatNumber(item.percent,1)}%</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(item.percent || 0))}%"></div></div></div>`).join('')}</div>
           <div><h3>Axis Ablation Sensitivity</h3>${ablations.map(item => `<div class="pill"><strong>${escapeHtml(item.removedAxis)}</strong> · ${escapeHtml(item.status)}${item.status === 'ok' ? ` · H ${formatPercent(item.heterogeneity_without_axis,1)} · C ${formatPercent(item.confidence_without_axis,0)} · ΔD² ${formatNumber(item.delta_D2,4)}<br><span class="small">${escapeHtml(item.interpretation || '')}</span>` : ''}</div>`).join('') || '<div class="empty">결과 없음</div>'}</div>
           <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
@@ -649,6 +689,7 @@
           <div class="axis-values">${axisValues || '<div class="empty">Axis 대표값이 없습니다.</div>'}</div>
           <div class="inline-metrics">
             <span class="metric-pill">rows ${escapeHtml(cluster.rowCount ?? '-')}</span>
+            <span class="metric-pill">vector rows ${escapeHtml(cluster.clusterVectorRowCount ?? '-')}</span>
             <span class="metric-pill">valid row bins ${escapeHtml(cluster.rowLevelValidCount ?? 0)}</span>
             <span class="metric-pill">occupied bins ${escapeHtml(cluster.rowLevelOccupiedBinCount ?? 0)}</span>
           </div>
@@ -682,6 +723,7 @@
       const clusters = filteredClusters();
       $('cluster-count').textContent = `저장된 군집 ${clusters.length}개`;
       $('peer-status').textContent = `저장된 군집 ${(state.clusters || []).length}개`;
+      if (!(state.clusters || []).length && !state.pendingDeleteId) setClusterMessage('', '');
       $('saved-cluster-list').innerHTML = clusters.length ? renderClusterCards(clusters) : '<div class="empty">저장된 군집이 없습니다. CSV 분석 또는 batch save 후 여기에 표시됩니다.</div>';
     }
     function renderClusterList() {

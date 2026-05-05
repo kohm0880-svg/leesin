@@ -167,12 +167,15 @@ def build_cluster_vector(
     axes = selected_goal["axes"]
     means = np.zeros(len(axes), dtype=float)
     m2 = np.zeros(len(axes), dtype=float)
-    counts = np.zeros(len(axes), dtype=int)
+    axis_numeric_counts = np.zeros(len(axes), dtype=int)
+    cluster_vector_row_count = 0
     columns = list(rows[0].keys()) if rows else []
     axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
     occupancy = compute_row_level_bin_occupancy(rows, axis_mapping, selected_goal)
 
-    for csv_row_number, row in enumerate(rows, start=2):
+    for row in rows:
+        row_values: list[float] = []
+        row_is_numeric_for_all_axes = True
         for axis_index, axis in enumerate(axes):
             axis_name = axis["name"]
             column = axis_mapping.get(axis_name) or axis_mapping_by_key.get(normalize_axis_name(axis_name))
@@ -182,20 +185,30 @@ def build_cluster_vector(
             try:
                 numeric = float(raw_value)
             except (TypeError, ValueError):
+                row_is_numeric_for_all_axes = False
+                row_values.append(0.0)
                 continue
             if not np.isfinite(numeric):
+                row_is_numeric_for_all_axes = False
+                row_values.append(0.0)
                 continue
-            counts[axis_index] += 1
+            axis_numeric_counts[axis_index] += 1
+            row_values.append(numeric)
+
+        if not row_is_numeric_for_all_axes or len(row_values) != len(axes):
+            continue
+
+        cluster_vector_row_count += 1
+        for axis_index, numeric in enumerate(row_values):
             delta = numeric - means[axis_index]
-            means[axis_index] += delta / counts[axis_index]
+            means[axis_index] += delta / cluster_vector_row_count
             delta_after = numeric - means[axis_index]
             m2[axis_index] += delta * delta_after
 
-    for axis_index, axis in enumerate(axes):
-        if counts[axis_index] == 0:
-            raise ValueError(f"Axis '{axis['name']}'에 사용할 수 있는 numeric row가 없습니다.")
+    if cluster_vector_row_count == 0:
+        raise ValueError("선택된 모든 Axis에 사용할 수 있는 multidimensional numeric row가 없습니다.")
 
-    variance = np.divide(m2, np.maximum(counts - 1, 1), out=np.zeros_like(m2), where=counts > 1)
+    variance = m2 / max(cluster_vector_row_count - 1, 1) if cluster_vector_row_count > 1 else np.zeros_like(m2)
     std = np.sqrt(variance)
     return means, {
         "row_count": len(rows),
@@ -204,6 +217,9 @@ def build_cluster_vector(
         "values_mean": [round(float(value), 12) for value in means],
         "values_variance": [round(float(value), 12) for value in variance],
         "values_std": [round(float(value), 12) for value in std],
+        "cluster_vector_row_count": int(cluster_vector_row_count),
+        "cluster_vector_basis": "valid_multidimensional_numeric_rows",
+        "axis_numeric_counts": {str(axis["name"]): int(axis_numeric_counts[index]) for index, axis in enumerate(axes)},
         "bin_occupancy": occupancy["bin_occupancy"],
         "axis_bin_occupancy": occupancy["axis_bin_occupancy"],
         "bin_occupancy_meta": occupancy["bin_occupancy_meta"],
@@ -232,6 +248,27 @@ def build_axis_distribution(values: np.ndarray, domain_min: float, domain_max: f
     }
 
 
+def build_axis_distribution_from_counts(counts_by_bin: dict[str, Any], total_bins: int) -> dict[str, Any]:
+    counts = [0 for _ in range(total_bins)]
+    for raw_index, raw_count in (counts_by_bin or {}).items():
+        try:
+            index = int(raw_index)
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0 or index < 0 or index >= total_bins:
+            continue
+        counts[index] += count
+    occupied = sum(1 for count in counts if count > 0)
+    return {
+        "totalBins": total_bins,
+        "occupiedBins": occupied,
+        "coverage": occupied / total_bins if total_bins else 0.0,
+        "bins": counts,
+        "observationCount": int(sum(counts)),
+    }
+
+
 def axis_display_label(axis: dict[str, Any]) -> str:
     return f"{axis['name']} ({axis.get('unit')})" if axis.get("unit") else str(axis["name"])
 
@@ -241,21 +278,34 @@ def build_report_visualizations(
     peer_group: np.ndarray,
     target_vector: np.ndarray,
     result: DiagnosisResult,
+    coverage_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     axes = goal["axes"]
     sample_size_items = []
     coverage_axes = []
     equitability_axes = []
     goal_k_m = float(goal.get("K_m", K_M))
+    axis_bin_counts = coverage_info.get("axisBinCounts", {}) if isinstance(coverage_info, dict) else {}
+    axis_bin_counts_by_key = {normalize_axis_name(axis_name): counts for axis_name, counts in axis_bin_counts.items()}
 
     for index, axis in enumerate(axes):
-        axis_values = peer_group[:, index]
-        distribution = build_axis_distribution(
-            axis_values,
-            float(axis["domainMin"]),
-            float(axis["domainMax"]),
-            float(axis["resolution"]),
-        )
+        axis_values = peer_group[:, index] if peer_group.ndim == 2 and peer_group.shape[1] > index else np.asarray([], dtype=float)
+        total_axis_bins = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
+        row_level_counts = axis_bin_counts_by_key.get(normalize_axis_name(axis["name"]), {})
+        if row_level_counts:
+            distribution = build_axis_distribution_from_counts(row_level_counts, total_axis_bins)
+            distribution_basis = "row_level_bin_occupancy"
+            peer_values = []
+        else:
+            distribution = build_axis_distribution(
+                axis_values,
+                float(axis["domainMin"]),
+                float(axis["domainMax"]),
+                float(axis["resolution"]),
+            )
+            distribution["observationCount"] = int(np.count_nonzero(~np.isnan(axis_values)))
+            distribution_basis = "cluster_vector_fallback"
+            peer_values = [round(float(value), 6) for value in axis_values]
         non_empty_count = int(np.count_nonzero(~np.isnan(axis_values)))
         sample_size_items.append(
             {
@@ -275,7 +325,9 @@ def build_report_visualizations(
                 "domainMax": float(axis["domainMax"]),
                 "resolution": float(axis["resolution"]),
                 "targetValue": round(float(target_vector[index]), 6),
-                "peerValues": [round(float(value), 6) for value in axis_values],
+                "peerValues": peer_values,
+                "basis": distribution_basis,
+                "fallbackReason": "" if distribution_basis == "row_level_bin_occupancy" else "axisBinOccupancy unavailable; displaying saved cluster representative vectors.",
                 **distribution,
             }
         )
@@ -285,15 +337,20 @@ def build_report_visualizations(
                 "label": axis_display_label(axis),
                 "unit": axis.get("unit", ""),
                 "status": "balanced" if result.equitability_E >= 0.5 else "imbalanced",
+                "basis": distribution_basis,
                 "bins": distribution["bins"],
+                "observationCount": distribution.get("observationCount", 0),
             }
         )
 
+    basis_values = {axis["basis"] for axis in coverage_axes}
+    visualization_basis = basis_values.pop() if len(basis_values) == 1 else "mixed"
     return {
         "sampleSize": {"peerGroupCount": int(len(peer_group)), "z": round(float(result.sample_size_Z), 6), "items": sample_size_items},
-        "coverage": {"score": round(float(result.coverage_C), 6), "axes": coverage_axes},
+        "coverage": {"score": round(float(result.coverage_C), 6), "basis": visualization_basis, "axes": coverage_axes},
         "equitability": {
             "score": round(float(result.equitability_E), 6),
+            "basis": visualization_basis,
             "status": "balanced" if result.equitability_E >= 0.5 else "imbalanced",
             "axes": equitability_axes,
         },
@@ -395,6 +452,9 @@ def make_cluster_record(
         "valuesVariance": dataset_meta.get("values_variance", [None for _ in values]),
         "valuesStd": dataset_meta.get("values_std", [None for _ in values]),
         "rowCount": int(dataset_meta["row_count"]),
+        "clusterVectorRowCount": int(dataset_meta.get("cluster_vector_row_count") or dataset_meta["row_count"]),
+        "clusterVectorBasis": str(dataset_meta.get("cluster_vector_basis") or "valid_multidimensional_numeric_rows"),
+        "axisNumericCounts": dataset_meta.get("axis_numeric_counts", {}),
         "binOccupancy": dataset_meta.get("bin_occupancy", {}),
         "axisBinOccupancy": dataset_meta.get("axis_bin_occupancy", {}),
         "binOccupancyMeta": dataset_meta.get(
@@ -864,6 +924,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "goal_id": goal["id"],
             "peer_group_key": key,
             "target_rows": dataset_meta["row_count"],
+            "cluster_vector_rows": dataset_meta.get("cluster_vector_row_count"),
+            "row_level_valid_rows": dataset_meta.get("bin_occupancy_meta", {}).get("validMultidimensionalRowCount"),
             "uploaded_columns": dataset_meta["columns"],
             "summary_method": dataset_meta["summary_method"],
             "peer_group_size": int(len(peer_group)),
@@ -885,7 +947,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         "result": result_payload,
         "summary": summary,
         "confidenceReasons": confidence_reasons(result, analysis["warnings"]),
-        "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result),
+        "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result, analysis["coverageInfo"]),
         "clusters": list_cluster_summaries(),
         "peerCounts": bootstrap_peer_counts(),
         "peerSubsetCounts": bootstrap_peer_subset_counts(),
@@ -896,6 +958,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "isNew": saved_cluster_is_new,
             "axisNames": saved_cluster["axisNames"],
             "rowCount": saved_cluster["rowCount"],
+            "clusterVectorRowCount": saved_cluster.get("clusterVectorRowCount"),
             "storeFile": storage_label(CLUSTER_STORE_PATH),
             "storagePolicy": saved_cluster["storagePolicy"],
         },
@@ -950,6 +1013,8 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
             item_payload.update(
                 {
                     "rowCount": dataset_meta["row_count"],
+                    "clusterVectorRowCount": dataset_meta.get("cluster_vector_row_count"),
+                    "rowLevelValidCount": dataset_meta.get("bin_occupancy_meta", {}).get("validMultidimensionalRowCount"),
                     "axisMappingStatus": "mapped",
                     "clusterVector": [round(float(value), 6) for value in cluster_vector],
                 }
