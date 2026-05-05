@@ -13,11 +13,15 @@
     .topbar { display:flex; justify-content:space-between; gap:16px; padding:18px; margin-bottom:14px; }
     h1,h2,h3,p { margin-top:0; } h1 { margin-bottom:5px; font-size:28px; }
     .subtitle,.small,.meta { color:var(--muted); line-height:1.55; font-size:13px; }
-    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) minmax(260px,1.25fr) auto auto auto; gap:12px; align-items:end; padding:14px; }
-    .quick-nav-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; margin:14px 0; }
+    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) minmax(260px,1.25fr) auto auto; gap:12px; align-items:end; padding:14px; }
+    .quick-nav-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:14px 0; }
     .quick-nav-item { display:grid; gap:4px; min-height:68px; align-content:center; justify-items:start; text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--ink); font-weight:800; box-shadow:0 6px 16px rgba(23,33,43,.05); }
     .quick-nav-item span { color:var(--muted); font-size:12px; font-weight:700; }
     .quick-nav-item:hover { border-color:#9eb8cc; transform:translateY(-1px); }
+    .quick-nav-item.active { border-color:var(--teal); background:#e9f7f4; color:var(--teal); }
+    .quick-nav-item.active span { color:var(--teal); }
+    .view-section { display:none; }
+    .view-section.active { display:block; }
     .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(380px,.95fr); gap:14px; align-items:start; margin-top:14px; }
     .panel { padding:16px; }
     .panel-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
@@ -101,108 +105,124 @@
     <header class="topbar">
       <div>
         <h1>Leesin 데이터 품질 인증</h1>
-        <p class="subtitle">CSV 파일 하나를 하나의 데이터 군집으로 보고, heterogeneity는 cluster 대표 vector로, coverage/equitability는 저장된 row-level bin occupancy로 계산합니다.</p>
+        <p class="subtitle">
+          CSV 하나를 하나의 군집으로 저장합니다. 이질성은 군집 대표 vector 기준으로 계산하고,
+          Coverage/Equitability는 저장된 row-level bin occupancy 기준으로 계산합니다.
+          Sample Size N은 row 수가 아니라 같은 실험 목적의 저장 군집 수입니다.
+        </p>
         <span id="peer-status" class="tag"></span>
       </div>
-      <button class="ghost" id="settings-button" type="button">설정 / 감사</button>
     </header>
 
     <nav class="quick-nav-grid" aria-label="주요 기능">
-      <button class="quick-nav-item" id="quick-goals" type="button">실험 목적<span>Goal / Axis 편집</span></button>
-      <a class="quick-nav-item" href="#upload-section">데이터 분석<span>CSV mapping / 분석</span></a>
-      <a class="quick-nav-item" href="#batch-panel">Batch 업로드<span>Preview / 선택 저장</span></a>
-      <a class="quick-nav-item" href="#saved-clusters-panel">저장된 군집<span>카드 grid / 필터</span></a>
-      <a class="quick-nav-item" href="#report-panel">리포트<span>Confidence / Export</span></a>
-      <button class="quick-nav-item" id="quick-settings" type="button">설정 / 관리<span>Audit / 삭제 / 재평가</span></button>
+      <button class="quick-nav-item active" type="button" data-view="analysis-view">데이터 분석<span>CSV mapping / 분석</span></button>
+      <button class="quick-nav-item" type="button" data-view="batch-view">Batch 업로드<span>Preview / 선택 저장</span></button>
+      <button class="quick-nav-item" type="button" data-view="clusters-view">저장된 군집<span>카드 grid / 필터</span></button>
+      <button class="quick-nav-item" type="button" data-view="report-view">리포트<span>Confidence / Export</span></button>
+      <button class="quick-nav-item" type="button" data-view="goal-admin-view">실험 목적 / 관리<span>Goal / Axis / Audit</span></button>
     </nav>
 
-    <section class="toolbar section-card">
-      <label>Experiment Goal<select id="goal-select"></select></label>
-      <label>CSV / TSV / TXT files<input id="file-input" type="file" accept=".csv,.tsv,.txt" multiple></label>
-      <button class="primary" id="run-analysis" type="button" disabled>분석</button>
-      <button class="secondary" id="save-selected" type="button" disabled>선택 저장</button>
-      <button class="ghost" id="reset-button" type="button">초기화</button>
-    </section>
+    <section id="analysis-view" class="view-section active">
+      <section class="toolbar section-card">
+        <label>Experiment Goal<select id="goal-select"></select></label>
+        <label>CSV / TSV / TXT files<input id="file-input" type="file" accept=".csv,.tsv,.txt" multiple></label>
+        <button class="primary" id="run-analysis" type="button" disabled>분석</button>
+        <button class="ghost" id="reset-button" type="button">초기화</button>
+      </section>
 
-    <section class="grid">
-      <div class="panel section-card" id="upload-section">
+      <section class="panel section-card" id="upload-section">
         <div class="panel-head"><div><h2>Column Mapping</h2><p class="small">각 파일은 독립 cluster입니다. Batch 분석은 저장 전 기존 Peer Group만 기준으로 사용합니다.</p></div></div>
         <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
         <div class="mapper-head" id="mapper-head"><span>Axis</span><span>CSV Column</span></div>
         <div id="mapping-box"></div>
         <div class="notice" id="storage-note"></div>
         <div class="error" id="user-error-box"></div>
-      </div>
+      </section>
+    </section>
 
-      <div class="panel section-card" id="report-panel">
+    <section id="batch-view" class="view-section">
+      <section class="panel section-card" id="batch-panel">
         <div class="panel-head">
-          <div><h2>분석 리포트</h2><p class="small">이질성(heterogeneity)과 신뢰도(confidence)는 분리 표시됩니다.</p></div>
+          <div><h2>Batch Upload Preview</h2><p class="small">파일명은 이 화면에서만 임시 표시되며 저장 record에는 포함되지 않습니다.</p></div>
+          <div class="cluster-actions">
+            <span class="tag" id="batch-id"></span>
+            <button class="secondary" id="save-selected" type="button" disabled>선택 저장</button>
+          </div>
+        </div>
+        <div id="batch-list" class="batch-list"></div>
+      </section>
+    </section>
+
+    <section id="clusters-view" class="view-section">
+      <section class="panel section-card" id="saved-clusters-panel">
+        <div class="panel-head">
+          <div>
+            <h2>저장된 군집</h2>
+            <p class="small">저장된 실제 cluster record만 Peer Group 후보로 사용됩니다.</p>
+          </div>
+          <div class="cluster-toolbar">
+            <label>Experiment Goal 필터<select id="cluster-goal-filter"></select></label>
+            <label>정렬<select id="cluster-sort"><option value="latest">최신순</option><option value="oldest">오래된순</option></select></label>
+            <label>검색<input id="cluster-search" placeholder="Goal 또는 Axis 검색"></label>
+            <span class="tag" id="cluster-count">저장된 군집 0개</span>
+          </div>
+        </div>
+        <div class="success" id="cluster-success-box"></div>
+        <div class="error" id="cluster-error-box"></div>
+        <div id="saved-cluster-list" class="saved-cluster-list cluster-grid"></div>
+      </section>
+    </section>
+
+    <section id="report-view" class="view-section">
+      <section class="panel section-card" id="report-panel">
+        <div class="panel-head">
+          <div><h2>분석 리포트</h2><p class="small">이질성은 cluster 대표 vector 기준, coverage/equitability는 row-level bin occupancy 기준으로 표시됩니다.</p></div>
           <div class="export-actions">
             <button class="secondary" data-export="json" type="button" disabled>JSON</button>
             <button class="secondary" data-export="csv" type="button" disabled>CSV</button>
             <button class="secondary" data-export="html" type="button" disabled>HTML</button>
           </div>
         </div>
-        <div id="report-content" class="empty">분석을 실행하면 결과가 여기에 표시됩니다.</div>
-      </div>
+        <div id="report-content" class="empty">분석을 실행하면 리포트가 여기에 표시됩니다.</div>
+      </section>
     </section>
 
-    <section class="panel section-card" id="batch-panel" style="display:none;">
-      <div class="panel-head">
-        <div><h2>Batch Upload Preview</h2><p class="small">파일명은 이 화면에서만 임시 표시되며 저장 record에는 포함되지 않습니다.</p></div>
-        <span class="tag" id="batch-id"></span>
-      </div>
-      <div id="batch-list" class="batch-list"></div>
-    </section>
-
-    <section class="panel section-card" id="saved-clusters-panel">
-      <div class="panel-head">
+    <section id="goal-admin-view" class="view-section">
+      <section class="panel section-card" id="goal-admin-panel">
+        <div class="panel-head">
+          <div>
+            <h2>실험 목적 / 관리</h2>
+            <p class="small">Goal, Axis, Bin Preview, 저장된 군집 Audit을 한 곳에서 관리합니다. 원본 CSV, 파일명, unmapped column, 개인정보 column은 저장하지 않습니다.</p>
+          </div>
+        </div>
+        <div class="notice">
+          <strong>계산 기준</strong><br>
+          Sample Size N은 같은 실험 목적과 호환 Axis 구성을 가진 저장 군집 수입니다. Heterogeneity는 cluster 대표 vector 기준이며, Coverage C와 Equitability E는 row-level bin occupancy 기준입니다.
+        </div>
+        <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off"></label>
+        <div class="admin-toolbar">
+          <label>Existing Goal<select id="admin-goal-select"></select></label>
+          <button class="secondary" id="admin-new-goal" type="button">새 Goal</button>
+          <button class="danger" id="admin-delete-goal" type="button">Goal 삭제</button>
+        </div>
+        <label>Experiment Goal Name<input id="admin-goal-name"></label>
         <div>
-          <h2>저장된 군집</h2>
-          <p class="small">저장된 실제 cluster record만 Peer Group 후보로 사용됩니다.</p>
+          <h3>Axis editor</h3>
+          <div id="axis-editor" class="axis-editor"></div>
+          <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
         </div>
-        <div class="cluster-toolbar">
-          <label>Experiment Goal 필터<select id="cluster-goal-filter"></select></label>
-          <label>정렬<select id="cluster-sort"><option value="latest">최신순</option><option value="oldest">오래된순</option></select></label>
-          <label>검색<input id="cluster-search" placeholder="Goal 또는 Axis 검색"></label>
-          <span class="tag" id="cluster-count">저장된 군집 0개</span>
+        <div id="goal-bin-preview" class="notice"></div>
+        <button class="primary" id="admin-save-goal" type="button">Goal 저장</button>
+        <div>
+          <h3>저장된 군집 Audit</h3>
+          <div class="small">삭제 전 영향 분석과 현재 기준 재평가를 확인할 수 있습니다.</div>
+          <div id="cluster-list" class="cluster-list"></div>
         </div>
-      </div>
-      <div class="success" id="cluster-success-box"></div>
-      <div class="error" id="cluster-error-box"></div>
-      <div id="saved-cluster-list" class="saved-cluster-list cluster-grid"></div>
+        <div class="success" id="admin-success-box"></div>
+        <div class="error" id="admin-error-box"></div>
+      </section>
     </section>
   </main>
-
-  <dialog id="settings-modal">
-    <div class="modal-head">
-      <div><strong>Experiment Goal / Cluster Audit</strong><div class="small">원본 CSV, 파일명, unmapped column, 개인정보 column은 저장하지 않습니다.</div></div>
-      <button class="ghost" id="settings-close" type="button">닫기</button>
-    </div>
-    <div class="modal-body">
-      <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off"></label>
-      <div class="admin-toolbar">
-        <label>Existing Goal<select id="admin-goal-select"></select></label>
-        <button class="secondary" id="admin-new-goal" type="button">새 Goal</button>
-        <button class="danger" id="admin-delete-goal" type="button">Goal 삭제</button>
-      </div>
-      <label>Experiment Goal Name<input id="admin-goal-name"></label>
-      <div>
-        <h3>Axis editor</h3>
-        <div id="axis-editor" class="axis-editor"></div>
-        <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
-      </div>
-      <div id="goal-bin-preview" class="notice"></div>
-      <button class="primary" id="admin-save-goal" type="button">Goal 저장</button>
-      <div>
-        <h3>저장된 군집</h3>
-        <div class="small">삭제 전 영향 분석과 현재 기준 재평가를 확인할 수 있습니다.</div>
-        <div id="cluster-list" class="cluster-list"></div>
-      </div>
-      <div class="success" id="admin-success-box"></div>
-      <div class="error" id="admin-error-box"></div>
-    </div>
-  </dialog>
 
   <dialog id="audit-modal">
     <div class="modal-head">
@@ -240,6 +260,7 @@
       clusterSort: 'latest',
       clusterSearch: '',
       clusterResults: {},
+      activeView: 'analysis-view',
     };
 
     const $ = id => document.getElementById(id);
@@ -318,6 +339,23 @@
       box.textContent = message; box.style.display = 'block';
     }
 
+    function showView(viewId) {
+      const nextView = $(viewId) ? viewId : 'analysis-view';
+      state.activeView = nextView;
+      document.querySelectorAll('.view-section').forEach(section => {
+        section.classList.toggle('active', section.id === nextView);
+      });
+      document.querySelectorAll('.quick-nav-item[data-view]').forEach(button => {
+        button.classList.toggle('active', button.dataset.view === nextView);
+      });
+      if (nextView === 'batch-view') renderBatch();
+      if (nextView === 'clusters-view') renderSavedClusters();
+      if (nextView === 'report-view') renderReport();
+      if (nextView === 'goal-admin-view') renderAdmin();
+      if (nextView === 'analysis-view') renderMapping();
+      updateButtons();
+    }
+
     function detectDelimiter(text, fileName) {
       if (String(fileName).toLowerCase().endsWith('.tsv')) return '\t';
       const firstLine = text.split(/\r?\n/, 1)[0] || '';
@@ -356,6 +394,7 @@
       state.axisMapping = first ? buildSuggestedMapping(goal, first.headers) : {};
       state.report = null; state.batch = null;
       renderAll();
+      renderReport(null);
     }
 
     function validationMessage() {
@@ -417,9 +456,11 @@
     }
 
     function renderBatch() {
-      const panel = $('batch-panel');
-      if (!state.batch) { panel.style.display='none'; return; }
-      panel.style.display = '';
+      if (!state.batch) {
+        $('batch-id').textContent = '대기';
+        $('batch-list').innerHTML = '<div class="empty">파일을 여러 개 선택하고 분석하면 Batch Preview가 여기에 표시됩니다.</div>';
+        return;
+      }
       $('batch-id').textContent = `${(state.batch.items || []).length} file(s)`;
       $('batch-list').innerHTML = (state.batch.items || []).map((item, index) => `
         <div class="batch-item">
@@ -464,7 +505,14 @@
         </div>`).join('')}</div>`;
     }
 
-    function renderReport(report) {
+    function renderReport(report=state.report, activate=false) {
+      if (!report) {
+        state.report = null;
+        $('report-content').className = 'empty';
+        $('report-content').textContent = '분석을 실행하면 리포트가 여기에 표시됩니다.';
+        updateButtons();
+        return;
+      }
       state.report = report;
       const result = report.result || {};
       const warnings = result.outOfDomainWarnings || [];
@@ -512,7 +560,7 @@
           <div><h3>Confidence Reasons</h3>${(report.confidenceReasons || []).map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div>
         </div>`;
       updateButtons();
-      $('report-panel').scrollIntoView({ behavior:'smooth', block:'start' });
+      if (activate) showView('report-view');
     }
     function renderIssue(message) {
       $('report-content').className = '';
@@ -748,8 +796,9 @@
         }
         state.axisMapping = buildSuggestedMapping(goal, state.files[0].headers);
         state.batch = null; state.report = null; setError('');
-        $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과가 여기에 표시됩니다.';
+        renderReport(null);
         renderAll();
+        showView('analysis-view');
       } catch (error) { setError(error.message || '파일을 읽는 중 오류가 발생했습니다.'); renderIssue(error.message || '파일 오류'); }
     }
     function filePayloads(goal) {
@@ -768,14 +817,15 @@
         if (state.files.length === 1) {
           const response = await fetch('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) });
           const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
-          state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderReport(data); renderAll();
+          state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderAll(); renderReport(data, true);
         } else {
           const response = await fetch('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) });
           const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || 'Batch 분석 실패'); }
           data.items = (data.items || []).map(item => ({ ...item, selected:Boolean(item.saveable) }));
-          state.batch = data; state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderBatch(); renderSavedClusters();
+          state.batch = data; state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll();
           const firstOk = data.items.find(item => item.analysisSuccess);
           if (firstOk) renderReport({ meta:data.meta, result:firstOk.result, summary:firstOk.summary || [], confidenceReasons:firstOk.confidenceReasons || [], visualizations:{ targetVector:firstOk.clusterVector || [] } });
+          showView('batch-view');
         }
       } catch (error) { setError(error.message || '분석 중 오류가 발생했습니다.'); renderIssue(error.message || '분석 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
@@ -793,7 +843,7 @@
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
         state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
-        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 군집 저장 완료`); setAdminMessage('success', `${data.saved.length}개 군집 저장 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`);
+        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 군집 저장 완료`); setAdminMessage('success', `${data.saved.length}개 군집 저장 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`); showView('clusters-view');
       } catch (error) { setError(error.message || 'Batch 저장 실패'); setClusterMessage('error', error.message || 'Batch 저장 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
@@ -944,17 +994,15 @@
     }
 
     function bindEvents() {
-      const openSettings = () => { setAdminMessage('', ''); renderAdmin(); $('settings-modal').showModal(); };
-      $('settings-button').addEventListener('click', openSettings);
-      $('quick-goals').addEventListener('click', openSettings);
-      $('quick-settings').addEventListener('click', openSettings);
-      $('settings-close').addEventListener('click', () => $('settings-modal').close());
+      document.querySelectorAll('.quick-nav-item[data-view]').forEach(button => {
+        button.addEventListener('click', () => showView(button.dataset.view));
+      });
       $('audit-close').addEventListener('click', () => $('audit-modal').close());
       $('admin-token-input').addEventListener('input', event => { state.adminToken = event.target.value; });
       $('goal-select').addEventListener('change', event => { state.selectedGoalId = event.target.value; state.draftGoal = clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); });
       $('file-input').addEventListener('change', event => handleFiles(event.target.files));
-      $('reset-button').addEventListener('click', () => { $('file-input').value=''; state.report=null; resetSelection(goalById(state.selectedGoalId), false); $('report-content').className='empty'; $('report-content').textContent='분석을 실행하면 결과가 여기에 표시됩니다.'; setError(''); });
-      $('mapping-box').addEventListener('change', event => { const toggle=event.target.dataset.axisToggle; const axis=event.target.dataset.axisMap; if (toggle) state.selectedAxes[toggle]=event.target.checked; if (axis) state.axisMapping[axis]=event.target.value; state.report=null; state.batch=null; renderAll(); });
+      $('reset-button').addEventListener('click', () => { $('file-input').value=''; state.report=null; resetSelection(goalById(state.selectedGoalId), false); renderReport(null); setError(''); showView('analysis-view'); });
+      $('mapping-box').addEventListener('change', event => { const toggle=event.target.dataset.axisToggle; const axis=event.target.dataset.axisMap; if (toggle) state.selectedAxes[toggle]=event.target.checked; if (axis) state.axisMapping[axis]=event.target.value; state.report=null; state.batch=null; renderAll(); renderReport(null); });
       $('cluster-goal-filter').addEventListener('change', event => { state.clusterGoalFilter = event.target.value || 'all'; renderSavedClusters(); });
       $('cluster-sort').addEventListener('change', event => { state.clusterSort = event.target.value || 'latest'; renderSavedClusters(); });
       $('cluster-search').addEventListener('input', event => { state.clusterSearch = event.target.value || ''; renderSavedClusters(); });
@@ -980,11 +1028,8 @@
       const goal = goalById(state.selectedGoalId);
       state.draftGoal = clone(goal || blankGoal());
       state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
-      $('settings-button').style.display = (state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
-      $('quick-goals').style.display = (state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
-      $('quick-settings').style.display = (state.adminAllowed || state.adminAuthRequired) ? '' : 'none';
       $('admin-token-wrap').style.display = state.adminAuthRequired ? '' : 'none';
-      renderAll(); bindEvents();
+      renderAll(); bindEvents(); showView('analysis-view');
     }
     init();
   </script>
