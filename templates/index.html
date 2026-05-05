@@ -168,6 +168,7 @@
     const state = {
       goals: bootstrap.goals || [],
       clusters: bootstrap.clusters || [],
+      peerCounts: bootstrap.peerCounts || {},
       peerSubsetCounts: bootstrap.peerSubsetCounts || {},
       goalBinPreview: bootstrap.goalBinPreview || {},
       adminAllowed: Boolean(bootstrap.adminAllowed),
@@ -192,9 +193,15 @@
     const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
     const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
     const axisLabel = axis => axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
-    const normalizeKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣]/g,'');
+    const normalizeKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣_]/g,'');
     const selectedAxes = goal => goal ? goal.axes.filter(axis => state.selectedAxes[axis.name]) : [];
     const selectedAxisNames = goal => selectedAxes(goal).map(axis => axis.name);
+    const axisSubsetKey = names => (names || []).map(name => String(name || '').trim().toLowerCase()).filter(Boolean).sort().join('|');
+    const currentPeerCount = goal => {
+      if (!goal) return 0;
+      const key = axisSubsetKey(selectedAxisNames(goal));
+      return Number(state.peerSubsetCounts?.[goal.id]?.[key] ?? 0);
+    };
     const adminHeaders = () => { const headers = {'Content-Type':'application/json'}; if (state.adminToken) headers['X-Admin-Token']=state.adminToken; return headers; };
 
     function setError(message) { $('user-error-box').textContent = message || ''; $('user-error-box').style.display = message ? 'block' : 'none'; }
@@ -286,7 +293,8 @@
     function renderMapping() {
       const goal = goalById(state.selectedGoalId);
       const first = state.files[0];
-      $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}` : '아직 업로드된 파일이 없습니다.';
+      const peerCountText = goal ? ` · current Peer Group N ${currentPeerCount(goal)}` : '';
+      $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}${peerCountText}` : `아직 업로드된 파일이 없습니다.${peerCountText}`;
       if (!goal) { $('mapping-box').innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>'; return; }
       $('mapping-box').innerHTML = goal.axes.map(axis => `
         <div class="mapping-row">
@@ -485,11 +493,14 @@
       const records = (state.batch?.items || []).filter(item => item.selected && item.saveable).map(item => item.pendingRecord);
       if (!records.length) return;
       try {
-        const response = await fetch('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ records }) });
+        const goal = goalById(state.selectedGoalId);
+        const response = await fetch('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxisNames:selectedAxisNames(goal), records }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Batch 저장 실패');
         state.clusters = data.clusters || state.clusters;
+        state.peerCounts = data.peerCounts || state.peerCounts;
+        state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
         state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
-        renderAll(); setAdminMessage('success', `${data.saved.length}개 cluster 저장 처리 완료`);
+        renderAll(); renderClusterList(); renderGoalPreview(); setAdminMessage('success', `${data.saved.length}개 cluster 저장 처리 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`);
       } catch (error) { setError(error.message || 'Batch 저장 실패'); }
     }
     async function exportReport(format) {
@@ -506,7 +517,7 @@
       try {
         const response = await fetch('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 저장 실패');
-        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
+        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); }
     }
     async function deleteGoal() {
@@ -514,7 +525,7 @@
       try {
         const response = await fetch('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Goal 삭제 실패');
-        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
+        state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); }
     }
     function renderImpact(data) {
@@ -551,7 +562,7 @@
       try {
         const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) });
         const data = await response.json(); if (!response.ok) throw new Error(data.error || '삭제 실패');
-        state.clusters = data.clusters || []; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderClusterList(); renderGoalPreview(); setAdminMessage('success','Cluster가 삭제되었습니다.');
+        state.clusters = data.clusters || []; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderAll(); renderClusterList(); renderGoalPreview(); setAdminMessage('success','Cluster가 삭제되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); }
     }
     function renderReevaluation(item) {

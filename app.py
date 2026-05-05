@@ -28,6 +28,7 @@ from storage import (
     cluster_fingerprint_payload,
     delete_peer_cluster,
     demo_peer_rows,
+    explain_peer_filter,
     get_peer_group,
     init_database,
     list_cluster_summaries,
@@ -35,6 +36,7 @@ from storage import (
     load_goal_store,
     load_peer_clusters,
     normalize_analysis_snapshot,
+    normalize_axis_name,
     normalize_goals_for_display,
     peer_group_key,
     peer_group_subset_counts,
@@ -56,8 +58,8 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
     if not selected_axis_names:
         axes = [dict(axis) for axis in goal["axes"]]
     else:
-        requested = {str(name).strip() for name in selected_axis_names if str(name).strip()}
-        axes = [dict(axis) for axis in goal["axes"] if axis["name"] in requested]
+        requested = {normalize_axis_name(name) for name in selected_axis_names if normalize_axis_name(name)}
+        axes = [dict(axis) for axis in goal["axes"] if normalize_axis_name(axis["name"]) in requested]
     if not axes:
         raise ValueError("분석에 포함할 Axis를 하나 이상 선택하세요.")
     return {
@@ -91,11 +93,12 @@ def build_cluster_vector(
     m2 = np.zeros(len(axes), dtype=float)
     counts = np.zeros(len(axes), dtype=int)
     columns = list(rows[0].keys()) if rows else []
+    axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
 
     for csv_row_number, row in enumerate(rows, start=2):
         for axis_index, axis in enumerate(axes):
             axis_name = axis["name"]
-            column = axis_mapping.get(axis_name)
+            column = axis_mapping.get(axis_name) or axis_mapping_by_key.get(normalize_axis_name(axis_name))
             if not column:
                 raise ValueError(f"Axis '{axis_name}'에 매핑된 CSV column이 없습니다.")
             raw_value = row.get(column, "")
@@ -527,6 +530,32 @@ def duplicate_status(record: dict[str, Any]) -> dict[str, Any]:
     return {"isDuplicate": False, "duplicateClusterId": None}
 
 
+def peer_filter_diagnostics(goal_id: str, axis_names: list[str], exclude_cluster_id: str | None = None) -> dict[str, Any]:
+    return explain_peer_filter(str(goal_id), axis_names, exclude_cluster_id)
+
+
+def format_peer_filter_error(diagnostics: dict[str, Any]) -> str:
+    examples = diagnostics.get("examplesExcluded", [])
+    example_text = "; ".join(
+        (
+            f"{item.get('id') or '(no id)'} reason={item.get('reason')}, "
+            f"axisNames={item.get('axisNames')}, missingAxes={item.get('missingAxes', [])}"
+        )
+        for item in examples[:3]
+    )
+    return (
+        f"totalStoredClusters={diagnostics.get('totalClusters')}, "
+        f"sameGoalClusters={diagnostics.get('sameGoalCount')}, "
+        f"sameGoalCompatibleAxes={diagnostics.get('compatibleAxisCount')}, "
+        f"excludedByGoal={diagnostics.get('excludedByGoal')}, "
+        f"excludedByAxis={diagnostics.get('excludedByAxis')}, "
+        f"excludedBySelf={diagnostics.get('excludedBySelf')}, "
+        f"selectedAxisNames={diagnostics.get('selectedAxisNames')}, "
+        f"selectedAxisKeys={diagnostics.get('selectedAxisKeys')}"
+        + (f", examplesExcluded=[{example_text}]" if example_text else "")
+    )
+
+
 def run_vector_analysis(
     goal: dict[str, Any],
     selected_goal: dict[str, Any],
@@ -699,11 +728,13 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if should_save_data_clusters():
             saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
-        stored_count = len(load_peer_clusters(str(goal["id"]), axis_names))
+        diagnostics = peer_filter_diagnostics(str(goal["id"]), axis_names)
+        stored_count = int(diagnostics["compatibleAxisCount"])
         saved_text = "saved" if saved_cluster_is_new else "already stored"
         raise ValueError(
             "Only saved clusters with the same Experiment Goal and Axis configuration are used as the Peer Group. "
             f"Stored Peer Group N={stored_count}, required minimum N={len(axis_names) + 1}. "
+            f"Peer filter diagnostics: {format_peer_filter_error(diagnostics)}. "
             f"This CSV was sanitized into a numeric cluster vector and {saved_text}, but analysis is limited until enough prior clusters exist. "
             f"Reason: {exc}"
         ) from exc
@@ -903,7 +934,22 @@ def batch_save_request(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         saved_cluster, is_new = save_peer_cluster(record)
         saved.append({"id": saved_cluster["id"], "isNew": is_new, "fingerprint": saved_cluster["fingerprint"]})
-    return {"saved": saved, "clusters": list_cluster_summaries(), "peerSubsetCounts": bootstrap_peer_subset_counts()}
+    first_record = records[0] if isinstance(records[0], dict) else {}
+    goal_id = str(payload.get("goalId") or first_record.get("goalId") or "").strip()
+    selected_axis_names = payload.get("selectedAxisNames") or payload.get("selectedAxes") or first_record.get("axisNames") or []
+    selected_axis_names = [str(name).strip() for name in selected_axis_names]
+    diagnostics = peer_filter_diagnostics(goal_id, selected_axis_names) if goal_id and selected_axis_names else {}
+    return {
+        "saved": saved,
+        "totalStoredClusters": diagnostics.get("totalClusters", len(load_cluster_store())),
+        "sameGoalClusterCount": diagnostics.get("sameGoalCount", 0),
+        "compatiblePeerCountForSelectedAxes": diagnostics.get("compatibleAxisCount", 0),
+        "selectedAxisNames": selected_axis_names,
+        "peerGroupKey": peer_group_key(goal_id, selected_axis_names) if goal_id and selected_axis_names else "",
+        "peerCounts": bootstrap_peer_counts(),
+        "peerSubsetCounts": bootstrap_peer_subset_counts(),
+        "clusters": list_cluster_summaries(),
+    }
 
 
 def cluster_by_id(cluster_id: str) -> dict[str, Any]:
@@ -1122,6 +1168,14 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
 analyze_request = analyze_request_v2
 
 
+def bootstrap_peer_counts() -> dict[str, int]:
+    peer_counts: dict[str, int] = {}
+    for goal in normalize_goals_for_display(load_goal_store()):
+        full_axis_names = [axis["name"] for axis in goal["axes"]]
+        peer_counts[goal["id"]] = int(peer_filter_diagnostics(str(goal["id"]), full_axis_names)["compatibleAxisCount"])
+    return peer_counts
+
+
 def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
     counts = {}
     for goal in normalize_goals_for_display(load_goal_store()):
@@ -1168,14 +1222,9 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
 
 def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
-    peer_counts = {}
+    peer_counts = bootstrap_peer_counts()
     peer_subset_counts = {}
     for goal in goals:
-        full_axis_names = [axis["name"] for axis in goal["axes"]]
-        try:
-            peer_counts[goal["id"]] = int(len(get_peer_group(goal, full_axis_names)))
-        except ValueError:
-            peer_counts[goal["id"]] = 0
         peer_subset_counts[goal["id"]] = peer_group_subset_counts(goal)
     admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
     return {
@@ -1281,7 +1330,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 else:
                     goals[existing_index] = saved_goal
                 save_goal_store(goals)
-                self._send_json({"savedGoal": saved_goal, "goals": normalize_goals_for_display(goals), "clusters": list_cluster_summaries(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalize_goals_for_display(goals)}})
+                self._send_json({"savedGoal": saved_goal, "goals": normalize_goals_for_display(goals), "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalize_goals_for_display(goals)}})
                 return
             if parsed.path == "/api/admin/goals/delete":
                 if not self._admin_allowed():
@@ -1293,7 +1342,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     goals = load_goal_store()
                 save_goal_store(goals)
                 normalized_goals = normalize_goals_for_display(goals)
-                self._send_json({"goals": normalized_goals, "clusters": list_cluster_summaries(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalized_goals}})
+                self._send_json({"goals": normalized_goals, "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalized_goals}})
                 return
             if parsed.path == "/api/admin/clusters/delete":
                 if not self._admin_allowed():
@@ -1302,7 +1351,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 deleted = delete_peer_cluster(str(payload.get("id", "")))
                 if not deleted:
                     raise ValueError("삭제할 군집을 찾을 수 없습니다.")
-                self._send_json({"deleted": True, "clusters": list_cluster_summaries(), "peerSubsetCounts": bootstrap_peer_subset_counts()})
+                self._send_json({"deleted": True, "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts()})
                 return
         except Exception as exc:
             self._send_json({"error": str(exc), "clusters": list_cluster_summaries()}, status=HTTPStatus.BAD_REQUEST)

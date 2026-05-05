@@ -138,3 +138,16 @@ Run tests:
 ```powershell
 .\Lee_sin.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
+
+## 13. Peer Group Debug Checklist
+
+Use this when saved clusters exist but analysis reports a very small Peer Group N.
+
+- Keep `USE_DEMO_PEER_GROUP=false`.
+- Create a Goal with 4 axes.
+- Batch upload and save 6 CSV files for that Goal and those 4 axes.
+- Confirm the batch-save response reports `compatiblePeerCountForSelectedAxes=6`.
+- Analyze a new target CSV and confirm `peer_group_size=6`.
+- Change selected axis order and confirm the count remains 6.
+- Add whitespace or case differences in selected axis names and confirm matching still works.
+- If the count is unexpected, inspect `Peer filter diagnostics` in the analysis error message: it includes total clusters, same-goal clusters, compatible-axis clusters, selected axis keys, and excluded examples.

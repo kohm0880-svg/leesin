@@ -43,6 +43,23 @@ class CoreBehaviorTests(unittest.TestCase):
             peers = storage.get_peer_group(goal, ["x", "y"])
         self.assertEqual(peers.shape, (1, 2))
 
+    def test_axis_matching_is_order_case_and_space_insensitive(self) -> None:
+        clusters = [
+            {
+                "id": "a1",
+                "goalId": "goal_a",
+                "axisNames": [" Y ", "X"],
+                "values": [20, 10],
+                "rowCount": 2,
+            }
+        ]
+        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
+        with patch("storage.load_cluster_store", return_value=clusters):
+            peers = storage.get_peer_group(goal, [" x ", "y"])
+            diagnostics = storage.explain_peer_filter("goal_a", ["y", "x"])
+        np.testing.assert_allclose(peers, np.array([[10.0, 20.0]]))
+        self.assertEqual(diagnostics["compatibleAxisCount"], 1)
+
     def test_demo_peer_group_default_is_disabled(self) -> None:
         self.assertFalse(storage.use_demo_peer_group())
 
@@ -109,6 +126,49 @@ class CoreBehaviorTests(unittest.TestCase):
         with patch("app.load_goal_store", return_value=[goal]), patch("storage.load_cluster_store", return_value=clusters), patch("app.load_cluster_store", return_value=clusters):
             result = app.analyze_batch_request(payload)
         self.assertEqual([item["analysisSummary"]["peer_group_size"] for item in result["items"]], [3, 3])
+
+    def test_batch_save_makes_saved_clusters_available_to_next_analysis(self) -> None:
+        goal = {"id": "goal_batch", "name": "Batch", "K_m": 10.0, "axes": [axis("a"), axis("b"), axis("c"), axis("d")]}
+        backing_store: list[dict] = []
+
+        def save_store(clusters: list[dict]) -> None:
+            backing_store[:] = clusters
+
+        records = []
+        for index in range(6):
+            vector = np.array([index + 1, index + 2, index + 3, index + 4], dtype=float)
+            records.append(
+                app.make_cluster_record(
+                    goal,
+                    goal,
+                    vector,
+                    {
+                        "row_count": 1,
+                        "summary_method": "mean",
+                        "values_mean": [float(value) for value in vector],
+                    },
+                    source_batch_id="batch_test",
+                )
+            )
+
+        with (
+            patch("app.load_goal_store", return_value=[goal]),
+            patch("storage.load_goal_store", return_value=[goal]),
+            patch("storage.load_cluster_store", side_effect=lambda: list(backing_store)),
+            patch("storage.save_cluster_store", side_effect=save_store),
+            patch("app.load_cluster_store", side_effect=lambda: list(backing_store)),
+        ):
+            response = app.batch_save_request(
+                {
+                    "goalId": "goal_batch",
+                    "selectedAxisNames": [" d ", "C", "b", "A"],
+                    "records": records,
+                }
+            )
+            peers = storage.get_peer_group(goal, ["A", "b", "c", "d"])
+
+        self.assertEqual(response["compatiblePeerCountForSelectedAxes"], 6)
+        self.assertEqual(peers.shape, (6, 4))
 
     def test_current_reevaluation_excludes_self_from_peer_group(self) -> None:
         goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}

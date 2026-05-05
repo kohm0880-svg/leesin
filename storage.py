@@ -153,14 +153,21 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
 
 
 def cluster_fingerprint_payload(record: dict[str, Any]) -> dict[str, Any]:
-    axis_names = [str(name) for name in record.get("axisNames", [])]
-    values = [round(float(value), 12) for value in record.get("values", [])]
-    goal_id = str(record.get("goalId", ""))
+    axis_names = [str(name).strip() for name in record.get("axisNames", [])]
+    axis_value_pairs = sorted(
+        (
+            normalize_axis_name(axis_name),
+            round(float(value), 12),
+        )
+        for axis_name, value in zip(axis_names, record.get("values", []))
+        if normalize_axis_name(axis_name)
+    )
+    goal_id = str(record.get("goalId", "")).strip()
     return {
         "goalId": goal_id,
-        "peerGroupKey": str(record.get("peerGroupKey") or peer_group_key(goal_id, axis_names)),
-        "axisNames": axis_names,
-        "values": values,
+        "peerGroupKey": peer_group_key(goal_id, axis_names),
+        "axisNames": [axis_key for axis_key, _value in axis_value_pairs],
+        "values": [value for _axis_key, value in axis_value_pairs],
         "rowCount": int(record.get("rowCount", 1) or 1),
         "summaryMethod": str(record.get("summaryMethod") or "mean"),
     }
@@ -251,8 +258,12 @@ def storage_label(path: Path) -> str:
         return str(path)
 
 
+def normalize_axis_name(name: Any) -> str:
+    return str(name or "").strip().lower()
+
+
 def axis_signature(axis_names: list[str]) -> tuple[str, ...]:
-    return tuple(str(name).strip().lower() for name in axis_names)
+    return tuple(sorted(normalize_axis_name(name) for name in axis_names if normalize_axis_name(name)))
 
 
 def axis_subset_key(axis_names: list[str]) -> str:
@@ -260,7 +271,7 @@ def axis_subset_key(axis_names: list[str]) -> str:
 
 
 def peer_group_key(goal_id: str, axis_names: list[str]) -> str:
-    return f"{goal_id}|{axis_subset_key(axis_names)}"
+    return f"{str(goal_id).strip()}|{axis_subset_key(axis_names)}"
 
 
 def _default_goal_payload() -> list[dict[str, Any]]:
@@ -284,7 +295,7 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         axis_name = str(axis.get("name", "")).strip()
         if not axis_name:
             raise ValueError("Axis name is required.")
-        key = axis_name.lower()
+        key = normalize_axis_name(axis_name)
         if key in seen:
             raise ValueError(f"Axis '{axis_name}' is duplicated.")
         seen.add(key)
@@ -356,11 +367,11 @@ def save_goal_store(goals: list[dict[str, Any]]) -> None:
 
 def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
     try:
-        axis_names = [str(name) for name in item["axisNames"]]
+        axis_names = [str(name).strip() for name in item["axisNames"]]
         values = [float(value) for value in item["values"]]
         if len(axis_names) != len(values):
             return None
-        goal_id = str(item["goalId"])
+        goal_id = str(item["goalId"]).strip()
         signature = axis_subset_key(axis_names)
         row_count = int(item.get("rowCount", 1) or 1)
         summary_method = str(item.get("summaryMethod") or item.get("summary_method") or "mean")
@@ -373,7 +384,7 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "goalName": str(item.get("goalName", "")),
             "axisNames": axis_names,
             "axisSignature": signature,
-            "peerGroupKey": str(item.get("peerGroupKey") or peer_group_key(goal_id, axis_names)),
+            "peerGroupKey": peer_group_key(goal_id, axis_names),
             "values": values,
             "valuesMean": normalize_optional_float_list(item.get("valuesMean", values), len(values), None),
             "valuesVariance": normalize_optional_float_list(item.get("valuesVariance"), len(values), None),
@@ -452,11 +463,120 @@ def use_demo_peer_group() -> bool:
 
 
 def _extract_selected_values(cluster: dict[str, Any], selected_axis_names: list[str]) -> list[float] | None:
+    values, _reason = extract_selected_values_with_reason(cluster, selected_axis_names)
+    return values
+
+
+def extract_selected_values_with_reason(
+    cluster: dict[str, Any],
+    selected_axis_names: list[str],
+) -> tuple[list[float] | None, dict[str, Any]]:
     cluster_axes = [str(name) for name in cluster.get("axisNames", [])]
-    value_by_axis = dict(zip(cluster_axes, cluster.get("values", [])))
-    if not all(axis_name in value_by_axis for axis_name in selected_axis_names):
+    cluster_values = cluster.get("values", [])
+    value_by_axis: dict[str, float] = {}
+    duplicate_axes: list[str] = []
+    for axis_name, value in zip(cluster_axes, cluster_values):
+        axis_key = normalize_axis_name(axis_name)
+        if not axis_key:
+            continue
+        if axis_key in value_by_axis:
+            duplicate_axes.append(str(axis_name))
+            continue
+        value_by_axis[axis_key] = float(value)
+
+    selected_keys = [normalize_axis_name(axis_name) for axis_name in selected_axis_names]
+    missing_axes = [
+        str(axis_name)
+        for axis_name, axis_key in zip(selected_axis_names, selected_keys)
+        if not axis_key or axis_key not in value_by_axis
+    ]
+    reason = {
+        "clusterId": str(cluster.get("id", "")),
+        "clusterAxisNames": cluster_axes,
+        "clusterAxisKeys": [normalize_axis_name(axis_name) for axis_name in cluster_axes],
+        "selectedAxisNames": [str(axis_name) for axis_name in selected_axis_names],
+        "selectedAxisKeys": selected_keys,
+        "missingAxes": missing_axes,
+        "duplicateAxes": duplicate_axes,
+    }
+    if missing_axes:
+        reason["reason"] = "missing_axis"
+        cluster["_peerFilterDebug"] = reason
         return None
-    return [float(value_by_axis[axis_name]) for axis_name in selected_axis_names]
+    if duplicate_axes:
+        reason["reason"] = "duplicate_axis"
+    else:
+        reason["reason"] = "compatible"
+    return [float(value_by_axis[axis_key]) for axis_key in selected_keys], reason
+
+
+def explain_peer_filter(
+    goal_id: str,
+    selected_axis_names: list[str],
+    exclude_cluster_id: str | None = None,
+    example_limit: int = 3,
+) -> dict[str, Any]:
+    clusters = load_cluster_store()
+    wanted_goal_id = str(goal_id).strip()
+    selected_names = [str(name) for name in selected_axis_names]
+    selected_keys = [normalize_axis_name(name) for name in selected_names]
+    diagnostics: dict[str, Any] = {
+        "totalClusters": len(clusters),
+        "sameGoalCount": 0,
+        "compatibleAxisCount": 0,
+        "excludedByGoal": 0,
+        "excludedByAxis": 0,
+        "excludedBySelf": 0,
+        "selectedAxisNames": selected_names,
+        "selectedAxisKeys": selected_keys,
+        "peerGroupKey": peer_group_key(wanted_goal_id, selected_names),
+        "examplesExcluded": [],
+    }
+
+    for cluster in clusters:
+        cluster_id = str(cluster.get("id", ""))
+        if exclude_cluster_id and cluster_id == str(exclude_cluster_id):
+            diagnostics["excludedBySelf"] += 1
+            if len(diagnostics["examplesExcluded"]) < example_limit:
+                diagnostics["examplesExcluded"].append(
+                    {
+                        "id": cluster_id,
+                        "goalId": str(cluster.get("goalId", "")),
+                        "axisNames": list(cluster.get("axisNames", [])),
+                        "reason": "excluded_self",
+                    }
+                )
+            continue
+        if str(cluster.get("goalId", "")).strip() != wanted_goal_id:
+            diagnostics["excludedByGoal"] += 1
+            if len(diagnostics["examplesExcluded"]) < example_limit:
+                diagnostics["examplesExcluded"].append(
+                    {
+                        "id": cluster_id,
+                        "goalId": str(cluster.get("goalId", "")),
+                        "axisNames": list(cluster.get("axisNames", [])),
+                        "reason": "different_goal",
+                    }
+                )
+            continue
+        diagnostics["sameGoalCount"] += 1
+        values, reason = extract_selected_values_with_reason(cluster, selected_names)
+        if values is None:
+            diagnostics["excludedByAxis"] += 1
+            if len(diagnostics["examplesExcluded"]) < example_limit:
+                diagnostics["examplesExcluded"].append(
+                    {
+                        "id": cluster_id,
+                        "goalId": str(cluster.get("goalId", "")),
+                        "axisNames": list(cluster.get("axisNames", [])),
+                        "reason": reason.get("reason", "axis_mismatch"),
+                        "missingAxes": reason.get("missingAxes", []),
+                        "clusterAxisKeys": reason.get("clusterAxisKeys", []),
+                    }
+                )
+            continue
+        diagnostics["compatibleAxisCount"] += 1
+    return diagnostics
 
 
 def load_peer_clusters(
@@ -465,19 +585,21 @@ def load_peer_clusters(
     exclude_cluster_id: str | None = None,
 ) -> list[dict[str, Any]]:
     rows = []
+    wanted_goal_id = str(goal_id).strip()
+    selected_names = [str(name).strip() for name in selected_axis_names]
     selected_key = axis_subset_key(selected_axis_names)
     for cluster in load_cluster_store():
-        if str(cluster.get("goalId")) != str(goal_id):
+        if str(cluster.get("goalId", "")).strip() != wanted_goal_id:
             continue
         if exclude_cluster_id and str(cluster.get("id")) == str(exclude_cluster_id):
             continue
-        values = _extract_selected_values(cluster, selected_axis_names)
+        values = _extract_selected_values(cluster, selected_names)
         if values is None:
             continue
         item = dict(cluster)
-        item["axisNames"] = list(selected_axis_names)
+        item["axisNames"] = list(selected_names)
         item["axisSignature"] = selected_key
-        item["peerGroupKey"] = peer_group_key(goal_id, selected_axis_names)
+        item["peerGroupKey"] = peer_group_key(wanted_goal_id, selected_names)
         item["values"] = values
         rows.append(item)
     return rows
@@ -488,9 +610,9 @@ def demo_peer_rows(goal: dict[str, Any], selected_axis_names: list[str]) -> list
     rows = SAMPLE_PEER_LIBRARY.get(key, [])
     if not rows:
         return []
-    name_to_index = {axis["name"]: index for index, axis in enumerate(goal["axes"])}
+    name_to_index = {normalize_axis_name(axis["name"]): index for index, axis in enumerate(goal["axes"])}
     try:
-        indices = [name_to_index[name] for name in selected_axis_names]
+        indices = [name_to_index[normalize_axis_name(name)] for name in selected_axis_names]
     except KeyError as exc:
         raise ValueError(f"Selected axis '{exc.args[0]}' does not belong to this Goal.") from exc
     return [[float(row[index]) for index in indices] for row in rows]
