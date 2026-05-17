@@ -8,6 +8,23 @@ import numpy as np
 from models import DensityDiagnosisResult, ExperimentConfig
 
 
+def _normalize_axis_name(name: str) -> str:
+    return str(name or "").strip().lower()
+
+
+def canonical_experiment_config(config: ExperimentConfig) -> ExperimentConfig:
+    items = sorted(
+        zip(config.axis_names, config.domain_range, config.resolution),
+        key=lambda item: _normalize_axis_name(item[0]),
+    )
+    return ExperimentConfig(
+        axis_names=[axis_name for axis_name, _domain, _step in items],
+        domain_range=[domain for _axis_name, domain, _step in items],
+        resolution=[step for _axis_name, _domain, step in items],
+        K_m=config.K_m,
+    )
+
+
 class BinGridTracker:
     """Tracks occupied multidimensional bins with a hashmap keyed by bin coordinates."""
 
@@ -108,8 +125,8 @@ class BinGridTracker:
 
 class DensityGridAnalyzer:
     def __init__(self, config: ExperimentConfig):
-        self.config = config
-        self._peer_density = BinGridTracker(config.domain_range, config.resolution)
+        self.config = canonical_experiment_config(config)
+        self._peer_density = BinGridTracker(self.config.domain_range, self.config.resolution)
 
     def set_peer_bin_counts(self, bin_counts: dict[str, int]) -> None:
         self._peer_density = BinGridTracker(self.config.domain_range, self.config.resolution)

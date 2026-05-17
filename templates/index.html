@@ -130,7 +130,7 @@
       </section>
 
       <section class="panel section-card" id="upload-section">
-        <div class="panel-head"><div><h2>Column Mapping</h2><p class="small">각 파일은 독립 cluster입니다. Batch 분석은 저장 전 기존 Peer Group만 기준으로 사용합니다.</p></div></div>
+        <div class="panel-head"><div><h2>Column Mapping</h2><p class="small">각 파일은 저장 record로 처리되며, 분석은 row-level bin occupancy 기준으로 수행됩니다. Batch preview는 저장 전 기존 eligible density records만 기준으로 사용합니다.</p></div></div>
         <div class="meta" id="file-meta-box">아직 업로드된 파일이 없습니다.</div>
         <div class="mapper-head" id="mapper-head"><span>Axis</span><span>CSV Column</span></div>
         <div id="mapping-box"></div>
@@ -175,7 +175,7 @@
     <section id="report-view" class="view-section">
       <section class="panel section-card" id="report-panel">
         <div class="panel-head">
-          <div><h2>분석 리포트</h2><p class="small">이질성은 cluster 대표 vector 기준, coverage/equitability는 row-level bin occupancy 기준으로 표시됩니다.</p></div>
+          <div><h2>분석 리포트</h2><p class="small">특이도 점수는 peer density map 기준 희귀도를 0~1 범위로 압축한 engineering score이며, p-value나 사후확률이 아닙니다. Confidence는 Observation Support, Coverage, Equitability를 종합한 engineering confidence입니다.</p></div>
           <div class="export-actions">
             <button class="secondary" data-export="json" type="button" disabled>JSON</button>
             <button class="secondary" data-export="csv" type="button" disabled>CSV</button>
@@ -436,7 +436,7 @@
     function renderMapping() {
       const goal = goalById(state.selectedGoalId);
       const first = state.files[0];
-      const peerCountText = goal ? ` · current Peer Group N ${currentPeerCount(goal)}` : '';
+      const peerCountText = goal ? ` · eligible density records ${currentPeerCount(goal)}` : '';
       $('file-meta-box').textContent = state.files.length ? `${state.files.length} file(s) selected · 기준 mapping: ${first.displayName} · ${first.rows.length} rows · ${first.headers.join(', ')}${peerCountText}` : `파일을 업로드하면 Column Mapping을 펼칩니다.${peerCountText}`;
       if (!goal) { $('mapper-head').style.display = 'none'; $('mapping-box').innerHTML = '<div class="empty">등록된 Goal이 없습니다.</div>'; return; }
       $('mapper-head').style.display = first ? 'grid' : 'none';
@@ -843,7 +843,7 @@
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
         state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
-        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 군집 저장 완료`); setAdminMessage('success', `${data.saved.length}개 군집 저장 완료 · current Peer Group N ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`); showView('clusters-view');
+        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 군집 저장 완료`); setAdminMessage('success', `${data.saved.length}개 군집 저장 완료 · eligible density records ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`); showView('clusters-view');
       } catch (error) { setError(error.message || 'Batch 저장 실패'); setClusterMessage('error', error.message || 'Batch 저장 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
@@ -888,7 +888,7 @@
       $('audit-subtitle').textContent = clusterDisplayName(data.cluster?.id);
       $('audit-content').innerHTML = `
         <div class="metrics">
-          <div class="metric"><span class="small">Peer Group N</span><strong>${escapeHtml((d.peerGroupN || [data.currentAll?.peerGroupSize, data.withoutCluster?.peerGroupSize]).join(' → '))}</strong></div>
+          <div class="metric"><span class="small">Peer density records</span><strong>${escapeHtml((d.peerGroupN || [data.currentAll?.peerGroupSize, data.withoutCluster?.peerGroupSize]).join(' → '))}</strong></div>
           <div class="metric"><span class="small">Δconfidence</span><strong>${formatNumber(d.deltaConfidence,4)}</strong></div>
           <div class="metric"><span class="small">Δcoverage</span><strong>${formatNumber(d.deltaCoverage,4)}</strong></div>
           <div class="metric"><span class="small">Δequitability</span><strong>${formatNumber(d.deltaEquitability,4)}</strong></div>

@@ -300,15 +300,18 @@ def axis_subset_key(axis_names: list[str]) -> str:
 def canonical_grid_axes(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     canonical: list[dict[str, Any]] = []
     for axis in axes:
+        normalized_name = normalize_axis_name(axis.get("name"))
+        if not normalized_name:
+            continue
         canonical.append(
             {
-                "name": normalize_axis_name(axis.get("name")),
+                "name": normalized_name,
                 "domainMin": float(axis.get("domainMin")),
                 "domainMax": float(axis.get("domainMax")),
                 "resolution": float(axis.get("resolution")),
             }
         )
-    return canonical
+    return sorted(canonical, key=lambda item: item["name"])
 
 
 def grid_signature_from_axes(axes: list[dict[str, Any]]) -> str:

@@ -6,8 +6,8 @@ The main engine is now a row-level density grid specificity detector. Leesin kee
 
 ## Core Model
 
-- CSV file = one saved data cluster.
-- CSV rows = repeated observations inside that cluster.
+- CSV file = one saved record.
+- CSV rows = row-level observations inside that record.
 - Raw rows, filenames, unmapped columns, and personal data are not stored.
 - Saved records keep sanitized axis summaries, `binOccupancy`, `axisBinOccupancy`, `binOccupancyMeta`, `binOccupancyHash`, and `gridSignature`.
 - The representative cluster vector is still stored for compatibility and display, but it is not the main analysis signal.
@@ -30,6 +30,8 @@ specificity_score = 1 - exp(-mean_rarity / log(peer_valid_rows + total_bins + 1)
 
 Additional result fields include `max_rarity`, `unseen_bin_rate`, `rare_bin_rate`, and `out_of_domain_rate`.
 
+Specificity Score is an engineering score that compresses peer-density rarity into a 0-1 range. It is not a p-value, posterior probability, or statistical probability.
+
 If `peer_valid_rows == 0`, density analysis is limited and Leesin returns a clear error. Legacy clusters without row-level bin occupancy or grid signature are excluded from density scoring.
 
 ## Confidence
@@ -50,7 +52,7 @@ confidence = (observation_support_S * coverage_C * equitability_E) ** (1/3)
 
 `axisSignature` only tracks axis names. To prevent mixing incompatible grids, each saved cluster also stores `gridSignature`.
 
-`gridSignature` hashes canonical JSON containing each selected axis's normalized name, `domainMin`, `domainMax`, and `resolution`. Density analysis only combines saved clusters whose `gridSignature` matches the current selected Goal grid.
+`gridSignature` hashes canonical JSON containing each selected axis's normalized name, `domainMin`, `domainMax`, and `resolution`. The canonical axes list is sorted by normalized axis name, and bin occupancy keys are generated in that same canonical order. Density analysis only combines saved records whose `gridSignature` matches the current selected Goal grid.
 
 The analysis payload reports:
 

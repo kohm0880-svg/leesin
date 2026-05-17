@@ -5,6 +5,7 @@ import csv
 import html
 import io
 import ipaddress
+import itertools
 import json
 import os
 import uuid
@@ -28,7 +29,6 @@ from storage import (
     cluster_fingerprint_payload,
     delete_peer_cluster,
     explain_peer_filter,
-    get_peer_group,
     grid_signature_from_axes,
     init_database,
     list_cluster_summaries,
@@ -39,7 +39,6 @@ from storage import (
     normalize_axis_name,
     normalize_goals_for_display,
     peer_group_key,
-    peer_group_subset_counts,
     save_data_cluster,
     save_peer_cluster,
     save_goal_store,
@@ -53,12 +52,16 @@ from storage import (
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
 
 
+def canonical_axis_order(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted((dict(axis) for axis in axes), key=lambda axis: normalize_axis_name(axis.get("name")))
+
+
 def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> dict[str, Any]:
     if not selected_axis_names:
-        axes = [dict(axis) for axis in goal["axes"]]
+        axes = canonical_axis_order(goal["axes"])
     else:
         requested = {normalize_axis_name(name) for name in selected_axis_names if normalize_axis_name(name)}
-        axes = [dict(axis) for axis in goal["axes"] if normalize_axis_name(axis["name"]) in requested]
+        axes = canonical_axis_order([axis for axis in goal["axes"] if normalize_axis_name(axis["name"]) in requested])
     if not axes:
         raise ValueError("분석에 포함할 Axis를 하나 이상 선택하세요.")
     return {
@@ -90,7 +93,7 @@ def compute_row_level_bin_occupancy(
     axis_mapping: dict[str, str],
     selected_goal: dict[str, Any],
 ) -> dict[str, Any]:
-    axes = selected_goal["axes"]
+    axes = canonical_axis_order(selected_goal["axes"])
     axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
     bin_occupancy: dict[str, int] = {}
     axis_bin_occupancy: dict[str, dict[str, int]] = {str(axis["name"]): {} for axis in axes}
@@ -147,25 +150,23 @@ def compute_row_level_bin_occupancy(
     }
 
 
-def build_cluster_vector(
+def build_dataset_summary(
     rows: list[dict[str, Any]],
     axis_mapping: dict[str, str],
     selected_goal: dict[str, Any],
     method: str = "mean",
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Summarize one CSV file into one cluster vector.
+    """Build a sanitized dataset summary.
 
-    CSV file = one data cluster. Rows inside the CSV are repeated observations.
-    Welford's online algorithm keeps streaming axis-wise mean/variance/std. The
-    method argument keeps room for future median/std/IQR summaries without
-    changing the caller contract.
+    The mean vector is retained for display/storage compatibility, but primary
+    density analysis uses row-level bin occupancy in the canonical axis order.
     """
     if method != "mean":
         raise ValueError("Only mean cluster summarization is currently supported.")
     if not rows:
         raise ValueError("업로드된 데이터가 비어 있습니다.")
 
-    axes = selected_goal["axes"]
+    axes = canonical_axis_order(selected_goal["axes"])
     means = np.zeros(len(axes), dtype=float)
     m2 = np.zeros(len(axes), dtype=float)
     axis_numeric_counts = np.zeros(len(axes), dtype=int)
@@ -224,10 +225,11 @@ def build_cluster_vector(
         "bin_occupancy": occupancy["bin_occupancy"],
         "axis_bin_occupancy": occupancy["axis_bin_occupancy"],
         "bin_occupancy_meta": occupancy["bin_occupancy_meta"],
-        "cluster_definition": "CSV file = one cluster; CSV rows = repeated observations summarized into one cluster vector.",
+        "cluster_definition": "Stored record keeps a mean vector for compatibility; primary analysis uses row-level density-grid occupancy.",
     }
 
 
+build_cluster_vector = build_dataset_summary
 build_target_vector = build_cluster_vector
 
 
@@ -283,7 +285,7 @@ def build_report_visualizations(
     target_bin_counts: dict[str, int] | None = None,
     target_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    axes = goal["axes"]
+    axes = canonical_axis_order(goal["axes"])
     coverage_axes = []
     equitability_axes = []
     axis_bin_counts = coverage_info.get("axisBinCounts", {}) if isinstance(coverage_info, dict) else {}
@@ -413,7 +415,8 @@ def make_cluster_record(
     source_batch_id: str | None = None,
     analysis_at_upload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    axis_names = [axis["name"] for axis in selected_goal["axes"]]
+    canonical_axes = canonical_axis_order(selected_goal["axes"])
+    axis_names = [axis["name"] for axis in canonical_axes]
     values = [round(float(value), 12) for value in cluster_vector]
     key = peer_group_key(str(goal["id"]), axis_names)
     now = utc_now_iso()
@@ -424,7 +427,7 @@ def make_cluster_record(
         "goalName": goal["name"],
         "axisNames": axis_names,
         "axisSignature": axis_subset_key(axis_names),
-        "gridSignature": grid_signature_from_axes(selected_goal["axes"]),
+        "gridSignature": grid_signature_from_axes(canonical_axes),
         "peerGroupKey": key,
         "values": values,
         "valuesMean": dataset_meta.get("values_mean", values),
@@ -475,10 +478,11 @@ def make_cluster_record(
 
 
 def experiment_config_from_goal(selected_goal: dict[str, Any]) -> ExperimentConfig:
+    axes = canonical_axis_order(selected_goal["axes"])
     return ExperimentConfig(
-        axis_names=[axis["name"] for axis in selected_goal["axes"]],
-        domain_range=[(axis["domainMin"], axis["domainMax"]) for axis in selected_goal["axes"]],
-        resolution=[axis["resolution"] for axis in selected_goal["axes"]],
+        axis_names=[axis["name"] for axis in axes],
+        domain_range=[(axis["domainMin"], axis["domainMax"]) for axis in axes],
+        resolution=[axis["resolution"] for axis in axes],
         K_m=float(selected_goal.get("K_m", K_M)),
     )
 
@@ -533,8 +537,9 @@ def count_map_total(source: dict[str, Any]) -> int:
 
 def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: dict[str, Any] | list[str]) -> dict[str, Any]:
     if isinstance(selected_goal, dict):
-        selected_axis_names = [str(axis["name"]) for axis in selected_goal["axes"]]
-        current_grid_signature = grid_signature_from_axes(selected_goal["axes"])
+        canonical_axes = canonical_axis_order(selected_goal["axes"])
+        selected_axis_names = [str(axis["name"]) for axis in canonical_axes]
+        current_grid_signature = grid_signature_from_axes(canonical_axes)
     else:
         selected_axis_names = [str(name) for name in selected_goal]
         current_grid_signature = ""
@@ -599,7 +604,7 @@ def out_of_domain_warnings(
                 "role": "target",
                 "outOfDomainRowCount": out_of_domain_count,
                 "totalRows": total_rows,
-                "axes": [axis["name"] for axis in selected_goal["axes"]],
+                "axes": [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])],
                 "message": "Target rows outside the configured domain range were excluded from density occupancy.",
             }
         )
@@ -705,7 +710,7 @@ def run_density_analysis(
     target_vector: np.ndarray | None = None,
     exclude_cluster_id: str | None = None,
 ) -> dict[str, Any]:
-    axis_names = [axis["name"] for axis in selected_goal["axes"]]
+    axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]
     config = experiment_config_from_goal(selected_goal)
     peer_clusters = analysis_peer_clusters(goal, axis_names, exclude_cluster_id)
     peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
@@ -772,9 +777,9 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("selectedAxes must be a list.")
 
     selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
-    axis_names = [axis["name"] for axis in selected_goal["axes"]]
+    axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]
     key = peer_group_key(str(goal["id"]), axis_names)
-    cluster_vector, dataset_meta = build_cluster_vector(rows, axis_mapping, selected_goal)
+    cluster_vector, dataset_meta = build_dataset_summary(rows, axis_mapping, selected_goal)
     saved_cluster = None
     saved_cluster_is_new = False
 
@@ -794,8 +799,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             peer_group = np.empty((0, len(axis_names)), dtype=float)
         coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
         coverage_info["totalBins"] = BinGridTracker(
-            [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
-            [float(axis["resolution"]) for axis in selected_goal["axes"]],
+            [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in canonical_axis_order(selected_goal["axes"])],
+            [float(axis["resolution"]) for axis in canonical_axis_order(selected_goal["axes"])],
         ).total_bins
         warnings = out_of_domain_warnings(selected_goal, dataset_meta.get("bin_occupancy_meta", {}))
         pending_cluster = make_cluster_record(
@@ -852,7 +857,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "summary_method": dataset_meta["summary_method"],
             "peer_group_size": int(len(peer_group)),
             "axis_names": config.axis_names,
-            "axes": selected_goal["axes"],
+            "axes": canonical_axis_order(selected_goal["axes"]),
             "available_axes": goal["axes"],
             "config": asdict(config),
             "cluster_definition": dataset_meta["cluster_definition"],
@@ -913,7 +918,7 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(selected_axis_names, list):
         raise ValueError("selectedAxes must be a list.")
     selected_goal = goal_subset(goal, [str(name) for name in selected_axis_names])
-    axis_names = [axis["name"] for axis in selected_goal["axes"]]
+    axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]
     source_batch_id = str(payload.get("sourceBatchId") or f"batch_{uuid.uuid4().hex}")
     seen_fingerprints: set[str] = set()
     items: list[dict[str, Any]] = []
@@ -940,7 +945,7 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
             missing_axes = [axis for axis in axis_names if not axis_mapping.get(axis)]
             if missing_axes:
                 raise ValueError(f"Missing mappings for axes: {', '.join(missing_axes)}")
-            cluster_vector, dataset_meta = build_cluster_vector(rows, axis_mapping, selected_goal)
+            cluster_vector, dataset_meta = build_dataset_summary(rows, axis_mapping, selected_goal)
             item_payload.update(
                 {
                     "rowCount": dataset_meta["row_count"],
@@ -984,8 +989,8 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                     peer_group = np.empty((0, len(axis_names)), dtype=float)
                 coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
                 coverage_info["totalBins"] = BinGridTracker(
-                    [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
-                    [float(axis["resolution"]) for axis in selected_goal["axes"]],
+                    [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in canonical_axis_order(selected_goal["axes"])],
+                    [float(axis["resolution"]) for axis in canonical_axis_order(selected_goal["axes"])],
                 ).total_bins
                 warnings = out_of_domain_warnings(selected_goal, dataset_meta.get("bin_occupancy_meta", {}))
                 snapshot = analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc), coverage_info=coverage_info)
@@ -1056,11 +1061,20 @@ def batch_save_request(payload: dict[str, Any]) -> dict[str, Any]:
     selected_axis_names = payload.get("selectedAxisNames") or payload.get("selectedAxes") or first_record.get("axisNames") or []
     selected_axis_names = [str(name).strip() for name in selected_axis_names]
     diagnostics = peer_filter_diagnostics(goal_id, selected_axis_names) if goal_id and selected_axis_names else {}
+    compatible_density_count = 0
+    if goal_id and selected_axis_names:
+        try:
+            selected_goal = goal_subset(find_goal(goal_id), selected_axis_names)
+            compatible_density_count = int(
+                build_global_bin_counts(load_peer_clusters(goal_id, selected_axis_names), selected_goal)["coverageEligibleClusterCount"]
+            )
+        except ValueError:
+            compatible_density_count = 0
     return {
         "saved": saved,
         "totalStoredClusters": diagnostics.get("totalClusters", len(load_cluster_store())),
         "sameGoalClusterCount": diagnostics.get("sameGoalCount", 0),
-        "compatiblePeerCountForSelectedAxes": diagnostics.get("compatibleAxisCount", 0),
+        "compatiblePeerCountForSelectedAxes": compatible_density_count,
         "selectedAxisNames": selected_axis_names,
         "peerGroupKey": peer_group_key(goal_id, selected_axis_names) if goal_id and selected_axis_names else "",
         "peerCounts": bootstrap_peer_counts(),
@@ -1113,7 +1127,7 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
             "uploadedAt": cluster.get("uploadedAt"),
             "uploaded": uploaded,
             "current": None,
-            "currentPeerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in selected_goal["axes"]], str(cluster["id"]))),
+            "currentPeerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], str(cluster["id"]))),
             "error": str(exc),
             "interpretation": ["Current reevaluation is limited because no eligible peer density remains after excluding this cluster."],
         }
@@ -1152,7 +1166,7 @@ def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], c
         return {
             "ok": False,
             "error": str(exc),
-            "peerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in selected_goal["axes"]], exclude_cluster_id)),
+            "peerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], exclude_cluster_id)),
         }
 
 
@@ -1175,7 +1189,7 @@ def delete_impact_request(payload: dict[str, Any]) -> dict[str, Any]:
             "deltaSpecificity": round(float(without_result["specificity_score"] - all_result["specificity_score"]), 6),
             "deltaMeanRarity": round(float(without_result["mean_rarity"] - all_result["mean_rarity"]), 6),
         }
-    without_peer_clusters = analysis_peer_clusters(goal, [axis["name"] for axis in selected_goal["axes"]], str(cluster["id"]))
+    without_peer_clusters = analysis_peer_clusters(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], str(cluster["id"]))
     without_density = build_global_bin_counts(without_peer_clusters, selected_goal)
     target_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
     bin_uniqueness = bool(target_counts) and all(int(without_density["binCounts"].get(str(key), 0)) == 0 for key in target_counts)
@@ -1295,25 +1309,37 @@ analyze_request = analyze_request_v2
 def bootstrap_peer_counts() -> dict[str, int]:
     peer_counts: dict[str, int] = {}
     for goal in normalize_goals_for_display(load_goal_store()):
-        full_axis_names = [axis["name"] for axis in goal["axes"]]
-        peer_counts[goal["id"]] = int(peer_filter_diagnostics(str(goal["id"]), full_axis_names)["compatibleAxisCount"])
+        full_axis_names = [axis["name"] for axis in canonical_axis_order(goal["axes"])]
+        selected_goal = goal_subset(goal, full_axis_names)
+        peer_counts[goal["id"]] = int(
+            build_global_bin_counts(load_peer_clusters(str(goal["id"]), full_axis_names), selected_goal)["coverageEligibleClusterCount"]
+        )
     return peer_counts
 
 
 def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
     counts = {}
     for goal in normalize_goals_for_display(load_goal_store()):
-        counts[goal["id"]] = peer_group_subset_counts(goal)
+        axis_names = [axis["name"] for axis in canonical_axis_order(goal["axes"])]
+        goal_counts: dict[str, int] = {}
+        for size in range(1, len(axis_names) + 1):
+            for subset in itertools.combinations(axis_names, size):
+                names = list(subset)
+                selected_goal = goal_subset(goal, names)
+                peer_clusters = load_peer_clusters(str(goal["id"]), names)
+                goal_counts[axis_subset_key(names)] = int(build_global_bin_counts(peer_clusters, selected_goal)["coverageEligibleClusterCount"])
+        counts[goal["id"]] = goal_counts
     return counts
 
 
 def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
-    axis_names = [axis["name"] for axis in goal["axes"]]
+    canonical_axes = canonical_axis_order(goal["axes"])
+    axis_names = [axis["name"] for axis in canonical_axes]
     stored_clusters = load_peer_clusters(str(goal["id"]), axis_names)
     coverage_info = build_global_bin_counts(stored_clusters, goal)
     axis_previews = []
     total_bins = 1
-    for axis_index, axis in enumerate(goal["axes"]):
+    for axis_index, axis in enumerate(canonical_axes):
         total = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
         total_bins *= total
         occupied = len((coverage_info["axisBinCounts"].get(str(axis["name"])) or {}))
@@ -1352,9 +1378,7 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
 def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
     peer_counts = bootstrap_peer_counts()
-    peer_subset_counts = {}
-    for goal in goals:
-        peer_subset_counts[goal["id"]] = peer_group_subset_counts(goal)
+    peer_subset_counts = bootstrap_peer_subset_counts()
     admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
     return {
         "adminAllowed": admin_allowed,
@@ -1375,7 +1399,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         },
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 하나의 데이터 군집으로 취급됩니다. CSV 내부 row들은 해당 군집의 반복 관측값이며, 시스템은 row들을 axis별 대표값으로 집계하여 하나의 cluster vector를 만듭니다.",
-            "coverage": "Coverage와 Equitability는 cluster 대표값이 아니라 저장된 row-level bin occupancy summary 기준으로 계산됩니다.",
+            "coverage": "Coverage and Equitability are calculated from saved row-level bin occupancy summaries.",
             "K_m": "K_m is currently reused as K_density for Observation Support: S = peer row-level observations / (peer row-level observations + K_density).",
         },
     }
