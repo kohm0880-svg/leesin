@@ -332,6 +332,27 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("addEventListener('wheel'", template)
         self.assertIn("addEventListener('dblclick'", template)
 
+    def test_admin_token_panel_uses_local_storage_and_password_input(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("leesinAdminToken", template)
+        self.assertIn('id="admin-token-input" type="password"', template)
+        self.assertIn('id="admin-token-save"', template)
+        self.assertIn('id="admin-token-clear"', template)
+        self.assertIn("localStorage.setItem", template)
+        self.assertIn("localStorage.removeItem", template)
+
+    def test_admin_headers_attach_saved_token_to_admin_requests(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("headers['X-Admin-Token'] = token", template)
+        self.assertIn("fetch('/api/admin/goals'", template)
+        self.assertIn("headers:adminHeaders()", template)
+
+    def test_admin_token_403_has_friendly_render_message(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("관리자 작업이 차단되었습니다", template)
+        self.assertIn("Render Environment Variables의 ADMIN_TOKEN", template)
+        self.assertIn("Admin Token missing or invalid", template)
+
 
 if __name__ == "__main__":
     unittest.main()

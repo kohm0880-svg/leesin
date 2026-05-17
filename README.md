@@ -128,6 +128,10 @@ Analysis results include density fields such as:
 
 Report visualizations include `projectionExplorer`, which carries canonical `axisOrder`, `axisMeta`, all 2D `axisPairs`, peer/target projection matrices, and target row bin-index tuples for in-session linked highlighting.
 
+## Admin Token UX
+
+Admin endpoints check the `X-Admin-Token` header when remote admin authentication is required. In Render deployments, users can enter the `ADMIN_TOKEN` value in the Admin Token panel. The token is stored only in the current browser's `localStorage` under `leesinAdminToken`; it is not stored on the server. Saved tokens are automatically attached to `/api/admin/*` requests, and 403 responses highlight the Admin Token panel with a Render-specific help message.
+
 ## Local Run
 
 ```powershell
