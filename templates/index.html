@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
@@ -106,9 +106,8 @@
       <div>
         <h1>Leesin 데이터 품질 인증</h1>
         <p class="subtitle">
-          CSV 하나를 하나의 군집으로 저장합니다. 이질성은 군집 대표 vector 기준으로 계산하고,
-          Coverage/Equitability는 저장된 row-level bin occupancy 기준으로 계산합니다.
-          Sample Size N은 row 수가 아니라 같은 실험 목적의 저장 군집 수입니다.
+          Leesin accumulates peer row-level observations on the Goal density grid and reports how rare the target occupancy is as a Specificity Score.
+          Confidence is engineering confidence from Observation Support, Coverage, and Equitability.
         </p>
         <span id="peer-status" class="tag"></span>
       </div>
@@ -197,7 +196,7 @@
         </div>
         <div class="notice">
           <strong>계산 기준</strong><br>
-          Sample Size N은 같은 실험 목적과 호환 Axis 구성을 가진 저장 군집 수입니다. Heterogeneity는 cluster 대표 vector 기준이며, Coverage C와 Equitability E는 row-level bin occupancy 기준입니다.
+          Observation Support is based on eligible peer row-level observations. Specificity, Coverage C, and Equitability E are calculated from row-level density grid occupancy.
         </div>
         <label id="admin-token-wrap">Admin Token<input id="admin-token-input" type="password" autocomplete="off"></label>
         <div class="admin-toolbar">
@@ -431,7 +430,7 @@
         <strong>저장 정책</strong><br>
         저장: ${escapeHtml((storage.savedItems || []).join(', '))}<br>
         미저장: ${escapeHtml((storage.unsavedItems || []).join(', '))}<br>
-        Heterogeneity Peer Group은 저장된 실제 군집 대표 vector를 사용하고, Coverage/Equitability는 같은 Axis signature의 row-level bin count summary만 사용합니다.
+        Density analysis uses saved row-level bin occupancy summaries with the same grid signature. Legacy clusters without row-level bins/grid signature are excluded from density scoring.
       `;
     }
     function renderMapping() {
@@ -473,7 +472,7 @@
             <span>${item.duplicate ? 'duplicate' : 'unique'}</span>
             <span>${item.saveable ? 'saveable' : 'blocked'}</span>
           </div>
-          <div class="small">analysis: ${item.analysisSuccess ? `ok · H ${formatPercent(item.analysisSummary?.heterogeneity,1)} · C ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer N ${escapeHtml(item.analysisSummary?.peer_group_size)} · vector rows ${escapeHtml(item.clusterVectorRowCount ?? '-')} · row-level valid ${escapeHtml(item.rowLevelValidCount ?? 0)} · coverage clusters ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · peer N ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
+          <div class="small">analysis: ${item.analysisSuccess ? `ok · specificity ${formatPercent(item.analysisSummary?.specificity_score,1)} · confidence ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer clusters ${escapeHtml(item.analysisSummary?.peer_group_size)} · vector rows ${escapeHtml(item.clusterVectorRowCount ?? '-')} · row-level valid ${escapeHtml(item.rowLevelValidCount ?? 0)} · density clusters ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · peer clusters ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
         </div>`).join('');
     }
 
@@ -516,46 +515,46 @@
       state.report = report;
       const result = report.result || {};
       const warnings = result.outOfDomainWarnings || [];
-      const ablations = result.axisAblationSensitivity || [];
       const meta = report.meta || {};
       const rowLevelObservations = result.rowLevelObservationCount ?? meta.rowLevelObservationCount ?? 0;
       const eligibleClusters = result.coverageEligibleClusterCount ?? meta.coverageEligibleClusterCount ?? 0;
       const legacyExcluded = result.coverageLegacyExcludedClusterCount ?? meta.coverageLegacyExcludedClusterCount ?? 0;
-      const axisExcluded = result.coverageAxisSignatureExcludedClusterCount ?? meta.coverageAxisSignatureExcludedClusterCount ?? 0;
+      const gridExcluded = result.coverageGridSignatureExcludedClusterCount ?? meta.coverageGridSignatureExcludedClusterCount ?? result.coverageAxisSignatureExcludedClusterCount ?? meta.coverageAxisSignatureExcludedClusterCount ?? 0;
       const occupiedBins = result.occupied_bins ?? meta.occupiedBins ?? 0;
       const totalBins = result.total_bins ?? meta.totalBins ?? 0;
       const visualizationBasis = report.visualizations?.coverage?.basis || result.coverageBasis || meta.coverageBasis || 'row_level_bin_occupancy';
       $('report-content').className = '';
       $('report-content').innerHTML = `
-        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => `${escapeHtml(w.role)} ${escapeHtml(w.axis)}=${escapeHtml(w.value)} outside [${escapeHtml(w.domainMin)}, ${escapeHtml(w.domainMax)}]`).join('<br>')}</div>` : ''}
+        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => escapeHtml(w.message || `${w.role || 'target'} out-of-domain rows: ${w.outOfDomainRowCount ?? 0}`)).join('<br>')}</div>` : ''}
         <div class="score-grid">
-          <div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Peer Group ${escapeHtml(meta.peer_group_size ?? '-')} clusters</div></div>
-          <div class="score"><small>Heterogeneity</small><strong>${formatPercent(result.heterogeneity,1)}</strong><div class="small">p-value ${formatNumber(result.p_value,4)} · Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div></div>
+          <div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Engineering confidence</div></div>
+          <div class="score"><small>Specificity Score</small><strong>${formatPercent(result.specificity_score,1)}</strong><div class="small">Engine ${escapeHtml(String(result.engine || '').toUpperCase())}</div></div>
         </div>
         <div class="report-body">
           <div class="metrics">
-            <div class="metric"><span class="small">Sample Z</span><strong>${formatPercent(result.sample_size_Z,0)}</strong></div>
+            <div class="metric"><span class="small">Observation Support S</span><strong>${formatPercent(result.observation_support_S,0)}</strong></div>
             <div class="metric"><span class="small">Coverage C</span><strong>${formatPercent(result.coverage_C,1)}</strong></div>
             <div class="metric"><span class="small">Equitability E</span><strong>${formatPercent(result.equitability_E,0)}</strong></div>
-            <div class="metric"><span class="small">w_eff</span><strong>${formatPercent(result.w_eff,0)}</strong></div>
+            <div class="metric"><span class="small">Mean Rarity</span><strong>${formatNumber(result.mean_rarity,3)}</strong></div>
           </div>
           <div class="notice">
-            <strong>Coverage 기준</strong><br>
-            저장된 peer cluster들의 row-level bin occupancy summary 기준입니다.
+            <strong>Density 기준</strong><br>
+            Saved peer row-level bin occupancy summaries with the same grid signature form the density map.
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">visualization ${escapeHtml(coverageBasisLabel(visualizationBasis))}</span>
               <span class="metric-pill">eligible clusters ${escapeHtml(eligibleClusters)}</span>
               <span class="metric-pill">row-level observations ${escapeHtml(rowLevelObservations)}</span>
               <span class="metric-pill">occupied bins ${escapeHtml(occupiedBins)}/${escapeHtml(totalBins)}</span>
               <span class="metric-pill">excluded legacy ${escapeHtml(legacyExcluded)}</span>
-              <span class="metric-pill">axis mismatch ${escapeHtml(axisExcluded)}</span>
+              <span class="metric-pill">grid mismatch ${escapeHtml(gridExcluded)}</span>
+              <span class="metric-pill">unseen rows ${formatPercent(result.unseen_bin_rate,1)}</span>
+              <span class="metric-pill">rare rows ${formatPercent(result.rare_bin_rate,1)}</span>
+              <span class="metric-pill">out-of-domain ${formatPercent(result.out_of_domain_rate,1)}</span>
             </div>
-            ${legacyExcluded ? '<div class="tag warn">row-level bin 정보가 없는 기존 군집은 coverage/equitability 계산에서 제외됩니다.</div>' : ''}
+            ${legacyExcluded ? '<div class="tag warn">Legacy clusters without row-level bin occupancy/grid signature are excluded from density scoring.</div>' : ''}
           </div>
-          <div class="small">D² ${formatNumber(result.D2,4)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
+          <div class="small">Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
           ${renderCoverageAxisDistributions(report.visualizations)}
-          <div><h3>Axis별 Contribution</h3>${(result.contributions || []).map(item => `<div class="pill"><div class="bar-meta"><span>${escapeHtml(item.axis)}</span><strong>${formatNumber(item.percent,1)}%</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,Number(item.percent || 0))}%"></div></div></div>`).join('')}</div>
-          <div><h3>Axis Ablation Sensitivity</h3>${ablations.map(item => `<div class="pill"><strong>${escapeHtml(item.removedAxis)}</strong> · ${escapeHtml(item.status)}${item.status === 'ok' ? ` · H ${formatPercent(item.heterogeneity_without_axis,1)} · C ${formatPercent(item.confidence_without_axis,0)} · ΔD² ${formatNumber(item.delta_D2,4)}<br><span class="small">${escapeHtml(item.interpretation || '')}</span>` : ''}</div>`).join('') || '<div class="empty">결과 없음</div>'}</div>
           <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
           <div><h3>Confidence Reasons</h3>${(report.confidenceReasons || []).map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div>
         </div>`;
@@ -574,9 +573,9 @@
       const wantedSignature = axisSubsetKey(axes.map(axis => axis.name));
       const sameGoal = (state.clusters || []).filter(cluster => cluster.goalId === goal.id);
       const exactAxis = sameGoal.filter(cluster => axisSubsetKey(cluster.axisNames || []) === wantedSignature);
-      const eligible = exactAxis.filter(cluster => cluster.hasRowLevelBinOccupancy && Object.keys(cluster.binOccupancy || {}).length);
+      const eligible = exactAxis.filter(cluster => cluster.hasRowLevelBinOccupancy && cluster.gridSignature && Object.keys(cluster.binOccupancy || {}).length);
       const legacyExcluded = exactAxis.length - eligible.length;
-      const axisSignatureExcluded = sameGoal.length - exactAxis.length;
+      const gridSignatureExcluded = sameGoal.length - exactAxis.length;
       const binCounts = {};
       const axisCounts = {};
       let rowLevelObservationCount = 0;
@@ -606,8 +605,8 @@
       const occupiedBins = Object.keys(binCounts).length;
       const warnings = [];
       if (totalBins > 100000) warnings.push('Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.');
-      if (legacyExcluded) warnings.push('일부 기존 군집은 row-level bin 정보가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.');
-      if (axisSignatureExcluded) warnings.push('Axis 구성이 다른 군집은 row-level coverage 계산에서 제외되고 heterogeneity peer로만 사용할 수 있습니다.');
+      if (legacyExcluded) warnings.push('일부 기존 군집은 row-level bin occupancy/grid signature가 없어 density 계산에서 제외됩니다.');
+      if (gridSignatureExcluded) warnings.push('Grid signature가 다른 군집은 density 계산에서 제외됩니다.');
       return {
         basis:'row_level_bin_occupancy',
         axisBins,
@@ -616,7 +615,8 @@
         estimatedCoverage: totalBins ? occupiedBins / totalBins : 0,
         coverageEligibleClusterCount: eligible.length,
         coverageLegacyExcludedClusterCount: legacyExcluded,
-        coverageAxisSignatureExcludedClusterCount: axisSignatureExcluded,
+        coverageGridSignatureExcludedClusterCount: gridSignatureExcluded,
+        coverageAxisSignatureExcludedClusterCount: gridSignatureExcluded,
         rowLevelObservationCount,
         warnings,
         warning: warnings.join(' '),
@@ -633,7 +633,7 @@
           <span class="metric-pill">eligible clusters ${escapeHtml(preview.coverageEligibleClusterCount ?? 0)}</span>
           <span class="metric-pill">row-level observations ${escapeHtml(preview.rowLevelObservationCount ?? 0)}</span>
           <span class="metric-pill">excluded legacy ${escapeHtml(preview.coverageLegacyExcludedClusterCount ?? 0)}</span>
-          <span class="metric-pill">axis mismatch ${escapeHtml(preview.coverageAxisSignatureExcludedClusterCount ?? 0)}</span>
+          <span class="metric-pill">grid mismatch ${escapeHtml(preview.coverageGridSignatureExcludedClusterCount ?? preview.coverageAxisSignatureExcludedClusterCount ?? 0)}</span>
         </div>
         ${(preview.warnings || (preview.warning ? [preview.warning] : [])).map(message => `<div class="tag warn">${escapeHtml(message)}</div>`).join('')}
         ${(preview.axisBins || []).map(item => `<div class="small">${escapeHtml(item.axis)}: ${item.occupiedBins}/${item.totalBins} bins · ${formatPercent(item.coverage,1)}</div>`).join('')}
@@ -687,7 +687,7 @@
             <span class="tag">Confidence ${formatNumber(d.deltaConfidence,4)}</span>
             <span class="tag">Coverage ${formatNumber(d.deltaCoverage,4)}</span>
             <span class="tag">Equitability ${formatNumber(d.deltaEquitability,4)}</span>
-            <span class="tag">Heterogeneity ${formatNumber(d.deltaHeterogeneity,4)}</span>
+            <span class="tag">Specificity ${formatNumber(d.deltaSpecificity,4)}</span>
           </div>
           ${!result.data?.withoutCluster?.ok ? `<div class="reason down">삭제 후 재평가 제한: ${escapeHtml(result.data?.withoutCluster?.error || '')}</div>` : ''}
         </div>`;
@@ -700,10 +700,10 @@
           <strong>재평가 결과</strong>
           <div class="inline-metrics">
             <span class="tag">Peer N ${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</span>
-            <span class="tag">H ${formatPercent(uploaded.heterogeneity,1)} → ${formatPercent(current.heterogeneity,1)}</span>
+            <span class="tag">S ${formatPercent(uploaded.specificityScore,1)} → ${formatPercent(current.specificity_score,1)}</span>
             <span class="tag">C ${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</span>
             <span class="tag">ΔC ${formatNumber(item.confidenceDelta,4)}</span>
-            <span class="tag">ΔH ${formatNumber(item.heterogeneityDelta,4)}</span>
+            <span class="tag">ΔS ${formatNumber(item.specificityDelta,4)}</span>
           </div>
           ${(item.interpretation || []).map(message => `<div class="pill">${escapeHtml(message)}</div>`).join('')}
           ${item.error ? `<div class="reason down">${escapeHtml(item.error)}</div>` : ''}
@@ -720,12 +720,12 @@
         `).join('');
         const uploadMetrics = [
           cluster.peerGroupSizeAtUpload == null ? '' : `<span class="metric-pill">Upload Peer N ${escapeHtml(cluster.peerGroupSizeAtUpload)}</span>`,
-          cluster.heterogeneityAtUpload == null ? '' : `<span class="metric-pill">H ${formatPercent(cluster.heterogeneityAtUpload,1)}</span>`,
+          cluster.specificityScoreAtUpload == null ? '' : `<span class="metric-pill">Specificity ${formatPercent(cluster.specificityScoreAtUpload,1)}</span>`,
           cluster.confidenceAtUpload == null ? '' : `<span class="metric-pill">C ${formatPercent(cluster.confidenceAtUpload,0)}</span>`,
           cluster.coverageCAtUpload == null ? '' : `<span class="metric-pill">Coverage ${formatPercent(cluster.coverageCAtUpload,1)}</span>`,
           cluster.equitabilityEAtUpload == null ? '' : `<span class="metric-pill">Equitability ${formatPercent(cluster.equitabilityEAtUpload,0)}</span>`,
         ].filter(Boolean).join('');
-        const hasRowBins = Boolean(cluster.hasRowLevelBinOccupancy);
+        const hasRowBins = Boolean(cluster.hasRowLevelBinOccupancy && cluster.gridSignature);
         return `<div class="cluster-card">
           <div class="cluster-card-head">
             <div class="cluster-card-title">
@@ -738,10 +738,10 @@
           <div class="inline-metrics">
             <span class="metric-pill">rows ${escapeHtml(cluster.rowCount ?? '-')}</span>
             <span class="metric-pill">vector rows ${escapeHtml(cluster.clusterVectorRowCount ?? '-')}</span>
-            <span class="metric-pill">valid row bins ${escapeHtml(cluster.rowLevelValidCount ?? 0)}</span>
+            <span class="metric-pill">valid row obs ${escapeHtml(cluster.rowLevelValidCount ?? 0)}</span>
             <span class="metric-pill">occupied bins ${escapeHtml(cluster.rowLevelOccupiedBinCount ?? 0)}</span>
           </div>
-          ${hasRowBins ? '' : '<div class="reason down">이 기존 군집은 row-level bin 정보가 없어 coverage/equitability 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.</div>'}
+          ${hasRowBins ? '' : '<div class="reason down">이 기존 군집은 row-level bin occupancy/grid signature가 없어 density 계산에서 제외됩니다.</div>'}
           ${uploadMetrics ? `<div class="inline-metrics">${uploadMetrics}</div>` : ''}
           ${renderClusterResult(cluster)}
           <div class="cluster-actions">
@@ -894,10 +894,9 @@
           <div class="metric"><span class="small">Δequitability</span><strong>${formatNumber(d.deltaEquitability,4)}</strong></div>
         </div>
         <div class="metrics">
-          <div class="metric"><span class="small">Δheterogeneity</span><strong>${formatNumber(d.deltaHeterogeneity,4)}</strong></div>
-          <div class="metric"><span class="small">ΔD²</span><strong>${formatNumber(d.deltaD2,4)}</strong></div>
-          <div class="metric"><span class="small">Δcenter_norm</span><strong>${formatNumber(d.deltaCenterNorm,4)}</strong></div>
-          <div class="metric"><span class="small">mean-bin uniqueness</span><strong>${data.binUniqueness ? 'yes' : 'no'}</strong></div>
+          <div class="metric"><span class="small">Δspecificity</span><strong>${formatNumber(d.deltaSpecificity,4)}</strong></div>
+          <div class="metric"><span class="small">Δmean rarity</span><strong>${formatNumber(d.deltaMeanRarity,4)}</strong></div>
+          <div class="metric"><span class="small">target-bin uniqueness</span><strong>${data.binUniqueness ? 'yes' : 'no'}</strong></div>
         </div>
         ${!data.withoutCluster?.ok ? `<div class="reason down">삭제 후 재평가 제한: ${escapeHtml(data.withoutCluster?.error || '')}</div>` : ''}`;
       state.pendingDeleteId = data.cluster?.id || '';
@@ -956,15 +955,15 @@
         <div class="pill">uploadedAt: ${escapeHtml(item.uploadedAt || '-')}</div>
         <div class="metrics">
           <div class="metric"><span class="small">Peer N</span><strong>${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</strong></div>
-          <div class="metric"><span class="small">Heterogeneity</span><strong>${formatPercent(uploaded.heterogeneity,1)} → ${formatPercent(current.heterogeneity,1)}</strong></div>
+          <div class="metric"><span class="small">Specificity</span><strong>${formatPercent(uploaded.specificityScore,1)} → ${formatPercent(current.specificity_score,1)}</strong></div>
           <div class="metric"><span class="small">Confidence</span><strong>${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</strong></div>
-          <div class="metric"><span class="small">D²</span><strong>${formatNumber(uploaded.D2,3)} → ${formatNumber(current.D2,3)}</strong></div>
+          <div class="metric"><span class="small">Mean rarity</span><strong>${formatNumber(uploaded.meanRarity,3)} → ${formatNumber(current.mean_rarity,3)}</strong></div>
         </div>
         <div class="metrics">
-          <div class="metric"><span class="small">p-value</span><strong>${formatNumber(uploaded.pValue,4)} → ${formatNumber(current.p_value,4)}</strong></div>
+          <div class="metric"><span class="small">Observation Support</span><strong>${formatPercent(uploaded.observationSupportS,0)} → ${formatPercent(current.observation_support_S,0)}</strong></div>
           <div class="metric"><span class="small">Engine</span><strong>${escapeHtml(uploaded.engine ?? '-')} → ${escapeHtml(current.engine ?? '-')}</strong></div>
           <div class="metric"><span class="small">Δconfidence</span><strong>${formatNumber(item.confidenceDelta,4)}</strong></div>
-          <div class="metric"><span class="small">Δheterogeneity</span><strong>${formatNumber(item.heterogeneityDelta,4)}</strong></div>
+          <div class="metric"><span class="small">Δspecificity</span><strong>${formatNumber(item.specificityDelta,4)}</strong></div>
         </div>
         ${(item.interpretation || []).map(message => `<div class="pill">${escapeHtml(message)}</div>`).join('')}
         ${item.error ? `<div class="reason down">${escapeHtml(item.error)}</div>` : ''}`;
@@ -1035,3 +1034,4 @@
   </script>
 </body>
 </html>
+

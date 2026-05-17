@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
 
 K_M = 10.0
 
@@ -31,49 +29,48 @@ class ExperimentConfig:
 
 
 @dataclass
-class DiagnosisResult:
+class DensityDiagnosisResult:
     engine: str
-    is_normal: bool | None
-    center: np.ndarray
-    D2: float
-    p_value: float
-    heterogeneity: float
-    contributions: np.ndarray
-    sample_size_Z: float
+    specificity_score: float
+    mean_rarity: float
+    max_rarity: float
+    unseen_bin_rate: float
+    rare_bin_rate: float
+    out_of_domain_rate: float
+    observation_support_S: float
     coverage_C: float
     equitability_E: float
-    w_eff: float
     confidence: float
+    peer_observation_count: int
+    valid_target_rows: int
+    invalid_target_rows: int
+    out_of_domain_rows: int
+    target_total_rows: int
     total_bins: int
     occupied_bins: int
-    mardia_skew_stat: float | None = None
-    mardia_skew_pval: float | None = None
-    mardia_kurt_stat: float | None = None
-    mardia_kurt_pval: float | None = None
-    b2p: float | None = None
 
     def to_payload(self, axis_names: list[str]) -> dict[str, Any]:
         return {
             "engine": self.engine,
-            "is_normal": self.is_normal,
-            "center": [round(float(value), 6) for value in self.center],
-            "D2": round(float(self.D2), 6),
-            "p_value": round(float(self.p_value), 6),
-            "heterogeneity": round(float(self.heterogeneity), 6),
-            "contributions": [
-                {"axis": axis_name, "percent": round(float(percent), 4)}
-                for axis_name, percent in zip(axis_names, self.contributions)
-            ],
-            "sample_size_Z": round(float(self.sample_size_Z), 6),
+            "axis_names": list(axis_names),
+            "specificity_score": round(float(self.specificity_score), 6),
+            "mean_rarity": round(float(self.mean_rarity), 6),
+            "max_rarity": round(float(self.max_rarity), 6),
+            "unseen_bin_rate": round(float(self.unseen_bin_rate), 6),
+            "rare_bin_rate": round(float(self.rare_bin_rate), 6),
+            "out_of_domain_rate": round(float(self.out_of_domain_rate), 6),
+            "observation_support_S": round(float(self.observation_support_S), 6),
             "coverage_C": round(float(self.coverage_C), 6),
             "equitability_E": round(float(self.equitability_E), 6),
-            "w_eff": round(float(self.w_eff), 6),
             "confidence": round(float(self.confidence), 6),
+            "peer_observation_count": int(self.peer_observation_count),
+            "valid_target_rows": int(self.valid_target_rows),
+            "invalid_target_rows": int(self.invalid_target_rows),
+            "out_of_domain_rows": int(self.out_of_domain_rows),
+            "target_total_rows": int(self.target_total_rows),
             "total_bins": self.total_bins,
             "occupied_bins": self.occupied_bins,
-            "mardia_skew_stat": None if self.mardia_skew_stat is None else round(float(self.mardia_skew_stat), 6),
-            "mardia_skew_pval": None if self.mardia_skew_pval is None else round(float(self.mardia_skew_pval), 6),
-            "mardia_kurt_stat": None if self.mardia_kurt_stat is None else round(float(self.mardia_kurt_stat), 6),
-            "mardia_kurt_pval": None if self.mardia_kurt_pval is None else round(float(self.mardia_kurt_pval), 6),
-            "b2p": None if self.b2p is None else round(float(self.b2p), 6),
         }
+
+
+DiagnosisResult = DensityDiagnosisResult

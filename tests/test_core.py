@@ -8,360 +8,124 @@ import numpy as np
 import app
 import storage
 from models import ExperimentConfig
-from stats_engine import DataQualityAnalyzer
+from stats_engine import DensityGridAnalyzer
 
 
-def axis(name: str) -> dict:
-    return {"name": name, "unit": "", "domainMin": 0.0, "domainMax": 10.0, "resolution": 1.0}
+def axis(name: str, domain_max: float = 10.0, resolution: float = 1.0) -> dict:
+    return {"name": name, "unit": "", "domainMin": 0.0, "domainMax": domain_max, "resolution": resolution}
 
 
-class CoreBehaviorTests(unittest.TestCase):
-    def test_csv_rows_become_one_cluster_vector(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        rows = [{"x_col": "1", "y_col": "10"}, {"x_col": "3", "y_col": "14"}]
-        vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
-        self.assertEqual(meta["row_count"], 2)
+def goal(goal_id: str = "goal_a", axes: list[dict] | None = None) -> dict:
+    return {"id": goal_id, "name": "A", "K_m": 10.0, "axes": axes or [axis("x"), axis("y")]}
+
+
+def record_from_rows(goal_payload: dict, rows: list[dict[str, str]], record_id: str) -> dict:
+    mapping = {item["name"]: item["name"] for item in goal_payload["axes"]}
+    vector, meta = app.build_cluster_vector(rows, mapping, goal_payload)
+    record = app.make_cluster_record(goal_payload, goal_payload, vector, meta)
+    record["id"] = record_id
+    return record
+
+
+class DensityGridBehaviorTests(unittest.TestCase):
+    def test_csv_rows_become_cluster_vector_and_bin_occupancy(self) -> None:
+        goal_payload = goal(axes=[axis("x"), axis("y", domain_max=20.0)])
+        rows = [{"x": "1", "y": "10"}, {"x": "3", "y": "14"}]
+        vector, meta = app.build_cluster_vector(rows, {"x": "x", "y": "y"}, goal_payload)
         np.testing.assert_allclose(vector, np.array([2.0, 12.0]))
-        self.assertEqual(meta["values_mean"], [2.0, 12.0])
-        self.assertEqual(meta["values_variance"], [2.0, 8.0])
-        self.assertEqual(meta["values_std"], [1.414213562373, 2.828427124746])
-        self.assertIn("bin_occupancy", meta)
-        self.assertEqual(meta["bin_occupancy_meta"]["totalRows"], 2)
+        self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 2)
+        self.assertEqual(sum(meta["bin_occupancy"].values()), 2)
 
-    def test_same_axes_different_goal_id_are_separated(self) -> None:
-        clusters = [
-            {"id": "a1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 2], "rowCount": 2},
-            {"id": "b1", "goalId": "goal_b", "axisNames": ["x", "y"], "values": [9, 8], "rowCount": 2},
-        ]
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        with patch("storage.load_cluster_store", return_value=clusters):
-            peers = storage.get_peer_group(goal, ["x", "y"])
-        np.testing.assert_allclose(peers, np.array([[1.0, 2.0]]))
+    def test_unseen_peer_bin_increases_unseen_bin_rate(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 10})
+        result = analyzer.diagnose({"[5]": 3}, {"validMultidimensionalRowCount": 3, "totalRows": 3})
+        self.assertEqual(result.unseen_bin_rate, 1.0)
+        self.assertGreater(result.specificity_score, 0.0)
 
-    def test_same_goal_and_axis_signature_match_peer_group(self) -> None:
-        clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 2], "rowCount": 2}]
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        with patch("storage.load_cluster_store", return_value=clusters):
-            peers = storage.get_peer_group(goal, ["x", "y"])
-        self.assertEqual(peers.shape, (1, 2))
+    def test_low_peer_bin_count_increases_mean_rarity(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 100, "[5]": 1})
+        common = analyzer.diagnose({"[0]": 4}, {"validMultidimensionalRowCount": 4, "totalRows": 4})
+        rare = analyzer.diagnose({"[5]": 4}, {"validMultidimensionalRowCount": 4, "totalRows": 4})
+        self.assertGreater(rare.mean_rarity, common.mean_rarity)
+        self.assertGreater(rare.specificity_score, common.specificity_score)
 
-    def test_axis_matching_is_order_case_and_space_insensitive(self) -> None:
-        clusters = [
-            {
-                "id": "a1",
-                "goalId": "goal_a",
-                "axisNames": [" Y ", "X"],
-                "values": [20, 10],
-                "rowCount": 2,
-            }
-        ]
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        with patch("storage.load_cluster_store", return_value=clusters):
-            peers = storage.get_peer_group(goal, [" x ", "y"])
-            diagnostics = storage.explain_peer_filter("goal_a", ["y", "x"])
-        np.testing.assert_allclose(peers, np.array([[10.0, 20.0]]))
-        self.assertEqual(diagnostics["compatibleAxisCount"], 1)
+    def test_same_aggregated_bin_count_gives_same_density_result(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        one_cluster = record_from_rows(selected_goal, [{"x": "1"}, {"x": "1"}, {"x": "2"}, {"x": "8"}], "one")
+        split_a = record_from_rows(selected_goal, [{"x": "1"}, {"x": "1"}], "split_a")
+        split_b = record_from_rows(selected_goal, [{"x": "2"}, {"x": "8"}], "split_b")
 
-    def test_peer_group_uses_only_saved_clusters(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        with patch("storage.load_cluster_store", return_value=[]):
-            with self.assertRaises(ValueError):
-                storage.get_peer_group(goal, ["x", "y"])
+        target_counts = {"[1]": 2, "[2]": 1}
+        target_meta = {"validMultidimensionalRowCount": 3, "totalRows": 3}
+        with patch("storage.load_cluster_store", return_value=[one_cluster]):
+            one = app.run_density_analysis(selected_goal, selected_goal, target_counts, target_meta)
+        with patch("storage.load_cluster_store", return_value=[split_a, split_b]):
+            split = app.run_density_analysis(selected_goal, selected_goal, target_counts, target_meta)
 
-    def test_selected_axis_subset_uses_same_goal_clusters(self) -> None:
-        clusters = [{"id": "a1", "goalId": "goal_a", "axisNames": ["a", "b", "c"], "values": [1, 2, 3], "rowCount": 2}]
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("a"), axis("b"), axis("c")]}
-        with patch("storage.load_cluster_store", return_value=clusters):
-            peers = storage.get_peer_group(goal, ["a", "c"])
-        np.testing.assert_allclose(peers, np.array([[1.0, 3.0]]))
+        self.assertEqual(one["coverageInfo"]["binCounts"], split["coverageInfo"]["binCounts"])
+        self.assertEqual(one["resultPayload"]["specificity_score"], split["resultPayload"]["specificity_score"])
+        self.assertEqual(one["resultPayload"]["mean_rarity"], split["resultPayload"]["mean_rarity"])
 
-    def test_coverage_uses_row_level_bins_while_sample_size_uses_cluster_count(self) -> None:
-        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
-        analyzer = DataQualityAnalyzer(config)
-        peers = np.array([[1, 1], [2, 2], [2.1, 2.1], [3, 3]], dtype=float)
-        analyzer.add_peers(peers)
-        analyzer.add_coverage_bin_counts(
-            {
-                "[0,0]": 10,
-                "[1,1]": 12,
-                "[2,2]": 8,
-                "[3,3]": 6,
-                "[4,4]": 5,
-                "[5,5]": 4,
-            }
+    def test_out_of_domain_rows_are_reflected_in_rate(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 4})
+        result = analyzer.diagnose(
+            {"[0]": 1},
+            {"validMultidimensionalRowCount": 1, "outOfDomainRowCount": 1, "totalRows": 2},
         )
-        result = analyzer.diagnose([4, 4])
-        self.assertEqual(result.occupied_bins, 6)
-        self.assertGreater(result.occupied_bins, len(peers))
-        self.assertAlmostEqual(result.sample_size_Z, len(peers) / (len(peers) + config.K_m))
+        self.assertEqual(result.out_of_domain_rate, 0.5)
 
-    def test_row_level_bin_occupancy_counts_valid_invalid_and_out_of_domain_rows(self) -> None:
-        goal = {
-            "id": "goal_a",
-            "name": "A",
-            "K_m": 10.0,
-            "axes": [
-                {**axis("x"), "resolution": 5.0},
-                {**axis("y"), "resolution": 5.0},
-            ],
+    def test_grid_signature_mismatch_is_excluded_from_density(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        matching = record_from_rows(selected_goal, [{"x": "1"}, {"x": "2"}], "matching")
+        mismatched = record_from_rows(goal(axes=[axis("x", resolution=0.5)]), [{"x": "1"}], "mismatched")
+        coverage = app.build_global_bin_counts([matching, mismatched], selected_goal)
+        self.assertEqual(coverage["coverageEligibleClusterCount"], 1)
+        self.assertEqual(coverage["coverageGridSignatureExcludedClusterCount"], 1)
+        self.assertEqual(coverage["rowLevelObservationCount"], 2)
+
+    def test_legacy_cluster_without_bin_occupancy_is_excluded_from_density(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        eligible = record_from_rows(selected_goal, [{"x": "1"}], "eligible")
+        legacy = {
+            "id": "legacy",
+            "goalId": selected_goal["id"],
+            "axisNames": ["x"],
+            "values": [1.0],
+            "rowCount": 1,
+            "gridSignature": storage.grid_signature_from_axes(selected_goal["axes"]),
         }
-        rows = [
-            {"x_col": "0", "y_col": "0"},
-            {"x_col": "4.9", "y_col": "10"},
-            {"x_col": "10", "y_col": "10"},
-            {"x_col": "bad", "y_col": "2"},
-            {"x_col": "11", "y_col": "2"},
-        ]
-        _vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
-        occupancy = meta["bin_occupancy"]
-        occupancy_meta = meta["bin_occupancy_meta"]
-        self.assertEqual(sum(occupancy.values()), occupancy_meta["validMultidimensionalRowCount"])
-        self.assertEqual(occupancy_meta["validMultidimensionalRowCount"], 3)
-        self.assertEqual(occupancy_meta["invalidRowCount"], 1)
-        self.assertEqual(occupancy_meta["outOfDomainRowCount"], 1)
-        self.assertEqual(occupancy["[0,0]"], 1)
-        self.assertEqual(occupancy["[0,1]"], 1)
-        self.assertEqual(occupancy["[1,1]"], 1)
-
-    def test_three_hundred_rows_bin_occupancy_matches_valid_row_count(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [{**axis("x"), "domainMax": 300.0, "resolution": 10.0}]}
-        rows = [{"x_col": str(index)} for index in range(300)]
-        _vector, meta = app.build_cluster_vector(rows, {"x": "x_col"}, goal)
-        self.assertEqual(sum(meta["bin_occupancy"].values()), 300)
-        self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 300)
-        self.assertEqual(meta["cluster_vector_row_count"], 300)
-
-    def test_cluster_vector_uses_multidimensional_numeric_rows(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        rows = [
-            {"x_col": "1", "y_col": "bad"},
-            {"x_col": "3", "y_col": "5"},
-            {"x_col": "5", "y_col": "7"},
-        ]
-        vector, meta = app.build_cluster_vector(rows, {"x": "x_col", "y": "y_col"}, goal)
-        np.testing.assert_allclose(vector, np.array([4.0, 6.0]))
-        self.assertEqual(meta["cluster_vector_row_count"], 2)
-        self.assertEqual(meta["axis_numeric_counts"], {"x": 3, "y": 2})
-        self.assertEqual(meta["bin_occupancy_meta"]["invalidRowCount"], 1)
-
-    def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
-        rows_a = [{"x_col": str(value)} for value in [2, 4, 6, 8]]
-        rows_b = [{"x_col": str(value)} for value in [1, 4, 7, 8]]
-        vector_a, meta_a = app.build_cluster_vector(rows_a, {"x": "x_col"}, goal)
-        vector_b, meta_b = app.build_cluster_vector(rows_b, {"x": "x_col"}, goal)
-        np.testing.assert_allclose(vector_a, vector_b)
-        record_a = app.make_cluster_record(goal, goal, vector_a, meta_a)
-        record_b = app.make_cluster_record(goal, goal, vector_b, meta_b)
-        self.assertNotEqual(record_a["binOccupancy"], record_b["binOccupancy"])
-        self.assertNotEqual(storage.cluster_fingerprint(record_a), storage.cluster_fingerprint(record_b))
-
-        backing_store: list[dict] = []
-
-        def save_store(clusters: list[dict]) -> None:
-            backing_store[:] = clusters
-
-        with patch("storage.load_cluster_store", side_effect=lambda: list(backing_store)), patch("storage.save_cluster_store", side_effect=save_store):
-            _saved_a, is_new_a = storage.save_peer_cluster(record_a)
-            _saved_b, is_new_b = storage.save_peer_cluster(record_b)
-
-        self.assertTrue(is_new_a)
-        self.assertTrue(is_new_b)
-        self.assertEqual(len(backing_store), 2)
-
-    def test_legacy_clusters_remain_heterogeneity_peers_but_not_coverage_peers(self) -> None:
-        clusters = [
-            {"id": "legacy", "storedAxisSignature": storage.axis_subset_key(["x", "y"]), "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 3},
-            {
-                "id": "eligible",
-                "storedAxisSignature": storage.axis_subset_key(["x", "y"]),
-                "axisNames": ["x", "y"],
-                "values": [2, 2],
-                "rowCount": 3,
-                "binOccupancy": {"[0,0]": 2, "[1,1]": 1},
-                "axisBinOccupancy": {"x": {"0": 2, "1": 1}, "y": {"0": 2, "1": 1}},
-                "binOccupancyMeta": {"validMultidimensionalRowCount": 3},
-            },
-            {
-                "id": "axis_mismatch",
-                "storedAxisSignature": storage.axis_subset_key(["x", "y", "z"]),
-                "axisNames": ["x", "y"],
-                "values": [3, 3],
-                "rowCount": 3,
-                "binOccupancy": {"[0,0,0]": 3},
-            },
-        ]
-        coverage = app.build_global_bin_counts(clusters, ["x", "y"])
+        coverage = app.build_global_bin_counts([eligible, legacy], selected_goal)
         self.assertEqual(coverage["coverageEligibleClusterCount"], 1)
         self.assertEqual(coverage["coverageLegacyExcludedClusterCount"], 1)
-        self.assertEqual(coverage["coverageAxisSignatureExcludedClusterCount"], 1)
-        self.assertEqual(coverage["rowLevelObservationCount"], 3)
-        self.assertEqual(coverage["occupiedBins"], 2)
 
-    def test_heterogeneity_increases_with_d2(self) -> None:
-        config = ExperimentConfig(["x", "y"], [(-10, 10), (-10, 10)], [1, 1])
-        peers = np.array(
-            [
-                [0, 0],
-                [1, 0],
-                [-1, 0],
-                [0, 1],
-                [0, -1],
-                [1, 1],
-                [-1, -1],
-                [1, -1],
-                [-1, 1],
-                [0.5, 0.2],
-                [-0.4, 0.3],
-                [0.2, -0.6],
-            ],
-            dtype=float,
-        )
-        analyzer = DataQualityAnalyzer(config)
-        analyzer.add_peers(peers)
-        near = analyzer.diagnose([0.1, 0.1])
-        far = analyzer.diagnose([4, 4])
-        self.assertGreater(far.D2, near.D2)
-        self.assertGreater(far.heterogeneity, near.heterogeneity)
-
-    def test_non_numeric_values_are_excluded_from_row_level_bins(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x")]}
-        vector, meta = app.build_cluster_vector([{"x_col": "1"}, {"x_col": "bad"}], {"x": "x_col"}, goal)
-        np.testing.assert_allclose(vector, np.array([1.0]))
-        self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 1)
-        self.assertEqual(meta["bin_occupancy_meta"]["invalidRowCount"], 1)
-        with self.assertRaisesRegex(ValueError, "numeric row"):
-            app.build_cluster_vector([{"x_col": "bad"}], {"x": "x_col"}, goal)
-
-    def test_report_visualizations_use_axis_bin_occupancy_when_available(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
-        analyzer = DataQualityAnalyzer(config)
-        peers = np.array([[1, 1], [2, 2], [3, 3]], dtype=float)
-        analyzer.add_peers(peers)
-        analyzer.add_coverage_bin_counts({"[0,0]": 3, "[1,1]": 4})
-        result = analyzer.diagnose([4, 4])
-        visualizations = app.build_report_visualizations(
-            goal,
-            peers,
-            np.array([4, 4]),
-            result,
-            {"axisBinCounts": {"x": {"0": 3, "1": 4}, "y": {"0": 3, "1": 4}}},
-        )
-        self.assertEqual(visualizations["coverage"]["basis"], "row_level_bin_occupancy")
-        self.assertEqual(visualizations["coverage"]["axes"][0]["basis"], "row_level_bin_occupancy")
-        self.assertEqual(visualizations["coverage"]["axes"][0]["bins"][:2], [3, 4])
-        self.assertEqual(visualizations["coverage"]["axes"][0]["observationCount"], 7)
-
-    def test_report_visualizations_mark_cluster_vector_fallback_for_legacy(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        config = ExperimentConfig(["x", "y"], [(0, 10), (0, 10)], [1, 1])
-        analyzer = DataQualityAnalyzer(config)
-        peers = np.array([[1, 1], [2, 2], [3, 3]], dtype=float)
-        analyzer.add_peers(peers)
-        analyzer.add_coverage_bin_counts({"[0,0]": 3})
-        result = analyzer.diagnose([4, 4])
-        visualizations = app.build_report_visualizations(goal, peers, np.array([4, 4]), result, {"axisBinCounts": {}})
-        self.assertEqual(visualizations["coverage"]["basis"], "cluster_vector_fallback")
-        self.assertEqual(visualizations["coverage"]["axes"][0]["basis"], "cluster_vector_fallback")
-
-    def test_batch_analysis_uses_only_preexisting_peer_group(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        clusters = [
-            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
-            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
-            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
-        ]
+    def test_density_analysis_does_not_require_vector_peer_minimum(self) -> None:
+        selected_goal = goal(axes=[axis("x"), axis("y")])
+        peer = record_from_rows(selected_goal, [{"x": "1", "y": "1"}], "peer")
         payload = {
-            "goalId": "goal_a",
+            "goalId": selected_goal["id"],
             "selectedAxes": ["x", "y"],
-            "files": [
-                {"displayName": "a.csv", "axisMapping": {"x": "x", "y": "y"}, "rows": [{"x": "4", "y": "4"}]},
-                {"displayName": "b.csv", "axisMapping": {"x": "x", "y": "y"}, "rows": [{"x": "5", "y": "5"}]},
-            ],
+            "axisMapping": {"x": "x", "y": "y"},
+            "rows": [{"x": "1", "y": "1"}, {"x": "5", "y": "5"}],
         }
-        with patch("app.load_goal_store", return_value=[goal]), patch("storage.load_cluster_store", return_value=clusters), patch("app.load_cluster_store", return_value=clusters):
-            result = app.analyze_batch_request(payload)
-        self.assertEqual([item["analysisSummary"]["peer_group_size"] for item in result["items"]], [3, 3])
-
-    def test_batch_save_makes_saved_clusters_available_to_next_analysis(self) -> None:
-        goal = {"id": "goal_batch", "name": "Batch", "K_m": 10.0, "axes": [axis("a"), axis("b"), axis("c"), axis("d")]}
-        backing_store: list[dict] = []
-
-        def save_store(clusters: list[dict]) -> None:
-            backing_store[:] = clusters
-
-        records = []
-        for index in range(6):
-            vector = np.array([index + 1, index + 2, index + 3, index + 4], dtype=float)
-            records.append(
-                app.make_cluster_record(
-                    goal,
-                    goal,
-                    vector,
-                    {
-                        "row_count": 1,
-                        "summary_method": "mean",
-                        "values_mean": [float(value) for value in vector],
-                    },
-                    source_batch_id="batch_test",
-                )
-            )
-
         with (
-            patch("app.load_goal_store", return_value=[goal]),
-            patch("storage.load_goal_store", return_value=[goal]),
-            patch("storage.load_cluster_store", side_effect=lambda: list(backing_store)),
-            patch("storage.save_cluster_store", side_effect=save_store),
-            patch("app.load_cluster_store", side_effect=lambda: list(backing_store)),
+            patch("app.load_goal_store", return_value=[selected_goal]),
+            patch("storage.load_cluster_store", return_value=[peer]),
+            patch("app.load_cluster_store", return_value=[peer]),
+            patch("storage.save_cluster_store"),
         ):
-            response = app.batch_save_request(
-                {
-                    "goalId": "goal_batch",
-                    "selectedAxisNames": [" d ", "C", "b", "A"],
-                    "records": records,
-                }
-            )
-            peers = storage.get_peer_group(goal, ["A", "b", "c", "d"])
+            response = app.analyze_request_v2(payload)
+        self.assertEqual(response["result"]["engine"], "density_grid")
+        self.assertEqual(response["result"]["peer_observation_count"], 1)
 
-        self.assertEqual(response["compatiblePeerCountForSelectedAxes"], 6)
-        self.assertEqual(peers.shape, (6, 4))
-
-    def test_current_reevaluation_excludes_self_from_peer_group(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        clusters = [
-            {"id": "target", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [4, 4], "rowCount": 1},
-            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
-            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
-            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
-        ]
-        with patch("app.load_goal_store", return_value=[goal]), patch("storage.load_cluster_store", return_value=clusters), patch("app.load_cluster_store", return_value=clusters):
-            result = app.reevaluate_cluster("target")
-        self.assertEqual(result["currentPeerGroupSize"], 3)
-
-    def test_out_of_domain_warning_is_reported(self) -> None:
-        goal = {"id": "goal_a", "name": "A", "K_m": 10.0, "axes": [axis("x"), axis("y")]}
-        clusters = [
-            {"id": "p1", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [1, 1], "rowCount": 1},
-            {"id": "p2", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [2, 2], "rowCount": 1},
-            {"id": "p3", "goalId": "goal_a", "axisNames": ["x", "y"], "values": [3, 3], "rowCount": 1},
-        ]
-        with patch("storage.load_cluster_store", return_value=clusters):
-            result = app.run_vector_analysis(goal, goal, np.array([11.0, 2.0]))
-        self.assertEqual(result["resultPayload"]["outOfDomainWarningCount"], 1)
-        self.assertEqual(result["resultPayload"]["outOfDomainWarnings"][0]["role"], "target")
-
-    def test_export_json_and_csv_are_download_payloads(self) -> None:
-        report = {
-            "meta": {"experiment_goal": "A", "goal_id": "goal_a", "axis_names": ["x"], "peer_group_size": 3},
-            "result": {"engine": "spatial_rank", "confidence": 0.5, "heterogeneity": 0.1},
-            "summary": ["ok"],
-        }
-        exported_json = app.export_report_request({"format": "json", "report": report})
-        exported_csv = app.export_report_request({"format": "csv", "report": report})
-        self.assertTrue(exported_json["filename"].endswith(".json"))
-        self.assertTrue(exported_csv["filename"].endswith(".csv"))
-        self.assertIn("experiment_goal", exported_csv["content"])
+    def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        record_a = record_from_rows(selected_goal, [{"x": str(value)} for value in [2, 4, 6, 8]], "a")
+        record_b = record_from_rows(selected_goal, [{"x": str(value)} for value in [1, 4, 7, 8]], "b")
+        self.assertNotEqual(record_a["binOccupancy"], record_b["binOccupancy"])
+        self.assertNotEqual(storage.cluster_fingerprint(record_a), storage.cluster_fingerprint(record_b))
 
 
 if __name__ == "__main__":

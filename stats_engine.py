@@ -4,11 +4,8 @@ import json
 import math
 
 import numpy as np
-from numpy.linalg import LinAlgError, pinv
-from scipy import stats
-from sklearn.covariance import LedoitWolf
 
-from models import DiagnosisResult, ExperimentConfig
+from models import DensityDiagnosisResult, ExperimentConfig
 
 
 class BinGridTracker:
@@ -91,6 +88,10 @@ class BinGridTracker:
         return int(sum(self._bins.values()))
 
     @property
+    def bin_counts(self) -> dict[str, int]:
+        return dict(self._bins)
+
+    @property
     def coverage(self) -> float:
         return self.occupied_bins / self.total_bins if self.total_bins else 0.0
 
@@ -105,215 +106,88 @@ class BinGridTracker:
         return float(entropy / np.log(occupied))
 
 
-def spatial_median(X: np.ndarray, max_iter: int = 300, tol: float = 1e-7) -> np.ndarray:
-    center = np.median(X, axis=0).astype(float)
-    for _ in range(max_iter):
-        diff = X - center
-        distances = np.linalg.norm(diff, axis=1)
-        zero_mask = distances < 1e-12
-        if np.any(zero_mask):
-            return X[zero_mask][0].astype(float)
-        weights = 1.0 / distances
-        next_center = (weights[:, None] * X).sum(axis=0) / weights.sum()
-        if np.linalg.norm(next_center - center) < tol:
-            return next_center
-        center = next_center
-    return center
-
-
-def sscm(X: np.ndarray, center: np.ndarray) -> np.ndarray:
-    shifted = X - center
-    norms = np.linalg.norm(shifted, axis=1, keepdims=True)
-    unit_vectors = np.divide(shifted, np.where(norms < 1e-12, 1.0, norms))
-    return (unit_vectors.T @ unit_vectors) / len(X)
-
-
-def sherman_morrison_update(inverse: np.ndarray, vector: np.ndarray) -> np.ndarray:
-    column = vector.reshape(-1, 1)
-    numerator = inverse @ column @ column.T @ inverse
-    denominator = float(1.0 + (column.T @ inverse @ column).item())
-    if abs(denominator) < 1e-12:
-        raise LinAlgError("Sherman-Morrison update became numerically unstable.")
-    return inverse - numerator / denominator
-
-
-def regularized_sscm_inverse(X: np.ndarray, center: np.ndarray, ridge: float = 1e-6) -> np.ndarray:
-    shifted = X - center
-    norms = np.linalg.norm(shifted, axis=1, keepdims=True)
-    unit_vectors = np.divide(shifted, np.where(norms < 1e-12, 1.0, norms))
-    inverse = np.eye(X.shape[1], dtype=float) / ridge
-    scale = math.sqrt(max(len(unit_vectors), 1))
-    for vector in unit_vectors / scale:
-        inverse = sherman_morrison_update(inverse, vector)
-    return inverse
-
-
-def mardia_test(X: np.ndarray) -> dict[str, float | bool]:
-    n, p = X.shape
-    center = X.mean(axis=0)
-    covariance = np.cov(X, rowvar=False)
-    try:
-        covariance_inv = np.linalg.inv(covariance)
-    except LinAlgError:
-        covariance_inv = pinv(covariance)
-
-    Xc = X - center
-    gram = Xc @ covariance_inv @ Xc.T
-    b1p = float(np.mean(gram**3))
-    skew_stat = n * b1p / 6.0
-    df_skew = p * (p + 1) * (p + 2) / 6
-    skew_pval = float(1.0 - stats.chi2.cdf(skew_stat, df=df_skew))
-
-    mahal_sq = np.sum((Xc @ covariance_inv) * Xc, axis=1)
-    b2p = float(np.mean(mahal_sq**2))
-    kurt_mean = p * (p + 2)
-    kurt_var = 8 * p * (p + 2) / n
-    kurt_stat = float((b2p - kurt_mean) / np.sqrt(kurt_var))
-    kurt_pval = float(2.0 * (1.0 - stats.norm.cdf(abs(kurt_stat))))
-
-    return {
-        "skew_stat": skew_stat,
-        "skew_pval": skew_pval,
-        "kurt_stat": kurt_stat,
-        "kurt_pval": kurt_pval,
-        "b2p": b2p,
-        "is_normal": bool(skew_pval > 0.05 and kurt_pval > 0.05),
-    }
-
-
-class DataQualityAnalyzer:
+class DensityGridAnalyzer:
     def __init__(self, config: ExperimentConfig):
         self.config = config
-        self.p = len(config.axis_names)
-        self._peers: list[np.ndarray] = []
-        self._coverage_grid = BinGridTracker(config.domain_range, config.resolution)
+        self._peer_density = BinGridTracker(config.domain_range, config.resolution)
 
-    def add_peers(self, X: np.ndarray | list[list[float]]) -> None:
-        rows = np.asarray(X, dtype=float)
-        if rows.ndim != 2 or rows.shape[1] != self.p:
-            raise ValueError(f"Peer data must have shape (N, {self.p}).")
-        for row in rows:
-            vector = np.asarray(row, dtype=float)
-            self._peers.append(vector)
+    def set_peer_bin_counts(self, bin_counts: dict[str, int]) -> None:
+        self._peer_density = BinGridTracker(self.config.domain_range, self.config.resolution)
+        self._peer_density.add_bin_counts(bin_counts)
 
-    def add_coverage_bin_counts(self, bin_counts: dict[str, int]) -> None:
-        self._coverage_grid.add_bin_counts(bin_counts)
+    def add_peer_bin_counts(self, bin_counts: dict[str, int]) -> None:
+        self._peer_density.add_bin_counts(bin_counts)
 
-    def set_coverage_bin_counts(self, global_bin_counts: dict[str, int]) -> None:
-        self._coverage_grid = BinGridTracker(self.config.domain_range, self.config.resolution)
-        self._coverage_grid.add_bin_counts(global_bin_counts)
-
-    def _select_engine(self, X: np.ndarray) -> tuple[str, bool | None, dict[str, float | bool]]:
-        if len(X) < 10 or self.p < 2:
-            return "spatial_rank", None, {}
-        mardia = mardia_test(X)
-        if bool(mardia["is_normal"]):
-            return "mahalanobis", True, mardia
-        return "sscm", False, mardia
-
-    def _w_eff(self, engine: str, b2p: float | None) -> float:
-        if engine == "spatial_rank":
-            return 0.5
-        if b2p is None or b2p <= 0:
-            return 1.0
-        return float(min(1.0, self.p * (self.p + 2) / b2p))
-
-    def _compute_heterogeneity(
+    def diagnose(
         self,
-        x_target: np.ndarray,
-        X: np.ndarray,
-        engine: str,
-    ) -> tuple[np.ndarray, float, float, np.ndarray]:
-        count, p = X.shape
-
-        if engine == "spatial_rank":
-            center = spatial_median(X)
-            peer_distances = np.linalg.norm(X - center, axis=1)
-            target_distance = float(np.linalg.norm(x_target - center))
-            rank_fraction = float(np.sum(peer_distances < target_distance) / count)
-            D2 = float(rank_fraction * stats.chi2.ppf(0.99, df=p))
-            p_value = float(max(0.0, 1.0 - rank_fraction))
-            diff = np.abs(x_target - center)
-            contributions = (diff / (diff.sum() + 1e-12)) * 100
-            return center, D2, p_value, contributions
-
-        if engine == "mahalanobis":
-            model = LedoitWolf().fit(X)
-            center = model.location_
-            covariance = model.covariance_
-            try:
-                covariance_inv = np.linalg.inv(covariance)
-            except LinAlgError:
-                covariance_inv = pinv(covariance)
-        else:
-            center = spatial_median(X)
-            covariance_inv = regularized_sscm_inverse(X, center)
-
-        # D2 = (x - center)^T Sigma^-1 (x - center).
-        # p_value = 1 - F_chi2,p(D2), heterogeneity = F_chi2,p(D2).
-        # Therefore larger D2 always produces larger heterogeneity.
-        diff = x_target - center
-        D2 = float(diff @ covariance_inv @ diff)
-        p_value = float(1.0 - stats.chi2.cdf(D2, df=p))
-
-        # Contribution decomposition includes covariance/SSCM interactions:
-        # raw_j = d_j * (Sigma^-1 d)_j, percent_j = abs(raw_j) / sum(abs(raw)).
-        contribution_raw = diff * (covariance_inv @ diff)
-        contributions = (np.abs(contribution_raw) / (np.abs(contribution_raw).sum() + 1e-12)) * 100
-        return center, D2, p_value, contributions
-
-    def diagnose(self, x_target: np.ndarray | list[float]) -> DiagnosisResult:
-        if not self._peers:
-            raise ValueError("Peer Group is empty.")
-
-        target = np.asarray(x_target, dtype=float)
-        if target.shape != (self.p,):
-            raise ValueError(f"Target vector must have shape ({self.p},).")
-
-        X = np.asarray(self._peers, dtype=float)
-        count = len(X)
-        if count < self.p + 1:
+        target_bin_counts: dict[str, int],
+        target_meta: dict[str, int] | None = None,
+    ) -> DensityDiagnosisResult:
+        peer_bin_counts = self._peer_density.bin_counts
+        peer_valid_rows = self._peer_density.observation_count
+        if peer_valid_rows <= 0:
             raise ValueError(
-                f"Peer Group N={count} is too small for p={self.p}. "
-                "Add more saved clusters or reduce the selected axes."
+                "Density grid analysis requires at least one peer row-level bin occupancy observation. "
+                "Saved legacy clusters without row-level bin occupancy/grid signature are excluded."
             )
 
-        engine, is_normal, mardia = self._select_engine(X)
-        if engine != "spatial_rank" and count <= self.p + 1:
-            raise ValueError(
-                f"Peer Group N={count} is too small for stable covariance-based judgment with p={self.p}. "
-                "Add more peer clusters or reduce selected axes."
-            )
+        target_tracker = BinGridTracker(self.config.domain_range, self.config.resolution)
+        target_tracker.add_bin_counts(target_bin_counts)
+        normalized_target_counts = target_tracker.bin_counts
+        target_valid_rows = target_tracker.observation_count
 
-        b2p = float(mardia["b2p"]) if "b2p" in mardia else None
-        w_eff = self._w_eff(engine, b2p)
-        center, D2, p_value, contributions = self._compute_heterogeneity(target, X, engine)
+        meta = target_meta or {}
+        invalid_target_rows = int(meta.get("invalidRowCount") or 0)
+        out_of_domain_rows = int(meta.get("outOfDomainRowCount") or 0)
+        target_total_rows = int(meta.get("totalRows") or (target_valid_rows + invalid_target_rows + out_of_domain_rows))
+        if target_valid_rows <= 0:
+            raise ValueError("Density grid analysis requires at least one valid target row-level observation.")
 
-        # K_m is a Michaelis-Menten-shaped half-saturation constant:
-        # Z = N / (N + K_m), so Z reaches 0.5 when N == K_m.
-        sample_size_Z = count / (count + self.config.K_m)
-        coverage_C = self._coverage_grid.coverage
-        equitability_E = self._coverage_grid.equitability
-        confidence = float((sample_size_Z * coverage_C * equitability_E) ** (1.0 / 3.0) * w_eff)
+        total_bins = self._peer_density.total_bins
+        alpha = 0.5
+        denominator = peer_valid_rows + alpha * total_bins
+        weighted_rarity = 0.0
+        max_rarity = 0.0
+        unseen_target_rows = 0
+        rare_target_rows = 0
 
-        return DiagnosisResult(
-            engine=engine,
-            is_normal=is_normal,
-            center=center,
-            D2=D2,
-            p_value=p_value,
-            heterogeneity=1.0 - p_value,
-            contributions=contributions,
-            sample_size_Z=sample_size_Z,
-            coverage_C=coverage_C,
-            equitability_E=equitability_E,
-            w_eff=w_eff,
+        for key, target_count in normalized_target_counts.items():
+            peer_count = int(peer_bin_counts.get(key, 0))
+            p_hat_g = (peer_count + alpha) / denominator
+            rarity_g = -math.log(p_hat_g)
+            weighted_rarity += int(target_count) * rarity_g
+            max_rarity = max(max_rarity, rarity_g)
+            if peer_count == 0:
+                unseen_target_rows += int(target_count)
+            if peer_count <= 1:
+                rare_target_rows += int(target_count)
+
+        mean_rarity = weighted_rarity / target_valid_rows
+        scale = max(1e-12, math.log(peer_valid_rows + total_bins + 1))
+        specificity_score = 1.0 - math.exp(-mean_rarity / scale)
+
+        observation_support_S = peer_valid_rows / (peer_valid_rows + self.config.K_m)
+        coverage_C = self._peer_density.coverage
+        equitability_E = self._peer_density.equitability
+        confidence = float((observation_support_S * coverage_C * equitability_E) ** (1.0 / 3.0))
+
+        return DensityDiagnosisResult(
+            engine="density_grid",
+            specificity_score=float(specificity_score),
+            mean_rarity=float(mean_rarity),
+            max_rarity=float(max_rarity),
+            unseen_bin_rate=float(unseen_target_rows / target_valid_rows),
+            rare_bin_rate=float(rare_target_rows / target_valid_rows),
+            out_of_domain_rate=float(out_of_domain_rows / target_total_rows) if target_total_rows > 0 else 0.0,
+            observation_support_S=float(observation_support_S),
+            coverage_C=float(coverage_C),
+            equitability_E=float(equitability_E),
             confidence=confidence,
-            total_bins=self._coverage_grid.total_bins,
-            occupied_bins=self._coverage_grid.occupied_bins,
-            mardia_skew_stat=float(mardia["skew_stat"]) if "skew_stat" in mardia else None,
-            mardia_skew_pval=float(mardia["skew_pval"]) if "skew_pval" in mardia else None,
-            mardia_kurt_stat=float(mardia["kurt_stat"]) if "kurt_stat" in mardia else None,
-            mardia_kurt_pval=float(mardia["kurt_pval"]) if "kurt_pval" in mardia else None,
-            b2p=b2p,
+            peer_observation_count=int(peer_valid_rows),
+            valid_target_rows=int(target_valid_rows),
+            invalid_target_rows=int(invalid_target_rows),
+            out_of_domain_rows=int(out_of_domain_rows),
+            target_total_rows=int(target_total_rows),
+            total_bins=int(total_bins),
+            occupied_bins=int(self._peer_density.occupied_bins),
         )

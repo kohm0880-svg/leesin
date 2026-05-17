@@ -55,24 +55,22 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "analysisTimestamp": None,
     "peerGroupSize": None,
     "engine": None,
-    "isNormal": None,
-    "center": None,
-    "D2": None,
-    "pValue": None,
-    "heterogeneity": None,
+    "specificityScore": None,
+    "meanRarity": None,
+    "maxRarity": None,
+    "unseenBinRate": None,
+    "rareBinRate": None,
+    "outOfDomainRate": None,
     "confidence": None,
-    "sampleSizeZ": None,
+    "observationSupportS": None,
     "coverageC": None,
     "equitabilityE": None,
-    "wEff": None,
+    "peerObservationCount": None,
+    "validTargetRows": None,
+    "invalidTargetRows": None,
+    "outOfDomainRows": None,
     "totalBins": None,
     "occupiedBins": None,
-    "contributions": None,
-    "mardiaSkewStat": None,
-    "mardiaSkewPval": None,
-    "mardiaKurtStat": None,
-    "mardiaKurtPval": None,
-    "b2p": None,
     "outOfDomainWarnings": [],
 }
 
@@ -153,16 +151,24 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
     normalized = dict(ANALYSIS_AT_UPLOAD_KEYS)
     normalized["outOfDomainWarnings"] = []
     aliases = {
-        "p_value": "pValue",
-        "sample_size_Z": "sampleSizeZ",
+        "specificity_score": "specificityScore",
+        "mean_rarity": "meanRarity",
+        "max_rarity": "maxRarity",
+        "unseen_bin_rate": "unseenBinRate",
+        "rare_bin_rate": "rareBinRate",
+        "out_of_domain_rate": "outOfDomainRate",
+        "observation_support_S": "observationSupportS",
+        "observation_support_s": "observationSupportS",
         "coverage_C": "coverageC",
+        "coverage_c": "coverageC",
         "equitability_E": "equitabilityE",
-        "w_eff": "wEff",
-        "mardia_skew_stat": "mardiaSkewStat",
-        "mardia_skew_pval": "mardiaSkewPval",
-        "mardia_kurt_stat": "mardiaKurtStat",
-        "mardia_kurt_pval": "mardiaKurtPval",
-        "is_normal": "isNormal",
+        "equitability_e": "equitabilityE",
+        "peer_observation_count": "peerObservationCount",
+        "valid_target_rows": "validTargetRows",
+        "invalid_target_rows": "invalidTargetRows",
+        "out_of_domain_rows": "outOfDomainRows",
+        "total_bins": "totalBins",
+        "occupied_bins": "occupiedBins",
     }
     for key, value in source.items():
         normalized[aliases.get(key, key)] = value
@@ -190,6 +196,7 @@ def cluster_fingerprint_payload(record: dict[str, Any]) -> dict[str, Any]:
         "rowCount": int(record.get("rowCount", 1) or 1),
         "summaryMethod": str(record.get("summaryMethod") or "mean"),
         "binOccupancyHash": str(record.get("binOccupancyHash") or bin_occupancy_hash(record.get("binOccupancy"))),
+        "gridSignature": str(record.get("gridSignature") or ""),
     }
 
 
@@ -288,6 +295,26 @@ def axis_signature(axis_names: list[str]) -> tuple[str, ...]:
 
 def axis_subset_key(axis_names: list[str]) -> str:
     return "|".join(axis_signature(axis_names))
+
+
+def canonical_grid_axes(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    canonical: list[dict[str, Any]] = []
+    for axis in axes:
+        canonical.append(
+            {
+                "name": normalize_axis_name(axis.get("name")),
+                "domainMin": float(axis.get("domainMin")),
+                "domainMax": float(axis.get("domainMax")),
+                "resolution": float(axis.get("resolution")),
+            }
+        )
+    return canonical
+
+
+def grid_signature_from_axes(axes: list[dict[str, Any]]) -> str:
+    payload = {"axes": canonical_grid_axes(axes)}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def peer_group_key(goal_id: str, axis_names: list[str]) -> str:
@@ -404,12 +431,14 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
         cluster_vector_row_count = int(item.get("clusterVectorRowCount") or item.get("validMultidimensionalNumericRowCount") or row_count or 0)
         axis_numeric_counts = normalize_int_count_map(item.get("axisNumericCounts"))
         occupancy_hash = str(item.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy))
+        grid_signature = str(item.get("gridSignature") or "").strip()
         normalized = {
             "id": str(item.get("id") or f"cluster_{os.urandom(8).hex()}"),
             "goalId": goal_id,
             "goalName": str(item.get("goalName", "")),
             "axisNames": axis_names,
             "axisSignature": signature,
+            "gridSignature": grid_signature,
             "peerGroupKey": peer_group_key(goal_id, axis_names),
             "values": values,
             "valuesMean": normalize_optional_float_list(item.get("valuesMean", values), len(values), None),
@@ -431,22 +460,20 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "analysisAtUpload": analysis,
             "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
             "engineAtUpload": analysis.get("engine"),
-            "heterogeneityAtUpload": analysis.get("heterogeneity"),
+            "specificityScoreAtUpload": analysis.get("specificityScore"),
+            "meanRarityAtUpload": analysis.get("meanRarity"),
+            "maxRarityAtUpload": analysis.get("maxRarity"),
+            "unseenBinRateAtUpload": analysis.get("unseenBinRate"),
+            "rareBinRateAtUpload": analysis.get("rareBinRate"),
+            "outOfDomainRateAtUpload": analysis.get("outOfDomainRate"),
             "confidenceAtUpload": analysis.get("confidence"),
-            "D2AtUpload": analysis.get("D2"),
-            "pValueAtUpload": analysis.get("pValue"),
-            "sampleSizeZAtUpload": analysis.get("sampleSizeZ"),
+            "observationSupportSAtUpload": analysis.get("observationSupportS"),
+            "peerObservationCountAtUpload": analysis.get("peerObservationCount"),
+            "validTargetRowsAtUpload": analysis.get("validTargetRows"),
             "coverageCAtUpload": analysis.get("coverageC"),
             "equitabilityEAtUpload": analysis.get("equitabilityE"),
-            "wEffAtUpload": analysis.get("wEff"),
-            "contributionsAtUpload": analysis.get("contributions"),
             "totalBinsAtUpload": analysis.get("totalBins"),
             "occupiedBinsAtUpload": analysis.get("occupiedBins"),
-            "mardiaSkewStatAtUpload": analysis.get("mardiaSkewStat"),
-            "mardiaSkewPvalAtUpload": analysis.get("mardiaSkewPval"),
-            "mardiaKurtStatAtUpload": analysis.get("mardiaKurtStat"),
-            "mardiaKurtPvalAtUpload": analysis.get("mardiaKurtPval"),
-            "b2pAtUpload": analysis.get("b2p"),
         }
         normalized["fingerprint"] = cluster_fingerprint(normalized)
         return normalized
@@ -476,8 +503,8 @@ def save_cluster_store(clusters: list[dict[str, Any]]) -> None:
     normalized = [cluster for cluster in (_normalize_cluster(item) for item in clusters) if cluster]
     payload = {
         "version": 1,
-        "privacy": "Stores only mapped numeric axis vectors, row counts, row-level bin count summaries, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
-        "clusterDefinition": "One CSV file is one data cluster. CSV rows are repeated observations summarized into one cluster vector; coverage uses row-level bin occupancy summaries.",
+        "privacy": "Stores only mapped numeric axis summaries, row counts, row-level bin count summaries, grid signatures, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
+        "clusterDefinition": "One CSV file is one data cluster. CSV rows are repeated observations summarized into row-level bin occupancy; density scoring uses eligible peer bin occupancy summaries.",
         "clusters": normalized,
     }
     if _db_enabled():
@@ -716,6 +743,7 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "peerGroupKey": str(cluster.get("peerGroupKey", "")),
         "axisNames": list(cluster.get("axisNames") or []),
         "axisSignature": str(cluster.get("axisSignature", "")),
+        "gridSignature": str(cluster.get("gridSignature", "")),
         "values": [round(float(value), 6) for value in cluster.get("values", [])],
         "valuesMean": [None if value is None else round(float(value), 6) for value in cluster.get("valuesMean", [])],
         "valuesVariance": [None if value is None else round(float(value), 6) for value in cluster.get("valuesVariance", [])],
@@ -739,14 +767,18 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "analysisAtUpload": normalize_analysis_snapshot(cluster.get("analysisAtUpload")),
         "peerGroupSizeAtUpload": cluster.get("peerGroupSizeAtUpload"),
         "engineAtUpload": cluster.get("engineAtUpload"),
-        "heterogeneityAtUpload": cluster.get("heterogeneityAtUpload"),
+        "specificityScoreAtUpload": cluster.get("specificityScoreAtUpload"),
+        "meanRarityAtUpload": cluster.get("meanRarityAtUpload"),
+        "maxRarityAtUpload": cluster.get("maxRarityAtUpload"),
+        "unseenBinRateAtUpload": cluster.get("unseenBinRateAtUpload"),
+        "rareBinRateAtUpload": cluster.get("rareBinRateAtUpload"),
+        "outOfDomainRateAtUpload": cluster.get("outOfDomainRateAtUpload"),
         "confidenceAtUpload": cluster.get("confidenceAtUpload"),
-        "D2AtUpload": cluster.get("D2AtUpload"),
-        "pValueAtUpload": cluster.get("pValueAtUpload"),
-        "sampleSizeZAtUpload": cluster.get("sampleSizeZAtUpload"),
+        "observationSupportSAtUpload": cluster.get("observationSupportSAtUpload"),
+        "peerObservationCountAtUpload": cluster.get("peerObservationCountAtUpload"),
+        "validTargetRowsAtUpload": cluster.get("validTargetRowsAtUpload"),
         "coverageCAtUpload": cluster.get("coverageCAtUpload"),
         "equitabilityEAtUpload": cluster.get("equitabilityEAtUpload"),
-        "wEffAtUpload": cluster.get("wEffAtUpload"),
         "totalBinsAtUpload": cluster.get("totalBinsAtUpload"),
         "occupiedBinsAtUpload": cluster.get("occupiedBinsAtUpload"),
     }

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import csv
@@ -17,8 +17,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from models import K_M, DiagnosisResult, ExperimentConfig
-from stats_engine import BinGridTracker, DataQualityAnalyzer
+from models import K_M, DensityDiagnosisResult, ExperimentConfig
+from stats_engine import BinGridTracker, DensityGridAnalyzer
 from storage import (
     CLUSTER_STORE_PATH,
     GOAL_STORE_PATH,
@@ -29,6 +29,7 @@ from storage import (
     delete_peer_cluster,
     explain_peer_filter,
     get_peer_group,
+    grid_signature_from_axes,
     init_database,
     list_cluster_summaries,
     load_cluster_store,
@@ -277,45 +278,22 @@ def build_report_visualizations(
     goal: dict[str, Any],
     peer_group: np.ndarray,
     target_vector: np.ndarray,
-    result: DiagnosisResult,
+    result: DensityDiagnosisResult,
     coverage_info: dict[str, Any] | None = None,
+    target_bin_counts: dict[str, int] | None = None,
+    target_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     axes = goal["axes"]
-    sample_size_items = []
     coverage_axes = []
     equitability_axes = []
-    goal_k_m = float(goal.get("K_m", K_M))
     axis_bin_counts = coverage_info.get("axisBinCounts", {}) if isinstance(coverage_info, dict) else {}
     axis_bin_counts_by_key = {normalize_axis_name(axis_name): counts for axis_name, counts in axis_bin_counts.items()}
 
     for index, axis in enumerate(axes):
-        axis_values = peer_group[:, index] if peer_group.ndim == 2 and peer_group.shape[1] > index else np.asarray([], dtype=float)
         total_axis_bins = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
         row_level_counts = axis_bin_counts_by_key.get(normalize_axis_name(axis["name"]), {})
-        if row_level_counts:
-            distribution = build_axis_distribution_from_counts(row_level_counts, total_axis_bins)
-            distribution_basis = "row_level_bin_occupancy"
-            peer_values = []
-        else:
-            distribution = build_axis_distribution(
-                axis_values,
-                float(axis["domainMin"]),
-                float(axis["domainMax"]),
-                float(axis["resolution"]),
-            )
-            distribution["observationCount"] = int(np.count_nonzero(~np.isnan(axis_values)))
-            distribution_basis = "cluster_vector_fallback"
-            peer_values = [round(float(value), 6) for value in axis_values]
-        non_empty_count = int(np.count_nonzero(~np.isnan(axis_values)))
-        sample_size_items.append(
-            {
-                "axis": axis["name"],
-                "label": axis_display_label(axis),
-                "unit": axis.get("unit", ""),
-                "count": non_empty_count,
-                "z": round(float(non_empty_count / (non_empty_count + goal_k_m)), 6),
-            }
-        )
+        distribution = build_axis_distribution_from_counts(row_level_counts, total_axis_bins)
+        distribution_basis = "row_level_bin_occupancy"
         coverage_axes.append(
             {
                 "axis": axis["name"],
@@ -325,9 +303,9 @@ def build_report_visualizations(
                 "domainMax": float(axis["domainMax"]),
                 "resolution": float(axis["resolution"]),
                 "targetValue": round(float(target_vector[index]), 6),
-                "peerValues": peer_values,
+                "peerValues": [],
                 "basis": distribution_basis,
-                "fallbackReason": "" if distribution_basis == "row_level_bin_occupancy" else "axisBinOccupancy unavailable; displaying saved cluster representative vectors.",
+                "fallbackReason": "",
                 **distribution,
             }
         )
@@ -345,8 +323,13 @@ def build_report_visualizations(
 
     basis_values = {axis["basis"] for axis in coverage_axes}
     visualization_basis = basis_values.pop() if len(basis_values) == 1 else "mixed"
+    normalized_target_bins = {str(key): int(value) for key, value in (target_bin_counts or {}).items()}
+    target_meta = target_meta or {}
     return {
-        "sampleSize": {"peerGroupCount": int(len(peer_group)), "z": round(float(result.sample_size_Z), 6), "items": sample_size_items},
+        "observationSupport": {
+            "peerObservationCount": int(result.peer_observation_count),
+            "score": round(float(result.observation_support_S), 6),
+        },
         "coverage": {"score": round(float(result.coverage_C), 6), "basis": visualization_basis, "axes": coverage_axes},
         "equitability": {
             "score": round(float(result.equitability_E), 6),
@@ -356,74 +339,69 @@ def build_report_visualizations(
         },
         "peerRows": [[round(float(value), 6) for value in row] for row in peer_group.tolist()],
         "targetVector": [round(float(value), 6) for value in target_vector.tolist()],
+        "targetBinOccupancy": normalized_target_bins,
+        "targetBinOccupancyMeta": {
+            "validMultidimensionalRowCount": int(target_meta.get("validMultidimensionalRowCount") or result.valid_target_rows),
+            "invalidRowCount": int(target_meta.get("invalidRowCount") or result.invalid_target_rows),
+            "outOfDomainRowCount": int(target_meta.get("outOfDomainRowCount") or result.out_of_domain_rows),
+            "totalRows": int(target_meta.get("totalRows") or result.target_total_rows),
+        },
         "axisNames": [axis["name"] for axis in axes],
     }
 
 
-def confidence_reasons(result: DiagnosisResult, warnings: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     reasons = [
         {
-            "label": "Sample Size",
-            "score": round(float(result.sample_size_Z), 4),
-            "impact": "down" if result.sample_size_Z < 0.6 else "stable",
-            "message": "K_m은 Sample Size confidence가 0.5에 도달하는 Peer Group 수를 의미하는 half-saturation constant입니다.",
+            "label": "Observation Support",
+            "score": round(float(result.observation_support_S), 4),
+            "impact": "down" if result.observation_support_S < 0.6 else "stable",
+            "message": "Observation Support uses peer row-level observations: S = peer rows / (peer rows + K_density). K_density currently reuses the goal K_m value.",
         },
         {
             "label": "Coverage",
             "score": round(float(result.coverage_C), 4),
             "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage는 저장된 peer cluster들의 row-level bin occupancy가 Domain grid를 얼마나 점유했는지 나타냅니다.",
+            "message": "Coverage measures how much of the configured density grid is occupied by eligible peer row-level observations.",
         },
         {
             "label": "Equitability",
             "score": round(float(result.equitability_E), 4),
             "impact": "down" if result.equitability_E < 0.5 else "stable",
-            "message": "Equitability는 점유된 row-level bins 안에서 observation count가 얼마나 균등한지 반영합니다.",
+            "message": "Equitability measures whether peer observations are balanced across occupied density bins.",
         },
     ]
-    if result.w_eff < 0.7:
-        reasons.append(
-            {
-                "label": "Engine Robustness",
-                "score": round(float(result.w_eff), 4),
-                "impact": "down",
-                "message": "Mardia 첨도 기반 효율 가중치가 낮아 최종 confidence가 보수적으로 조정되었습니다.",
-            }
-        )
     if warnings:
         reasons.append(
             {
-                "label": "Out-of-domain clipping",
+                "label": "Out-of-domain rows",
                 "score": 0.0,
                 "impact": "down",
-                "message": f"{len(warnings)} value(s) are outside configured domain ranges. Bin clipping is still applied, but this report should be interpreted with caution.",
+                "message": f"{len(warnings)} target row-level warning(s) were reported. Out-of-domain rows are excluded from target density occupancy and reflected in out_of_domain_rate.",
             }
         )
     return reasons
 
 
-def build_summary(result: DiagnosisResult) -> list[str]:
+def build_summary(result: DensityDiagnosisResult) -> list[str]:
     messages: list[str] = []
-    if result.heterogeneity > 0.95 and result.confidence > 0.7:
-        messages.append("이질성과 confidence가 모두 높습니다. 새로운 물리적 발견 가능성을 우선 검토할 수 있습니다.")
-    elif result.heterogeneity > 0.95 and result.confidence <= 0.4:
-        messages.append("타겟 군집은 Peer Group에서 벗어나지만 confidence가 낮습니다. 설계/coverage/sample 부족 가능성을 함께 봐야 합니다.")
-    elif result.heterogeneity <= 0.5:
-        messages.append("타겟 군집은 현재 Peer Group과 통계적으로 크게 다르지 않습니다.")
+    if result.specificity_score > 0.75 and result.confidence > 0.7:
+        messages.append("Specificity Score and confidence are both high. The target rows occupy rare regions of the peer density grid.")
+    elif result.specificity_score > 0.75 and result.confidence <= 0.4:
+        messages.append("Specificity Score is high, but confidence is low. Interpret the outlier signal cautiously until peer density support improves.")
+    elif result.specificity_score <= 0.5:
+        messages.append("The target row-level occupancy is broadly consistent with the current peer density map.")
     else:
-        messages.append("이질성이 일부 확인됩니다. 추가 군집 확보와 분포 검증을 권장합니다.")
+        messages.append("The target shows moderate specificity. Additional peer observations can make the density baseline sharper.")
 
-    if result.sample_size_Z < 0.5:
-        messages.append("Sample Size가 부족합니다. 같은 Experiment Goal과 Axis 구성의 누적 군집을 더 확보하세요.")
+    if result.observation_support_S < 0.5:
+        messages.append("Observation Support is low. Add saved clusters with row-level bin occupancy for the same grid signature.")
     if result.coverage_C < 0.3:
-        messages.append(
-            "Coverage가 낮습니다. 저장된 peer cluster의 row-level bin occupancy가 아직 domain grid를 충분히 점유하지 못했습니다. "
-            "Domain Range가 너무 넓거나 Resolution이 현재 데이터 규모에 비해 너무 세밀할 수 있습니다."
-        )
+        messages.append("Coverage is low. The peer density map occupies only a small portion of the configured domain-resolution grid.")
     if result.equitability_E < 0.5:
-        messages.append("Equitability가 낮습니다. 점유된 row-level bin 안의 observation count가 일부 bin에 치우쳐 있습니다.")
-    if result.w_eff < 0.7:
-        messages.append("Engine Robustness가 낮아 최종 confidence가 보수적으로 반영되었습니다.")
+        messages.append("Equitability is low. Peer observations are concentrated in a small number of occupied bins.")
+    if result.unseen_bin_rate > 0:
+        messages.append(f"{result.unseen_bin_rate:.1%} of valid target rows fall in bins unseen in the peer density map.")
     return messages
 
 
@@ -446,6 +424,7 @@ def make_cluster_record(
         "goalName": goal["name"],
         "axisNames": axis_names,
         "axisSignature": axis_subset_key(axis_names),
+        "gridSignature": grid_signature_from_axes(selected_goal["axes"]),
         "peerGroupKey": key,
         "values": values,
         "valuesMean": dataset_meta.get("values_mean", values),
@@ -476,22 +455,20 @@ def make_cluster_record(
         "analysisAtUpload": analysis,
         "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
         "engineAtUpload": analysis.get("engine"),
-        "heterogeneityAtUpload": analysis.get("heterogeneity"),
+        "specificityScoreAtUpload": analysis.get("specificityScore"),
+        "meanRarityAtUpload": analysis.get("meanRarity"),
+        "maxRarityAtUpload": analysis.get("maxRarity"),
+        "unseenBinRateAtUpload": analysis.get("unseenBinRate"),
+        "rareBinRateAtUpload": analysis.get("rareBinRate"),
+        "outOfDomainRateAtUpload": analysis.get("outOfDomainRate"),
         "confidenceAtUpload": analysis.get("confidence"),
-        "D2AtUpload": analysis.get("D2"),
-        "pValueAtUpload": analysis.get("pValue"),
-        "sampleSizeZAtUpload": analysis.get("sampleSizeZ"),
+        "observationSupportSAtUpload": analysis.get("observationSupportS"),
+        "peerObservationCountAtUpload": analysis.get("peerObservationCount"),
+        "validTargetRowsAtUpload": analysis.get("validTargetRows"),
         "coverageCAtUpload": analysis.get("coverageC"),
         "equitabilityEAtUpload": analysis.get("equitabilityE"),
-        "wEffAtUpload": analysis.get("wEff"),
-        "contributionsAtUpload": analysis.get("contributions"),
         "totalBinsAtUpload": analysis.get("totalBins"),
         "occupiedBinsAtUpload": analysis.get("occupiedBins"),
-        "mardiaSkewStatAtUpload": analysis.get("mardiaSkewStat"),
-        "mardiaSkewPvalAtUpload": analysis.get("mardiaSkewPval"),
-        "mardiaKurtStatAtUpload": analysis.get("mardiaKurtStat"),
-        "mardiaKurtPvalAtUpload": analysis.get("mardiaKurtPval"),
-        "b2pAtUpload": analysis.get("b2p"),
     }
     record["fingerprint"] = cluster_fingerprint(record)
     return record
@@ -554,24 +531,35 @@ def count_map_total(source: dict[str, Any]) -> int:
     return total
 
 
-def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_axis_names: list[str]) -> dict[str, Any]:
+def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: dict[str, Any] | list[str]) -> dict[str, Any]:
+    if isinstance(selected_goal, dict):
+        selected_axis_names = [str(axis["name"]) for axis in selected_goal["axes"]]
+        current_grid_signature = grid_signature_from_axes(selected_goal["axes"])
+    else:
+        selected_axis_names = [str(name) for name in selected_goal]
+        current_grid_signature = ""
     selected_signature = axis_subset_key(selected_axis_names)
     bin_counts: dict[str, int] = {}
     axis_bin_counts: dict[str, dict[str, int]] = {}
     eligible_count = 0
     legacy_excluded = 0
-    axis_signature_excluded = 0
+    grid_signature_excluded = 0
     row_level_observation_count = 0
 
     for cluster in peer_clusters:
-        stored_signature = str(cluster.get("storedAxisSignature") or cluster.get("axisSignature") or "")
-        if stored_signature != selected_signature:
-            axis_signature_excluded += 1
-            continue
         cluster_bin_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
-        if not cluster_bin_counts:
+        cluster_grid_signature = str(cluster.get("gridSignature") or "").strip()
+        if not cluster_bin_counts or not cluster_grid_signature:
             legacy_excluded += 1
             continue
+        if current_grid_signature and cluster_grid_signature != current_grid_signature:
+            grid_signature_excluded += 1
+            continue
+        if not current_grid_signature:
+            stored_signature = str(cluster.get("storedAxisSignature") or cluster.get("axisSignature") or "")
+            if stored_signature != selected_signature:
+                grid_signature_excluded += 1
+                continue
         eligible_count += 1
         merge_count_maps(bin_counts, cluster_bin_counts)
         meta = cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {}
@@ -589,59 +577,37 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_axis_n
         "coverageBasis": "row_level_bin_occupancy",
         "coverageEligibleClusterCount": eligible_count,
         "coverageLegacyExcludedClusterCount": legacy_excluded,
-        "coverageAxisSignatureExcludedClusterCount": axis_signature_excluded,
+        "coverageGridSignatureExcludedClusterCount": grid_signature_excluded,
+        "coverageAxisSignatureExcludedClusterCount": grid_signature_excluded,
         "rowLevelObservationCount": row_level_observation_count,
         "occupiedBins": len(bin_counts),
+        "gridSignature": current_grid_signature,
     }
 
 
 def out_of_domain_warnings(
     selected_goal: dict[str, Any],
-    target_vector: np.ndarray,
-    peer_group: np.ndarray | None = None,
-    peer_rows: list[dict[str, Any]] | None = None,
+    target_meta: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
-    axes = selected_goal["axes"]
-    for axis_index, axis in enumerate(axes):
-        lo = float(axis["domainMin"])
-        hi = float(axis["domainMax"])
-        axis_name = str(axis["name"])
-        target_value = float(target_vector[axis_index])
-        if target_value < lo or target_value > hi:
-            warnings.append(
-                {
-                    "axis": axis_name,
-                    "value": target_value,
-                    "domainMin": lo,
-                    "domainMax": hi,
-                    "role": "target",
-                }
-            )
-        if peer_group is None:
-            continue
-        for row_index, peer in enumerate(peer_group, start=1):
-            value = float(peer[axis_index])
-            if lo <= value <= hi:
-                continue
-            source = peer_rows[row_index - 1] if peer_rows and row_index - 1 < len(peer_rows) else {}
-            warnings.append(
-                {
-                    "axis": axis_name,
-                    "value": value,
-                    "domainMin": lo,
-                    "domainMax": hi,
-                    "role": "peer",
-                    "peerIndex": row_index,
-                    "clusterId": source.get("id"),
-                    "source": source.get("source", "stored"),
-                }
-            )
+    meta = target_meta or {}
+    out_of_domain_count = int(meta.get("outOfDomainRowCount") or 0)
+    total_rows = int(meta.get("totalRows") or 0)
+    if out_of_domain_count > 0:
+        warnings.append(
+            {
+                "role": "target",
+                "outOfDomainRowCount": out_of_domain_count,
+                "totalRows": total_rows,
+                "axes": [axis["name"] for axis in selected_goal["axes"]],
+                "message": "Target rows outside the configured domain range were excluded from density occupancy.",
+            }
+        )
     return warnings
 
 
 def analysis_snapshot(
-    result: DiagnosisResult | None,
+    result: DensityDiagnosisResult | None,
     axis_names: list[str],
     peer_group_size: int,
     warnings: list[dict[str, Any]] | None = None,
@@ -664,24 +630,22 @@ def analysis_snapshot(
             "analysisTimestamp": utc_now_iso(),
             "peerGroupSize": int(peer_group_size),
             "engine": payload["engine"],
-            "isNormal": payload["is_normal"],
-            "center": payload["center"],
-            "D2": payload["D2"],
-            "pValue": payload["p_value"],
-            "heterogeneity": payload["heterogeneity"],
+            "specificityScore": payload["specificity_score"],
+            "meanRarity": payload["mean_rarity"],
+            "maxRarity": payload["max_rarity"],
+            "unseenBinRate": payload["unseen_bin_rate"],
+            "rareBinRate": payload["rare_bin_rate"],
+            "outOfDomainRate": payload["out_of_domain_rate"],
             "confidence": payload["confidence"],
-            "sampleSizeZ": payload["sample_size_Z"],
+            "observationSupportS": payload["observation_support_S"],
             "coverageC": payload["coverage_C"],
             "equitabilityE": payload["equitability_E"],
-            "wEff": payload["w_eff"],
+            "peerObservationCount": payload["peer_observation_count"],
+            "validTargetRows": payload["valid_target_rows"],
+            "invalidTargetRows": payload["invalid_target_rows"],
+            "outOfDomainRows": payload["out_of_domain_rows"],
             "totalBins": payload["total_bins"],
             "occupiedBins": payload["occupied_bins"],
-            "contributions": payload["contributions"],
-            "mardiaSkewStat": payload["mardia_skew_stat"],
-            "mardiaSkewPval": payload["mardia_skew_pval"],
-            "mardiaKurtStat": payload["mardia_kurt_stat"],
-            "mardiaKurtPval": payload["mardia_kurt_pval"],
-            "b2p": payload["b2p"],
             "outOfDomainWarnings": warnings or [],
         }
     )
@@ -694,60 +658,9 @@ def axis_ablation_sensitivity(
     selected_goal: dict[str, Any],
     target_vector: np.ndarray,
     peer_group: np.ndarray,
-    base_result: DiagnosisResult,
+    base_result: DensityDiagnosisResult,
 ) -> list[dict[str, Any]]:
-    axes = selected_goal["axes"]
-    sensitivity: list[dict[str, Any]] = []
-    if len(axes) <= 1:
-        return [
-            {
-                "removedAxis": axis["name"],
-                "status": "insufficient dimension/sample",
-            }
-            for axis in axes
-        ]
-
-    for removed_index, removed_axis in enumerate(axes):
-        kept_indices = [index for index in range(len(axes)) if index != removed_index]
-        kept_axes = [axes[index] for index in kept_indices]
-        if len(kept_axes) < 2 or len(peer_group) < len(kept_axes) + 1:
-            sensitivity.append(
-                {
-                    "removedAxis": removed_axis["name"],
-                    "status": "insufficient dimension/sample",
-                }
-            )
-            continue
-        subset_goal = {**selected_goal, "axes": kept_axes}
-        try:
-            analyzer = DataQualityAnalyzer(experiment_config_from_goal(subset_goal))
-            analyzer.add_peers(peer_group[:, kept_indices])
-            ablated = analyzer.diagnose(target_vector[kept_indices])
-            sensitivity.append(
-                {
-                    "removedAxis": removed_axis["name"],
-                    "status": "ok",
-                    "heterogeneity_without_axis": round(float(ablated.heterogeneity), 6),
-                    "confidence_without_axis": round(float(ablated.confidence), 6),
-                    "D2_without_axis": round(float(ablated.D2), 6),
-                    "delta_heterogeneity": round(float(ablated.heterogeneity - base_result.heterogeneity), 6),
-                    "delta_confidence": round(float(ablated.confidence - base_result.confidence), 6),
-                    "delta_D2": round(float(ablated.D2 - base_result.D2), 6),
-                    "interpretation": (
-                        f"{removed_axis['name']} strongly drives heterogeneity."
-                        if base_result.heterogeneity - ablated.heterogeneity >= 0.15
-                        else "No dominant axis-removal effect."
-                    ),
-                }
-            )
-        except ValueError:
-            sensitivity.append(
-                {
-                    "removedAxis": removed_axis["name"],
-                    "status": "insufficient dimension/sample",
-                }
-            )
-    return sensitivity
+    return []
 
 
 def duplicate_status(record: dict[str, Any]) -> dict[str, Any]:
@@ -784,10 +697,12 @@ def format_peer_filter_error(diagnostics: dict[str, Any]) -> str:
     )
 
 
-def run_vector_analysis(
+def run_density_analysis(
     goal: dict[str, Any],
     selected_goal: dict[str, Any],
-    target_vector: np.ndarray,
+    target_bin_counts: dict[str, int],
+    target_meta: dict[str, Any],
+    target_vector: np.ndarray | None = None,
     exclude_cluster_id: str | None = None,
 ) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in selected_goal["axes"]]
@@ -797,21 +712,21 @@ def run_vector_analysis(
     peer_group = peer_matrix(peer_rows)
     if peer_group.size == 0:
         peer_group = np.empty((0, len(axis_names)), dtype=float)
-    coverage_info = build_global_bin_counts(peer_clusters, axis_names)
-    warnings = out_of_domain_warnings(selected_goal, target_vector, peer_group, peer_rows)
-    analyzer = DataQualityAnalyzer(config)
-    analyzer.add_peers(peer_group)
-    analyzer.add_coverage_bin_counts(coverage_info["binCounts"])
-    result = analyzer.diagnose(target_vector)
+    coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
+    warnings = out_of_domain_warnings(selected_goal, target_meta)
+    analyzer = DensityGridAnalyzer(config)
+    analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+    result = analyzer.diagnose(target_bin_counts, target_meta)
     result_payload = result.to_payload(config.axis_names)
-    result_payload["axisAblationSensitivity"] = axis_ablation_sensitivity(selected_goal, target_vector, peer_group, result)
     result_payload["outOfDomainWarnings"] = warnings
     result_payload["outOfDomainWarningCount"] = len(warnings)
     result_payload["coverageBasis"] = coverage_info["coverageBasis"]
     result_payload["coverageEligibleClusterCount"] = coverage_info["coverageEligibleClusterCount"]
     result_payload["coverageLegacyExcludedClusterCount"] = coverage_info["coverageLegacyExcludedClusterCount"]
-    result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageAxisSignatureExcludedClusterCount"]
+    result_payload["coverageGridSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
+    result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
     result_payload["rowLevelObservationCount"] = coverage_info["rowLevelObservationCount"]
+    result_payload["gridSignature"] = coverage_info["gridSignature"]
     return {
         "config": config,
         "peerRows": peer_rows,
@@ -833,6 +748,7 @@ def run_vector_analysis(
             coverage_info={**coverage_info, "totalBins": result.total_bins, "occupiedBins": result.occupied_bins},
         ),
     }
+
 
 def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
@@ -863,19 +779,25 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
     saved_cluster_is_new = False
 
     try:
-        analysis = run_vector_analysis(goal, selected_goal, cluster_vector)
+        analysis = run_density_analysis(
+            goal,
+            selected_goal,
+            dataset_meta.get("bin_occupancy", {}),
+            dataset_meta.get("bin_occupancy_meta", {}),
+            cluster_vector,
+        )
     except ValueError as exc:
         peer_clusters = analysis_peer_clusters(goal, axis_names)
         peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
         peer_group = peer_matrix(peer_rows)
         if peer_group.size == 0:
             peer_group = np.empty((0, len(axis_names)), dtype=float)
-        coverage_info = build_global_bin_counts(peer_clusters, axis_names)
+        coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
         coverage_info["totalBins"] = BinGridTracker(
             [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
             [float(axis["resolution"]) for axis in selected_goal["axes"]],
         ).total_bins
-        warnings = out_of_domain_warnings(selected_goal, cluster_vector, peer_group, peer_rows)
+        warnings = out_of_domain_warnings(selected_goal, dataset_meta.get("bin_occupancy_meta", {}))
         pending_cluster = make_cluster_record(
             goal,
             selected_goal,
@@ -885,14 +807,14 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if should_save_data_clusters():
             saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
-        diagnostics = peer_filter_diagnostics(str(goal["id"]), axis_names)
-        stored_count = int(diagnostics["compatibleAxisCount"])
+        stored_count = int(coverage_info["coverageEligibleClusterCount"])
         saved_text = "saved" if saved_cluster_is_new else "already stored"
         raise ValueError(
-            "Only saved clusters with the same Experiment Goal and Axis configuration are used as the Peer Group. "
-            f"Stored Peer Group N={stored_count}, required minimum N={len(axis_names) + 1}. "
-            f"Peer filter diagnostics: {format_peer_filter_error(diagnostics)}. "
-            f"This CSV was sanitized into a numeric cluster vector and {saved_text}, but analysis is limited until enough prior clusters exist. "
+            "Density analysis uses only saved clusters with row-level bin occupancy and the same grid signature. "
+            f"Eligible density clusters={stored_count}, peer row-level observations={coverage_info['rowLevelObservationCount']}. "
+            f"Excluded legacy clusters={coverage_info['coverageLegacyExcludedClusterCount']}, "
+            f"grid-signature mismatches={coverage_info['coverageGridSignatureExcludedClusterCount']}. "
+            f"This CSV was sanitized into a row-level bin occupancy summary and {saved_text}, but analysis is limited until eligible peer density exists. "
             f"Reason: {exc}"
         ) from exc
 
@@ -911,7 +833,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
 
     summary = build_summary(result)
-    summary.append("Peer Group uses only saved clusters that match the selected Experiment Goal and Axis configuration.")
+    summary.append("Density scoring uses only saved clusters with row-level bin occupancy and the same grid signature.")
     if analysis["warnings"]:
         summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
     if saved_cluster:
@@ -938,7 +860,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "coverageBasis": analysis["coverageInfo"]["coverageBasis"],
             "coverageEligibleClusterCount": analysis["coverageInfo"]["coverageEligibleClusterCount"],
             "coverageLegacyExcludedClusterCount": analysis["coverageInfo"]["coverageLegacyExcludedClusterCount"],
-            "coverageAxisSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageAxisSignatureExcludedClusterCount"],
+            "coverageGridSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageGridSignatureExcludedClusterCount"],
+            "coverageAxisSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageGridSignatureExcludedClusterCount"],
             "rowLevelObservationCount": analysis["coverageInfo"]["rowLevelObservationCount"],
             "occupiedBins": analysis["coverageInfo"]["occupiedBins"],
             "totalBins": analysis["coverageInfo"]["totalBins"],
@@ -947,7 +870,15 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         "result": result_payload,
         "summary": summary,
         "confidenceReasons": confidence_reasons(result, analysis["warnings"]),
-        "visualizations": build_report_visualizations(selected_goal, peer_group, cluster_vector, result, analysis["coverageInfo"]),
+        "visualizations": build_report_visualizations(
+            selected_goal,
+            peer_group,
+            cluster_vector,
+            result,
+            analysis["coverageInfo"],
+            dataset_meta.get("bin_occupancy", {}),
+            dataset_meta.get("bin_occupancy_meta", {}),
+        ),
         "clusters": list_cluster_summaries(),
         "peerCounts": bootstrap_peer_counts(),
         "peerSubsetCounts": bootstrap_peer_subset_counts(),
@@ -1020,14 +951,20 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             try:
-                analysis = run_vector_analysis(goal, selected_goal, cluster_vector)
+                analysis = run_density_analysis(
+                    goal,
+                    selected_goal,
+                    dataset_meta.get("bin_occupancy", {}),
+                    dataset_meta.get("bin_occupancy_meta", {}),
+                    cluster_vector,
+                )
                 result_payload = analysis["resultPayload"]
                 snapshot = analysis["snapshot"]
                 item_payload.update(
                     {
                         "analysisSuccess": True,
                         "analysisSummary": {
-                            "heterogeneity": result_payload["heterogeneity"],
+                            "specificity_score": result_payload["specificity_score"],
                             "confidence": result_payload["confidence"],
                             "engine": result_payload["engine"],
                             "peer_group_size": len(analysis["peerGroup"]),
@@ -1045,16 +982,16 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                 peer_group = peer_matrix(peer_rows)
                 if peer_group.size == 0:
                     peer_group = np.empty((0, len(axis_names)), dtype=float)
-                coverage_info = build_global_bin_counts(peer_clusters, axis_names)
+                coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
                 coverage_info["totalBins"] = BinGridTracker(
                     [(float(axis["domainMin"]), float(axis["domainMax"])) for axis in selected_goal["axes"]],
                     [float(axis["resolution"]) for axis in selected_goal["axes"]],
                 ).total_bins
-                warnings = out_of_domain_warnings(selected_goal, cluster_vector, peer_group, peer_rows)
+                warnings = out_of_domain_warnings(selected_goal, dataset_meta.get("bin_occupancy_meta", {}))
                 snapshot = analysis_snapshot(None, axis_names, len(peer_group), warnings, str(exc), coverage_info=coverage_info)
                 item_payload["analysisError"] = str(exc)
                 item_payload["analysisSummary"] = {
-                    "heterogeneity": None,
+                    "specificity_score": None,
                     "confidence": None,
                     "engine": None,
                     "peer_group_size": len(peer_group),
@@ -1147,11 +1084,18 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
     target = np.asarray(cluster["values"], dtype=float)
     uploaded = normalize_analysis_snapshot(cluster.get("analysisAtUpload"))
     try:
-        analysis = run_vector_analysis(goal, selected_goal, target, exclude_cluster_id=str(cluster["id"]))
+        analysis = run_density_analysis(
+            goal,
+            selected_goal,
+            cluster.get("binOccupancy", {}),
+            cluster.get("binOccupancyMeta", {}),
+            target,
+            exclude_cluster_id=str(cluster["id"]),
+        )
         current = analysis["resultPayload"]
         current_peer_group_size = len(analysis["peerGroup"])
         confidence_delta = None if uploaded.get("confidence") is None else round(float(current["confidence"]) - float(uploaded["confidence"]), 6)
-        heterogeneity_delta = None if uploaded.get("heterogeneity") is None else round(float(current["heterogeneity"]) - float(uploaded["heterogeneity"]), 6)
+        specificity_delta = None if uploaded.get("specificityScore") is None else round(float(current["specificity_score"]) - float(uploaded["specificityScore"]), 6)
         interpretation = reevaluation_interpretation(uploaded, current)
         return {
             "clusterId": cluster["id"],
@@ -1160,7 +1104,7 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
             "current": current,
             "currentPeerGroupSize": current_peer_group_size,
             "confidenceDelta": confidence_delta,
-            "heterogeneityDelta": heterogeneity_delta,
+            "specificityDelta": specificity_delta,
             "interpretation": interpretation,
         }
     except ValueError as exc:
@@ -1171,30 +1115,38 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
             "current": None,
             "currentPeerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in selected_goal["axes"]], str(cluster["id"]))),
             "error": str(exc),
-            "interpretation": ["Current reevaluation is limited because the peer group is still too small after excluding this cluster."],
+            "interpretation": ["Current reevaluation is limited because no eligible peer density remains after excluding this cluster."],
         }
 
 
 def reevaluation_interpretation(uploaded: dict[str, Any], current: dict[str, Any]) -> list[str]:
     messages: list[str] = []
-    uploaded_h = uploaded.get("heterogeneity")
+    uploaded_h = uploaded.get("specificityScore")
     uploaded_c = uploaded.get("confidence")
-    current_h = current.get("heterogeneity")
+    current_h = current.get("specificity_score")
     if uploaded_h is not None and current_h is not None:
         if float(uploaded_h) >= 0.75 and float(current_h) <= 0.55:
-            messages.append("처음에는 이질적으로 보였으나 현재 기준에서는 정상 범위에 가까워짐.")
+            messages.append("The cluster looked highly specific at upload time, but is closer to the current density baseline now.")
         elif float(current_h) >= 0.75:
-            messages.append("현재 누적 기준에서도 계속 이질적임.")
+            messages.append("The cluster remains highly specific against the current density baseline.")
         else:
-            messages.append("현재 누적 기준에서는 뚜렷한 이질성이 제한적임.")
+            messages.append("The cluster is only mildly specific against the current density baseline.")
     if uploaded_c is not None and float(uploaded_c) < 0.4:
-        messages.append("업로드 당시 신뢰도가 낮아 초기 판단은 제한적이었음.")
-    return messages or ["업로드 당시 결과와 현재 재평가 결과를 비교할 수 있음."]
+        messages.append("Upload-time confidence was low, so the earlier judgment was support-limited.")
+    return messages or ["Upload-time and current density results are broadly similar."]
 
 
-def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], target: np.ndarray, exclude_cluster_id: str | None) -> dict[str, Any]:
+def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], cluster: dict[str, Any], exclude_cluster_id: str | None) -> dict[str, Any]:
     try:
-        analysis = run_vector_analysis(goal, selected_goal, target, exclude_cluster_id=exclude_cluster_id)
+        target = np.asarray(cluster.get("values", []), dtype=float)
+        analysis = run_density_analysis(
+            goal,
+            selected_goal,
+            cluster.get("binOccupancy", {}),
+            cluster.get("binOccupancyMeta", {}),
+            target,
+            exclude_cluster_id=exclude_cluster_id,
+        )
         return {"ok": True, "result": analysis["resultPayload"], "peerGroupSize": len(analysis["peerGroup"])}
     except ValueError as exc:
         return {
@@ -1209,8 +1161,8 @@ def delete_impact_request(payload: dict[str, Any]) -> dict[str, Any]:
     goal = find_goal(str(cluster["goalId"]))
     selected_goal = goal_subset(goal, [str(name) for name in cluster["axisNames"]])
     target = np.asarray(cluster["values"], dtype=float)
-    all_payload = impact_result_payload(goal, selected_goal, target, None)
-    without_payload = impact_result_payload(goal, selected_goal, target, str(cluster["id"]))
+    all_payload = impact_result_payload(goal, selected_goal, cluster, None)
+    without_payload = impact_result_payload(goal, selected_goal, cluster, str(cluster["id"]))
     deltas: dict[str, Any] = {}
     if all_payload["ok"] and without_payload["ok"]:
         all_result = all_payload["result"]
@@ -1220,15 +1172,13 @@ def delete_impact_request(payload: dict[str, Any]) -> dict[str, Any]:
             "deltaConfidence": round(float(without_result["confidence"] - all_result["confidence"]), 6),
             "deltaCoverage": round(float(without_result["coverage_C"] - all_result["coverage_C"]), 6),
             "deltaEquitability": round(float(without_result["equitability_E"] - all_result["equitability_E"]), 6),
-            "deltaHeterogeneity": round(float(without_result["heterogeneity"] - all_result["heterogeneity"]), 6),
-            "deltaD2": round(float(without_result["D2"] - all_result["D2"]), 6),
-            "deltaCenterNorm": round(float(np.linalg.norm(np.asarray(all_result["center"]) - np.asarray(without_result["center"]))), 6),
+            "deltaSpecificity": round(float(without_result["specificity_score"] - all_result["specificity_score"]), 6),
+            "deltaMeanRarity": round(float(without_result["mean_rarity"] - all_result["mean_rarity"]), 6),
         }
-    config = experiment_config_from_goal(selected_goal)
-    tracker = BinGridTracker(config.domain_range, config.resolution)
-    for row in analysis_peer_rows(goal, [axis["name"] for axis in selected_goal["axes"]]):
-        tracker.add(np.asarray(row["values"], dtype=float))
-    bin_uniqueness = tracker.count_for(target) == 1
+    without_peer_clusters = analysis_peer_clusters(goal, [axis["name"] for axis in selected_goal["axes"]], str(cluster["id"]))
+    without_density = build_global_bin_counts(without_peer_clusters, selected_goal)
+    target_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
+    bin_uniqueness = bool(target_counts) and all(int(without_density["binCounts"].get(str(key), 0)) == 0 for key in target_counts)
     return {
         "cluster": {
             "id": cluster["id"],
@@ -1274,25 +1224,23 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "target_vector",
             "peer_group_size",
             "engine",
-            "is_normal",
-            "D2",
-            "p_value",
-            "heterogeneity",
+            "specificity_score",
+            "mean_rarity",
+            "max_rarity",
+            "unseen_bin_rate",
+            "rare_bin_rate",
+            "out_of_domain_rate",
             "confidence",
-            "sample_size_Z",
+            "observation_support_S",
             "coverage_C",
             "equitability_E",
-            "w_eff",
+            "peer_observation_count",
+            "valid_target_rows",
+            "invalid_target_rows",
+            "out_of_domain_rows",
             "total_bins",
             "occupied_bins",
-            "mardia_skew_stat",
-            "mardia_skew_pval",
-            "mardia_kurt_stat",
-            "mardia_kurt_pval",
-            "b2p",
             "analysis_timestamp",
-            "contributions",
-            "axis_ablation_sensitivity",
             "out_of_domain_warnings",
             "confidence_reasons",
             "summary_messages",
@@ -1307,25 +1255,23 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "target_vector": json.dumps(report.get("visualizations", {}).get("targetVector", []), ensure_ascii=False),
                 "peer_group_size": meta.get("peer_group_size"),
                 "engine": result.get("engine"),
-                "is_normal": result.get("is_normal"),
-                "D2": result.get("D2"),
-                "p_value": result.get("p_value"),
-                "heterogeneity": result.get("heterogeneity"),
+                "specificity_score": result.get("specificity_score"),
+                "mean_rarity": result.get("mean_rarity"),
+                "max_rarity": result.get("max_rarity"),
+                "unseen_bin_rate": result.get("unseen_bin_rate"),
+                "rare_bin_rate": result.get("rare_bin_rate"),
+                "out_of_domain_rate": result.get("out_of_domain_rate"),
                 "confidence": result.get("confidence"),
-                "sample_size_Z": result.get("sample_size_Z"),
+                "observation_support_S": result.get("observation_support_S"),
                 "coverage_C": result.get("coverage_C"),
                 "equitability_E": result.get("equitability_E"),
-                "w_eff": result.get("w_eff"),
+                "peer_observation_count": result.get("peer_observation_count"),
+                "valid_target_rows": result.get("valid_target_rows"),
+                "invalid_target_rows": result.get("invalid_target_rows"),
+                "out_of_domain_rows": result.get("out_of_domain_rows"),
                 "total_bins": result.get("total_bins"),
                 "occupied_bins": result.get("occupied_bins"),
-                "mardia_skew_stat": result.get("mardia_skew_stat"),
-                "mardia_skew_pval": result.get("mardia_skew_pval"),
-                "mardia_kurt_stat": result.get("mardia_kurt_stat"),
-                "mardia_kurt_pval": result.get("mardia_kurt_pval"),
-                "b2p": result.get("b2p"),
                 "analysis_timestamp": meta.get("analysis_timestamp"),
-                "contributions": json.dumps(result.get("contributions", []), ensure_ascii=False),
-                "axis_ablation_sensitivity": json.dumps(result.get("axisAblationSensitivity", []), ensure_ascii=False),
                 "out_of_domain_warnings": json.dumps(result.get("outOfDomainWarnings", []), ensure_ascii=False),
                 "confidence_reasons": json.dumps(report.get("confidenceReasons", []), ensure_ascii=False),
                 "summary_messages": json.dumps(report.get("summary", []), ensure_ascii=False),
@@ -1364,7 +1310,7 @@ def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
 def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in goal["axes"]]
     stored_clusters = load_peer_clusters(str(goal["id"]), axis_names)
-    coverage_info = build_global_bin_counts(stored_clusters, axis_names)
+    coverage_info = build_global_bin_counts(stored_clusters, goal)
     axis_previews = []
     total_bins = 1
     for axis_index, axis in enumerate(goal["axes"]):
@@ -1385,8 +1331,8 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
     if coverage_info["coverageLegacyExcludedClusterCount"]:
         warnings.append("일부 기존 군집은 row-level bin 정보가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.")
-    if coverage_info["coverageAxisSignatureExcludedClusterCount"]:
-        warnings.append("Axis 구성이 다른 군집은 row-level coverage 계산에서 제외되고 heterogeneity peer로만 사용할 수 있습니다.")
+    if coverage_info["coverageGridSignatureExcludedClusterCount"]:
+        warnings.append("Grid signature가 다른 군집은 density 계산에서 제외됩니다.")
     return {
         "basis": coverage_info["coverageBasis"],
         "axisBins": axis_previews,
@@ -1395,7 +1341,8 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         "estimatedCoverage": occupied_bins / total_bins if total_bins else 0.0,
         "coverageEligibleClusterCount": coverage_info["coverageEligibleClusterCount"],
         "coverageLegacyExcludedClusterCount": coverage_info["coverageLegacyExcludedClusterCount"],
-        "coverageAxisSignatureExcludedClusterCount": coverage_info["coverageAxisSignatureExcludedClusterCount"],
+        "coverageGridSignatureExcludedClusterCount": coverage_info["coverageGridSignatureExcludedClusterCount"],
+        "coverageAxisSignatureExcludedClusterCount": coverage_info["coverageGridSignatureExcludedClusterCount"],
         "rowLevelObservationCount": coverage_info["rowLevelObservationCount"],
         "warning": " ".join(warnings),
         "warnings": warnings,
@@ -1429,7 +1376,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 하나의 데이터 군집으로 취급됩니다. CSV 내부 row들은 해당 군집의 반복 관측값이며, 시스템은 row들을 axis별 대표값으로 집계하여 하나의 cluster vector를 만듭니다.",
             "coverage": "Coverage와 Equitability는 cluster 대표값이 아니라 저장된 row-level bin occupancy summary 기준으로 계산됩니다.",
-            "K_m": "K_m은 Sample Size confidence가 0.5에 도달하는 Peer Group 수를 의미하는 half-saturation constant입니다. Z=N/(N+K_m), N=K_m일 때 Z=0.5입니다.",
+            "K_m": "K_m is currently reused as K_density for Observation Support: S = peer row-level observations / (peer row-level observations + K_density).",
         },
     }
 
@@ -1583,3 +1530,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
