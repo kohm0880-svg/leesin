@@ -78,6 +78,15 @@
     .mini-bin-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(12px,1fr)); gap:3px; align-items:end; min-height:34px; margin-top:8px; }
     .mini-bin { min-height:4px; border-radius:3px 3px 0 0; background:#b6c7d6; }
     .mini-bin.active { background:var(--teal); }
+    .projection-explorer { display:grid; gap:12px; }
+    .projection-toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; justify-content:space-between; }
+    .projection-toolbar label { min-width:220px; }
+    .projection-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .projection-card { display:grid; gap:8px; border:1px solid var(--line); border-radius:8px; background:#fff; padding:12px; }
+    .projection-card h4 { margin:0; font-size:14px; }
+    .projection-canvas { width:100%; aspect-ratio:1.2 / 1; min-height:210px; border:1px solid var(--line); border-radius:8px; background:#fff; cursor:crosshair; }
+    .projection-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .projection-empty { display:grid; min-height:160px; place-items:center; border:1px dashed var(--line); border-radius:8px; color:var(--muted); background:#fbfdfe; padding:12px; text-align:center; }
     .spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; display:inline-block; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
     .loading { opacity:.72; pointer-events:none; }
     @keyframes spin { to { transform:rotate(360deg); } }
@@ -157,7 +166,7 @@
         <div class="panel-head">
           <div>
             <h2>저장된 군집</h2>
-            <p class="small">저장된 실제 cluster record만 Peer Group 후보로 사용됩니다.</p>
+            <p class="small">저장된 record 중 grid signature와 row-level bin occupancy가 맞는 항목만 density baseline 후보로 사용됩니다.</p>
           </div>
           <div class="cluster-toolbar">
             <label>Experiment Goal 필터<select id="cluster-goal-filter"></select></label>
@@ -259,6 +268,10 @@
       clusterSort: 'latest',
       clusterSearch: '',
       clusterResults: {},
+      projectionMode: 'combined',
+      projectionSelection: null,
+      projectionSubsetTuples: [],
+      projectionExplorer: null,
       activeView: 'analysis-view',
     };
 
@@ -270,7 +283,7 @@
     const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()] });
     const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
     const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
-    const coverageBasisLabel = value => value === 'row_level_bin_occupancy' ? 'row-level bin occupancy' : (value === 'cluster_vector_fallback' ? 'cluster vector fallback' : String(value || '-'));
+    const coverageBasisLabel = value => value === 'row_level_bin_occupancy' ? 'row-level bin occupancy' : (value === 'cluster_vector_fallback' ? 'legacy fallback' : String(value || '-'));
     const axisLabel = axis => axis.unit ? `${axis.name} (${axis.unit})` : axis.name;
     const normalizeKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣_]/g,'');
     const selectedAxes = goal => goal ? goal.axes.filter(axis => state.selectedAxes[axis.name]) : [];
@@ -472,7 +485,7 @@
             <span>${item.duplicate ? 'duplicate' : 'unique'}</span>
             <span>${item.saveable ? 'saveable' : 'blocked'}</span>
           </div>
-          <div class="small">analysis: ${item.analysisSuccess ? `ok · specificity ${formatPercent(item.analysisSummary?.specificity_score,1)} · confidence ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · peer clusters ${escapeHtml(item.analysisSummary?.peer_group_size)} · vector rows ${escapeHtml(item.clusterVectorRowCount ?? '-')} · row-level valid ${escapeHtml(item.rowLevelValidCount ?? 0)} · density clusters ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · peer clusters ${escapeHtml(item.analysisSummary?.peer_group_size ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
+          <div class="small">analysis: ${item.analysisSuccess ? `ok · specificity ${formatPercent(item.analysisSummary?.specificity_score,1)} · confidence ${formatPercent(item.analysisSummary?.confidence,0)} · ${escapeHtml(item.analysisSummary?.engine || '')} · density records ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? 0)} · summary rows ${escapeHtml(item.clusterVectorRowCount ?? '-')} · row-level valid ${escapeHtml(item.rowLevelValidCount ?? 0)} · row obs ${escapeHtml(item.analysisSummary?.row_level_observation_count ?? 0)}` : `failed · density records ${escapeHtml(item.analysisSummary?.coverage_eligible_cluster_count ?? '-')} · ${escapeHtml(item.analysisError || item.error || '')}`}</div>
         </div>`).join('');
     }
 
@@ -504,9 +517,270 @@
         </div>`).join('')}</div>`;
     }
 
+    const projectionKey = (xAxis, yAxis) => `${xAxis}|${yAxis}`;
+    function projectionMatrixMax(matrix) {
+      let maxValue = 0;
+      (matrix || []).forEach(row => (row || []).forEach(value => {
+        const count = Number(value) || 0;
+        if (count > maxValue) maxValue = count;
+      }));
+      return maxValue;
+    }
+    function emptyProjectionMatrix(xBins, yBins) {
+      return Array.from({ length:Math.max(0, yBins) }, () => Array.from({ length:Math.max(0, xBins) }, () => 0));
+    }
+    function projectionBinLabel(explorer, axisName, binIndex) {
+      const meta = explorer?.axisMeta?.[axisName] || {};
+      const lo = Number(meta.domainMin) + Number(binIndex) * Number(meta.resolution);
+      const hi = Math.min(Number(meta.domainMax), lo + Number(meta.resolution));
+      return `${axisName} bin ${binIndex} [${formatNumber(lo,4)}, ${formatNumber(hi,4)})`;
+    }
+    function filterProjectionTuples(explorer, xAxis, yAxis, xBin, yBin) {
+      const axisOrder = explorer?.axisOrder || [];
+      const xIndex = axisOrder.indexOf(xAxis);
+      const yIndex = axisOrder.indexOf(yAxis);
+      if (xIndex < 0 || yIndex < 0) return [];
+      return (explorer?.targetRowBinTuples || []).filter(tuple => Number(tuple?.[xIndex]) === Number(xBin) && Number(tuple?.[yIndex]) === Number(yBin));
+    }
+    function buildSubsetProjectionMatrix(explorer, xAxis, yAxis) {
+      const axisOrder = explorer?.axisOrder || [];
+      const axisMeta = explorer?.axisMeta || {};
+      const xIndex = axisOrder.indexOf(xAxis);
+      const yIndex = axisOrder.indexOf(yAxis);
+      const xBins = Number(axisMeta?.[xAxis]?.totalBins || 0);
+      const yBins = Number(axisMeta?.[yAxis]?.totalBins || 0);
+      const matrix = emptyProjectionMatrix(xBins, yBins);
+      if (xIndex < 0 || yIndex < 0) return matrix;
+      (state.projectionSubsetTuples || []).forEach(tuple => {
+        const xBin = Number(tuple?.[xIndex]);
+        const yBin = Number(tuple?.[yIndex]);
+        if (Number.isInteger(xBin) && Number.isInteger(yBin) && xBin >= 0 && xBin < xBins && yBin >= 0 && yBin < yBins) {
+          matrix[yBin][xBin] += 1;
+        }
+      });
+      return matrix;
+    }
+    function projectionSelectionText(explorer) {
+      const selection = state.projectionSelection;
+      if (!selection) return 'No selected target subset.';
+      return [
+        `Projection ${selection.xAxis} × ${selection.yAxis}`,
+        projectionBinLabel(explorer, selection.xAxis, selection.xBin),
+        projectionBinLabel(explorer, selection.yAxis, selection.yBin),
+        `selected target rows: ${selection.selectedRowCount ?? 0}`,
+      ].join(' · ');
+    }
+    function renderProjectionExplorer(explorer) {
+      if (!explorer || !(explorer.axisPairs || []).length) {
+        return `<div><h3>Projection Explorer</h3><div class="projection-empty">2개 이상의 axis가 있을 때 linked projection heatmap을 표시합니다.</div></div>`;
+      }
+      const modes = [
+        ['combined', 'combined'],
+        ['peer only', 'peer only'],
+        ['target only', 'target only'],
+        ['selected subset only', 'selected subset only'],
+      ];
+      return `<div class="projection-explorer" id="projection-explorer">
+        <div class="projection-toolbar">
+          <div>
+            <h3>Projection Explorer</h3>
+            <div class="small">Click a target bin in one 2D projection to highlight that target subset across all axis-pair projections.</div>
+          </div>
+          <label>Mode<select id="projection-mode">${modes.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('')}</select></label>
+          <button class="ghost" id="projection-clear" type="button">선택 해제</button>
+        </div>
+        <div class="notice" id="projection-selection-info">${escapeHtml(projectionSelectionText(explorer))}</div>
+        ${explorer.targetRowTupleSampled ? `<div class="tag warn">Target row bin tuples are sampled for linked highlighting: ${escapeHtml(explorer.targetRowTupleLimit)} of ${escapeHtml(explorer.targetRowTupleCount)} rows.</div>` : ''}
+        <div class="projection-grid">
+          ${(explorer.axisPairs || []).map(pair => {
+            const [xAxis, yAxis] = pair;
+            const key = projectionKey(xAxis, yAxis);
+            const peer = explorer.peerProjections?.[key] || {};
+            const target = explorer.targetProjections?.[key] || {};
+            return `<div class="projection-card">
+              <h4>${escapeHtml(xAxis)} × ${escapeHtml(yAxis)}</h4>
+              <canvas class="projection-canvas" data-pair-key="${escapeHtml(key)}" data-x-axis="${escapeHtml(xAxis)}" data-y-axis="${escapeHtml(yAxis)}" aria-label="${escapeHtml(`${xAxis} by ${yAxis} density projection`)}"></canvas>
+              <div class="projection-meta">
+                <span class="metric-pill">peer max ${escapeHtml(peer.maxCount ?? 0)}</span>
+                <span class="metric-pill">target max ${escapeHtml(target.maxCount ?? 0)}</span>
+                <span class="metric-pill">${escapeHtml(peer.xBins ?? 0)}×${escapeHtml(peer.yBins ?? 0)} bins</span>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }
+    function drawHeatCell(ctx, x, y, width, height, fillStyle) {
+      ctx.fillStyle = fillStyle;
+      ctx.fillRect(x, y, Math.max(1, width), Math.max(1, height));
+    }
+    function drawProjectionCanvas(canvas, explorer, xAxis, yAxis) {
+      const key = projectionKey(xAxis, yAxis);
+      const peer = explorer.peerProjections?.[key] || {};
+      const target = explorer.targetProjections?.[key] || {};
+      const mode = state.projectionMode || 'combined';
+      const xBins = Number(peer.xBins || target.xBins || explorer.axisMeta?.[xAxis]?.totalBins || 0);
+      const yBins = Number(peer.yBins || target.yBins || explorer.axisMeta?.[yAxis]?.totalBins || 0);
+      const width = Math.max(240, Math.floor(canvas.clientWidth || 260));
+      const height = Math.max(190, Math.floor(canvas.clientHeight || 220));
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.dataset.xBins = String(xBins);
+      canvas.dataset.yBins = String(yBins);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, width, height);
+      if (!xBins || !yBins) return;
+      const cellW = width / xBins;
+      const cellH = height / yBins;
+      const peerMax = Math.max(1, Number(peer.maxCount || projectionMatrixMax(peer.counts)));
+      const targetMax = Math.max(1, Number(target.maxCount || projectionMatrixMax(target.counts)));
+      const selectedMatrix = buildSubsetProjectionMatrix(explorer, xAxis, yAxis);
+      const selectedMax = Math.max(1, projectionMatrixMax(selectedMatrix));
+      const drawBlankSubsetMessage = mode === 'selected subset only' && !state.projectionSelection;
+
+      if (mode === 'combined' || mode === 'peer only') {
+        (peer.counts || []).forEach((row, yBin) => (row || []).forEach((value, xBin) => {
+          const count = Number(value) || 0;
+          if (!count) return;
+          const intensity = Math.log1p(count) / Math.log1p(peerMax);
+          const alpha = 0.12 + intensity * 0.78;
+          drawHeatCell(ctx, xBin * cellW, (yBins - 1 - yBin) * cellH, cellW, cellH, `rgba(20,117,103,${alpha})`);
+        }));
+      }
+      if (mode === 'target only') {
+        (target.counts || []).forEach((row, yBin) => (row || []).forEach((value, xBin) => {
+          const count = Number(value) || 0;
+          if (!count) return;
+          const intensity = Math.log1p(count) / Math.log1p(targetMax);
+          drawHeatCell(ctx, xBin * cellW, (yBins - 1 - yBin) * cellH, cellW, cellH, `rgba(180,123,33,${0.16 + intensity * 0.72})`);
+        }));
+      }
+      if (mode === 'combined') {
+        (target.counts || []).forEach((row, yBin) => (row || []).forEach((value, xBin) => {
+          if (!Number(value)) return;
+          const x = xBin * cellW;
+          const y = (yBins - 1 - yBin) * cellH;
+          ctx.fillStyle = 'rgba(245,135,31,.24)';
+          ctx.fillRect(x, y, Math.max(1, cellW), Math.max(1, cellH));
+          ctx.strokeStyle = 'rgba(196,96,16,.82)';
+          ctx.lineWidth = Math.max(1, Math.min(2, cellW / 2, cellH / 2));
+          ctx.strokeRect(x + .5, y + .5, Math.max(1, cellW - 1), Math.max(1, cellH - 1));
+        }));
+      }
+      if ((mode === 'combined' || mode === 'target only' || mode === 'selected subset only') && state.projectionSelection) {
+        selectedMatrix.forEach((row, yBin) => (row || []).forEach((value, xBin) => {
+          const count = Number(value) || 0;
+          if (!count) return;
+          const intensity = Math.log1p(count) / Math.log1p(selectedMax);
+          const x = xBin * cellW;
+          const y = (yBins - 1 - yBin) * cellH;
+          ctx.fillStyle = `rgba(119,58,170,${0.28 + intensity * 0.55})`;
+          ctx.fillRect(x, y, Math.max(1, cellW), Math.max(1, cellH));
+          ctx.strokeStyle = 'rgba(88,33,142,.95)';
+          ctx.lineWidth = Math.max(1, Math.min(2.5, cellW / 2, cellH / 2));
+          ctx.strokeRect(x + .5, y + .5, Math.max(1, cellW - 1), Math.max(1, cellH - 1));
+        }));
+      }
+      if (drawBlankSubsetMessage) {
+        ctx.fillStyle = '#667789';
+        ctx.font = '13px Segoe UI, Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No selected target subset', width / 2, height / 2);
+      }
+      const selection = state.projectionSelection;
+      if (selection) {
+        const binsByAxis = selection.binsByAxis || {};
+        ctx.save();
+        ctx.strokeStyle = 'rgba(23,33,43,.86)';
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 4]);
+        if (Object.prototype.hasOwnProperty.call(binsByAxis, xAxis)) {
+          const x = (Number(binsByAxis[xAxis]) + 0.5) * cellW;
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+        }
+        if (Object.prototype.hasOwnProperty.call(binsByAxis, yAxis)) {
+          const y = (yBins - Number(binsByAxis[yAxis]) - 0.5) * cellH;
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        }
+        ctx.restore();
+        if (selection.pairKey === key) {
+          const x = Number(selection.xBin) * cellW;
+          const y = (yBins - 1 - Number(selection.yBin)) * cellH;
+          ctx.strokeStyle = '#17212b';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x + 1.5, y + 1.5, Math.max(2, cellW - 3), Math.max(2, cellH - 3));
+        }
+      }
+    }
+    function redrawProjectionExplorer() {
+      const explorer = state.projectionExplorer;
+      const root = $('projection-explorer');
+      if (!explorer || !root) return;
+      const info = $('projection-selection-info');
+      if (info) info.textContent = projectionSelectionText(explorer);
+      const clearButton = $('projection-clear');
+      if (clearButton) clearButton.disabled = !state.projectionSelection;
+      root.querySelectorAll('canvas[data-pair-key]').forEach(canvas => {
+        drawProjectionCanvas(canvas, explorer, canvas.dataset.xAxis, canvas.dataset.yAxis);
+      });
+    }
+    function hydrateProjectionExplorer(explorer) {
+      state.projectionExplorer = explorer || null;
+      const root = $('projection-explorer');
+      if (!explorer || !root) return;
+      const modeSelect = $('projection-mode');
+      if (modeSelect) {
+        modeSelect.value = state.projectionMode || 'combined';
+        modeSelect.addEventListener('change', event => {
+          state.projectionMode = event.target.value || 'combined';
+          redrawProjectionExplorer();
+        });
+      }
+      const clearButton = $('projection-clear');
+      if (clearButton) {
+        clearButton.addEventListener('click', () => {
+          state.projectionSelection = null;
+          state.projectionSubsetTuples = [];
+          redrawProjectionExplorer();
+        });
+      }
+      root.querySelectorAll('canvas[data-pair-key]').forEach(canvas => {
+        canvas.addEventListener('click', event => {
+          const rect = canvas.getBoundingClientRect();
+          const xBins = Number(canvas.dataset.xBins || 0);
+          const yBins = Number(canvas.dataset.yBins || 0);
+          if (!xBins || !yBins) return;
+          const xBin = Math.max(0, Math.min(xBins - 1, Math.floor(((event.clientX - rect.left) / Math.max(1, rect.width)) * xBins)));
+          const yBin = Math.max(0, Math.min(yBins - 1, yBins - 1 - Math.floor(((event.clientY - rect.top) / Math.max(1, rect.height)) * yBins)));
+          const xAxis = canvas.dataset.xAxis;
+          const yAxis = canvas.dataset.yAxis;
+          const subset = filterProjectionTuples(explorer, xAxis, yAxis, xBin, yBin);
+          state.projectionSubsetTuples = subset;
+          state.projectionSelection = {
+            pairKey: projectionKey(xAxis, yAxis),
+            xAxis,
+            yAxis,
+            xBin,
+            yBin,
+            selectedRowCount: subset.length,
+            binsByAxis: { [xAxis]:xBin, [yAxis]:yBin },
+          };
+          redrawProjectionExplorer();
+        });
+      });
+      requestAnimationFrame(redrawProjectionExplorer);
+    }
+
     function renderReport(report=state.report, activate=false) {
       if (!report) {
         state.report = null;
+        state.projectionSelection = null;
+        state.projectionSubsetTuples = [];
+        state.projectionExplorer = null;
         $('report-content').className = 'empty';
         $('report-content').textContent = '분석을 실행하면 리포트가 여기에 표시됩니다.';
         updateButtons();
@@ -554,10 +828,14 @@
             ${legacyExcluded ? '<div class="tag warn">Legacy clusters without row-level bin occupancy/grid signature are excluded from density scoring.</div>' : ''}
           </div>
           <div class="small">Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
+          ${renderProjectionExplorer(report.visualizations?.projectionExplorer)}
           ${renderCoverageAxisDistributions(report.visualizations)}
           <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
           <div><h3>Confidence Reasons</h3>${(report.confidenceReasons || []).map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div>
         </div>`;
+      state.projectionSelection = null;
+      state.projectionSubsetTuples = [];
+      hydrateProjectionExplorer(report.visualizations?.projectionExplorer);
       updateButtons();
       if (activate) showView('report-view');
     }
@@ -683,7 +961,7 @@
         return `<div class="cluster-result">
           <strong>영향 분석 결과</strong>
           <div class="inline-metrics">
-            <span class="tag">Peer N ${escapeHtml((d.peerGroupN || [result.data?.currentAll?.peerGroupSize, result.data?.withoutCluster?.peerGroupSize]).join(' → '))}</span>
+            <span class="tag">density records ${escapeHtml((d.peerGroupN || [result.data?.currentAll?.peerGroupSize, result.data?.withoutCluster?.peerGroupSize]).join(' → '))}</span>
             <span class="tag">Confidence ${formatNumber(d.deltaConfidence,4)}</span>
             <span class="tag">Coverage ${formatNumber(d.deltaCoverage,4)}</span>
             <span class="tag">Equitability ${formatNumber(d.deltaEquitability,4)}</span>
@@ -699,7 +977,7 @@
         return `<div class="cluster-result">
           <strong>재평가 결과</strong>
           <div class="inline-metrics">
-            <span class="tag">Peer N ${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</span>
+            <span class="tag">density records ${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</span>
             <span class="tag">S ${formatPercent(uploaded.specificityScore,1)} → ${formatPercent(current.specificity_score,1)}</span>
             <span class="tag">C ${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</span>
             <span class="tag">ΔC ${formatNumber(item.confidenceDelta,4)}</span>
@@ -719,7 +997,7 @@
           <div class="axis-value"><span class="small">${escapeHtml(axisName)}</span><strong>${formatNumber(values[index],4)}</strong></div>
         `).join('');
         const uploadMetrics = [
-          cluster.peerGroupSizeAtUpload == null ? '' : `<span class="metric-pill">Upload Peer N ${escapeHtml(cluster.peerGroupSizeAtUpload)}</span>`,
+          cluster.peerGroupSizeAtUpload == null ? '' : `<span class="metric-pill">Upload density records ${escapeHtml(cluster.peerGroupSizeAtUpload)}</span>`,
           cluster.specificityScoreAtUpload == null ? '' : `<span class="metric-pill">Specificity ${formatPercent(cluster.specificityScoreAtUpload,1)}</span>`,
           cluster.confidenceAtUpload == null ? '' : `<span class="metric-pill">C ${formatPercent(cluster.confidenceAtUpload,0)}</span>`,
           cluster.coverageCAtUpload == null ? '' : `<span class="metric-pill">Coverage ${formatPercent(cluster.coverageCAtUpload,1)}</span>`,
@@ -737,7 +1015,7 @@
           <div class="axis-values">${axisValues || '<div class="empty">Axis 대표값이 없습니다.</div>'}</div>
           <div class="inline-metrics">
             <span class="metric-pill">rows ${escapeHtml(cluster.rowCount ?? '-')}</span>
-            <span class="metric-pill">vector rows ${escapeHtml(cluster.clusterVectorRowCount ?? '-')}</span>
+            <span class="metric-pill">summary rows ${escapeHtml(cluster.clusterVectorRowCount ?? '-')}</span>
             <span class="metric-pill">valid row obs ${escapeHtml(cluster.rowLevelValidCount ?? 0)}</span>
             <span class="metric-pill">occupied bins ${escapeHtml(cluster.rowLevelOccupiedBinCount ?? 0)}</span>
           </div>
@@ -954,7 +1232,7 @@
       $('audit-content').innerHTML = `
         <div class="pill">uploadedAt: ${escapeHtml(item.uploadedAt || '-')}</div>
         <div class="metrics">
-          <div class="metric"><span class="small">Peer N</span><strong>${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</strong></div>
+          <div class="metric"><span class="small">Density records</span><strong>${escapeHtml(uploaded.peerGroupSize ?? '-')} → ${escapeHtml(item.currentPeerGroupSize ?? '-')}</strong></div>
           <div class="metric"><span class="small">Specificity</span><strong>${formatPercent(uploaded.specificityScore,1)} → ${formatPercent(current.specificity_score,1)}</strong></div>
           <div class="metric"><span class="small">Confidence</span><strong>${formatPercent(uploaded.confidence,0)} → ${formatPercent(current.confidence,0)}</strong></div>
           <div class="metric"><span class="small">Mean rarity</span><strong>${formatNumber(uploaded.meanRarity,3)} → ${formatNumber(current.mean_rarity,3)}</strong></div>

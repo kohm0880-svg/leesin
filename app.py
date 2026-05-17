@@ -50,6 +50,7 @@ from storage import (
 
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
+PROJECTION_ROW_TUPLE_LIMIT = 50000
 
 
 def canonical_axis_order(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -97,6 +98,7 @@ def compute_row_level_bin_occupancy(
     axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
     bin_occupancy: dict[str, int] = {}
     axis_bin_occupancy: dict[str, dict[str, int]] = {str(axis["name"]): {} for axis in axes}
+    row_bin_tuples: list[list[int]] = []
     valid_multidimensional = 0
     invalid_rows = 0
     out_of_domain_rows = 0
@@ -134,11 +136,13 @@ def compute_row_level_bin_occupancy(
         if len(multidimensional_indices) == len(axes):
             key = json.dumps(multidimensional_indices, separators=(",", ":"))
             bin_occupancy[key] = bin_occupancy.get(key, 0) + 1
+            row_bin_tuples.append(list(multidimensional_indices))
             valid_multidimensional += 1
 
     return {
         "bin_occupancy": bin_occupancy,
         "axis_bin_occupancy": axis_bin_occupancy,
+        "row_bin_tuples": row_bin_tuples,
         "bin_occupancy_meta": {
             "version": 1,
             "basis": "row_level",
@@ -224,6 +228,7 @@ def build_dataset_summary(
         "axis_numeric_counts": {str(axis["name"]): int(axis_numeric_counts[index]) for index, axis in enumerate(axes)},
         "bin_occupancy": occupancy["bin_occupancy"],
         "axis_bin_occupancy": occupancy["axis_bin_occupancy"],
+        "row_bin_tuples": occupancy["row_bin_tuples"],
         "bin_occupancy_meta": occupancy["bin_occupancy_meta"],
         "cluster_definition": "Stored record keeps a mean vector for compatibility; primary analysis uses row-level density-grid occupancy.",
     }
@@ -276,6 +281,191 @@ def axis_display_label(axis: dict[str, Any]) -> str:
     return f"{axis['name']} ({axis.get('unit')})" if axis.get("unit") else str(axis["name"])
 
 
+def axis_total_bins(axis: dict[str, Any]) -> int:
+    domain_min = float(axis["domainMin"])
+    domain_max = float(axis["domainMax"])
+    resolution = float(axis["resolution"])
+    return max(1, int(np.ceil((domain_max - domain_min) / resolution)))
+
+
+def projection_pair_key(x_axis: str, y_axis: str) -> str:
+    return f"{x_axis}|{y_axis}"
+
+
+def projection_axis_meta(axes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(axis["name"]): {
+            "domainMin": float(axis["domainMin"]),
+            "domainMax": float(axis["domainMax"]),
+            "resolution": float(axis["resolution"]),
+            "totalBins": axis_total_bins(axis),
+            "unit": axis.get("unit", ""),
+            "label": axis_display_label(axis),
+        }
+        for axis in axes
+    }
+
+
+def empty_projection_matrix(x_bins: int, y_bins: int) -> list[list[int]]:
+    return [[0 for _ in range(max(0, x_bins))] for _ in range(max(0, y_bins))]
+
+
+def normalize_row_bin_tuples(row_bin_tuples: list[Any], expected_length: int) -> list[list[int]]:
+    normalized: list[list[int]] = []
+    for raw_tuple in row_bin_tuples or []:
+        if not isinstance(raw_tuple, (list, tuple)) or len(raw_tuple) != expected_length:
+            continue
+        try:
+            tuple_values = [int(value) for value in raw_tuple]
+        except (TypeError, ValueError):
+            continue
+        if any(value < 0 for value in tuple_values):
+            continue
+        normalized.append(tuple_values)
+    return normalized
+
+
+def build_pair_projection_from_bin_counts(
+    bin_counts: dict[str, Any],
+    axis_order: list[str],
+    axis_meta: dict[str, dict[str, Any]],
+    x_axis: str,
+    y_axis: str,
+) -> dict[str, Any]:
+    x_bins = int(axis_meta.get(x_axis, {}).get("totalBins") or 0)
+    y_bins = int(axis_meta.get(y_axis, {}).get("totalBins") or 0)
+    counts = empty_projection_matrix(x_bins, y_bins)
+    axis_positions = {axis_name: index for index, axis_name in enumerate(axis_order)}
+    if x_axis not in axis_positions or y_axis not in axis_positions:
+        return {"xAxis": x_axis, "yAxis": y_axis, "xBins": x_bins, "yBins": y_bins, "counts": counts, "maxCount": 0}
+    x_position = axis_positions[x_axis]
+    y_position = axis_positions[y_axis]
+
+    for raw_key, raw_count in (bin_counts or {}).items():
+        try:
+            tuple_values = json.loads(str(raw_key))
+            count = int(raw_count)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if count <= 0 or not isinstance(tuple_values, list) or len(tuple_values) != len(axis_order):
+            continue
+        try:
+            x_bin = int(tuple_values[x_position])
+            y_bin = int(tuple_values[y_position])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if 0 <= x_bin < x_bins and 0 <= y_bin < y_bins:
+            counts[y_bin][x_bin] += count
+
+    max_count = max((max(row) for row in counts), default=0)
+    return {"xAxis": x_axis, "yAxis": y_axis, "xBins": x_bins, "yBins": y_bins, "counts": counts, "maxCount": int(max_count)}
+
+
+def build_pair_projection_from_row_tuples(
+    row_bin_tuples: list[Any],
+    axis_order: list[str],
+    axis_meta: dict[str, dict[str, Any]],
+    x_axis: str,
+    y_axis: str,
+) -> dict[str, Any]:
+    x_bins = int(axis_meta.get(x_axis, {}).get("totalBins") or 0)
+    y_bins = int(axis_meta.get(y_axis, {}).get("totalBins") or 0)
+    counts = empty_projection_matrix(x_bins, y_bins)
+    axis_positions = {axis_name: index for index, axis_name in enumerate(axis_order)}
+    if x_axis not in axis_positions or y_axis not in axis_positions:
+        return {"xAxis": x_axis, "yAxis": y_axis, "xBins": x_bins, "yBins": y_bins, "counts": counts, "maxCount": 0}
+    x_position = axis_positions[x_axis]
+    y_position = axis_positions[y_axis]
+
+    for tuple_values in normalize_row_bin_tuples(row_bin_tuples, len(axis_order)):
+        x_bin = tuple_values[x_position]
+        y_bin = tuple_values[y_position]
+        if 0 <= x_bin < x_bins and 0 <= y_bin < y_bins:
+            counts[y_bin][x_bin] += 1
+
+    max_count = max((max(row) for row in counts), default=0)
+    return {"xAxis": x_axis, "yAxis": y_axis, "xBins": x_bins, "yBins": y_bins, "counts": counts, "maxCount": int(max_count)}
+
+
+def filter_row_tuples_for_axis_pair(
+    row_bin_tuples: list[Any],
+    axis_order: list[str],
+    x_axis: str,
+    y_axis: str,
+    x_bin: int,
+    y_bin: int,
+) -> list[list[int]]:
+    axis_positions = {axis_name: index for index, axis_name in enumerate(axis_order)}
+    if x_axis not in axis_positions or y_axis not in axis_positions:
+        return []
+    x_position = axis_positions[x_axis]
+    y_position = axis_positions[y_axis]
+    normalized = normalize_row_bin_tuples(row_bin_tuples, len(axis_order))
+    return [tuple_values for tuple_values in normalized if tuple_values[x_position] == x_bin and tuple_values[y_position] == y_bin]
+
+
+def crosshair_markers_for_selection(axis_pairs: list[list[str]], selection: dict[str, Any] | None) -> dict[str, dict[str, int]]:
+    if not selection:
+        return {}
+    bins_by_axis = selection.get("binsByAxis") if isinstance(selection.get("binsByAxis"), dict) else {}
+    markers: dict[str, dict[str, int]] = {}
+    for pair in axis_pairs:
+        if len(pair) != 2:
+            continue
+        x_axis, y_axis = str(pair[0]), str(pair[1])
+        marker: dict[str, int] = {}
+        if x_axis in bins_by_axis:
+            marker["xBin"] = int(bins_by_axis[x_axis])
+        if y_axis in bins_by_axis:
+            marker["yBin"] = int(bins_by_axis[y_axis])
+        if marker:
+            markers[projection_pair_key(x_axis, y_axis)] = marker
+    return markers
+
+
+def sample_row_bin_tuples_for_payload(row_bin_tuples: list[list[int]], limit: int = PROJECTION_ROW_TUPLE_LIMIT) -> tuple[list[list[int]], bool]:
+    if len(row_bin_tuples) <= limit:
+        return row_bin_tuples, False
+    if limit <= 0:
+        return [], True
+    step = len(row_bin_tuples) / limit
+    sampled = [row_bin_tuples[min(len(row_bin_tuples) - 1, int(index * step))] for index in range(limit)]
+    return sampled, True
+
+
+def build_projection_explorer(
+    goal: dict[str, Any],
+    coverage_info: dict[str, Any] | None,
+    target_row_bin_tuples: list[Any] | None,
+) -> dict[str, Any]:
+    axes = canonical_axis_order(goal["axes"])
+    axis_order = [str(axis["name"]) for axis in axes]
+    axis_meta = projection_axis_meta(axes)
+    axis_pairs = [[x_axis, y_axis] for x_axis, y_axis in itertools.combinations(axis_order, 2)]
+    target_tuples = normalize_row_bin_tuples(target_row_bin_tuples or [], len(axis_order))
+    payload_tuples, tuple_sampled = sample_row_bin_tuples_for_payload(target_tuples)
+    peer_bin_counts = coverage_info.get("binCounts", {}) if isinstance(coverage_info, dict) else {}
+
+    peer_projections: dict[str, Any] = {}
+    target_projections: dict[str, Any] = {}
+    for x_axis, y_axis in axis_pairs:
+        key = projection_pair_key(x_axis, y_axis)
+        peer_projections[key] = build_pair_projection_from_bin_counts(peer_bin_counts, axis_order, axis_meta, x_axis, y_axis)
+        target_projections[key] = build_pair_projection_from_row_tuples(target_tuples, axis_order, axis_meta, x_axis, y_axis)
+
+    return {
+        "axisOrder": axis_order,
+        "axisMeta": axis_meta,
+        "axisPairs": axis_pairs,
+        "peerProjections": peer_projections,
+        "targetProjections": target_projections,
+        "targetRowBinTuples": payload_tuples,
+        "targetRowTupleSampled": tuple_sampled,
+        "targetRowTupleLimit": PROJECTION_ROW_TUPLE_LIMIT,
+        "targetRowTupleCount": len(target_tuples),
+    }
+
+
 def build_report_visualizations(
     goal: dict[str, Any],
     peer_group: np.ndarray,
@@ -284,6 +474,7 @@ def build_report_visualizations(
     coverage_info: dict[str, Any] | None = None,
     target_bin_counts: dict[str, int] | None = None,
     target_meta: dict[str, Any] | None = None,
+    target_row_bin_tuples: list[Any] | None = None,
 ) -> dict[str, Any]:
     axes = canonical_axis_order(goal["axes"])
     coverage_axes = []
@@ -348,6 +539,7 @@ def build_report_visualizations(
             "outOfDomainRowCount": int(target_meta.get("outOfDomainRowCount") or result.out_of_domain_rows),
             "totalRows": int(target_meta.get("totalRows") or result.target_total_rows),
         },
+        "projectionExplorer": build_projection_explorer(goal, coverage_info or {}, target_row_bin_tuples or []),
         "axisNames": [axis["name"] for axis in axes],
     }
 
@@ -454,7 +646,7 @@ def make_cluster_record(
         "uploadedAt": now,
         "sourceBatchId": source_batch_id,
         "summaryMethod": dataset_meta.get("summary_method", "mean"),
-        "storagePolicy": "sanitized_numeric_axis_vector",
+        "storagePolicy": "sanitized_density_grid_summary",
         "analysisAtUpload": analysis,
         "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
         "engineAtUpload": analysis.get("engine"),
@@ -843,7 +1035,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
     if saved_cluster:
         status = "saved as a new cluster" if saved_cluster_is_new else "detected as an existing duplicate and not saved again"
-        summary.append(f"Raw uploaded rows, filename, and unmapped columns were not stored; only the axis vector was {status}.")
+        summary.append(f"Raw uploaded rows, filename, and unmapped columns were not stored; only the sanitized density summary was {status}.")
 
     return {
         "meta": {
@@ -883,6 +1075,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             analysis["coverageInfo"],
             dataset_meta.get("bin_occupancy", {}),
             dataset_meta.get("bin_occupancy_meta", {}),
+            dataset_meta.get("row_bin_tuples", []),
         ),
         "clusters": list_cluster_summaries(),
         "peerCounts": bootstrap_peer_counts(),
@@ -1394,11 +1587,11 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
             "goalStoreFile": storage_label(GOAL_STORE_PATH),
             "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
             "clusterCount": len(load_cluster_store()),
-            "savedItems": ["Experiment Goal 설정", "비식별 numeric cluster vector", "row-level bin count summary"],
+            "savedItems": ["Experiment Goal 설정", "비식별 mean vector 호환 필드", "row-level bin count summary"],
             "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
         },
         "domainDefinitions": {
-            "cluster": "CSV 파일 하나는 하나의 데이터 군집으로 취급됩니다. CSV 내부 row들은 해당 군집의 반복 관측값이며, 시스템은 row들을 axis별 대표값으로 집계하여 하나의 cluster vector를 만듭니다.",
+            "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 평균 vector는 표시와 저장 호환성을 위해 유지되지만, 메인 분석은 row-level density-grid occupancy를 사용합니다.",
             "coverage": "Coverage and Equitability are calculated from saved row-level bin occupancy summaries.",
             "K_m": "K_m is currently reused as K_density for Observation Support: S = peer row-level observations / (peer row-level observations + K_density).",
         },

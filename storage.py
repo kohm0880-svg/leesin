@@ -677,8 +677,7 @@ def get_peer_group(
     ]
     if not rows:
         raise ValueError(
-            "이 Experiment Goal과 Axis 구성이 정확히 같은 누적 군집만 Peer Group으로 사용됩니다. "
-            "새 Goal은 충분한 과거 군집이 쌓이기 전까지 분석 신뢰도가 낮거나 분석이 제한될 수 있습니다."
+            "No saved records match the selected Experiment Goal and Axis configuration."
         )
     return np.asarray(rows, dtype=float)
 

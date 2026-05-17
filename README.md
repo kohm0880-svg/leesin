@@ -10,7 +10,7 @@ The main engine is now a row-level density grid specificity detector. Leesin kee
 - CSV rows = row-level observations inside that record.
 - Raw rows, filenames, unmapped columns, and personal data are not stored.
 - Saved records keep sanitized axis summaries, `binOccupancy`, `axisBinOccupancy`, `binOccupancyMeta`, `binOccupancyHash`, and `gridSignature`.
-- The representative cluster vector is still stored for compatibility and display, but it is not the main analysis signal.
+- A mean vector is still stored for compatibility and display, but it is not the main analysis signal.
 
 ## Specificity Engine
 
@@ -61,6 +61,18 @@ The analysis payload reports:
 - `coverageGridSignatureExcludedClusterCount`
 - `rowLevelObservationCount`
 
+## Projection Explorer
+
+Leesin visualizes high-dimensional density grids through linked 2D axis-pair projections.
+
+- Peer density is collapsed from saved multidimensional `binOccupancy` into each 2D projection.
+- Target rows are represented only as bin-index tuples during the analysis response; raw row values are not stored or sent.
+- Clicking a bin in one projection selects the target row subset in that 2D bin and highlights where that subset appears in all other projections.
+- Crosshair markers show the selected axis/bin location on every projection that includes the selected axes.
+- Modes include combined, peer only, target only, and selected subset only.
+
+This helps users inspect high-dimensional specificity without directly visualizing a 4D or higher-dimensional object. Selection A/B persistence is intentionally not part of this workflow.
+
 ## Stored Cluster Notes
 
 New saved clusters include:
@@ -94,6 +106,8 @@ Analysis results include density fields such as:
 - `out_of_domain_rows`
 - `total_bins`
 - `occupied_bins`
+
+Report visualizations include `projectionExplorer`, which carries canonical `axisOrder`, `axisMeta`, all 2D `axisPairs`, peer/target projection matrices, and target row bin-index tuples for in-session linked highlighting.
 
 ## Local Run
 

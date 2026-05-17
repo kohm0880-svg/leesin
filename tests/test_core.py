@@ -177,6 +177,73 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertNotEqual(record_a["binOccupancy"], record_b["binOccupancy"])
         self.assertNotEqual(storage.cluster_fingerprint(record_a), storage.cluster_fingerprint(record_b))
 
+    def test_projection_explorer_generates_all_axis_pairs_for_four_axes(self) -> None:
+        selected_goal = goal(axes=[axis("d"), axis("b"), axis("a"), axis("c")])
+        explorer = app.build_projection_explorer(selected_goal, {"binCounts": {}}, [])
+        self.assertEqual(explorer["axisOrder"], ["a", "b", "c", "d"])
+        self.assertEqual(len(explorer["axisPairs"]), 6)
+        self.assertIn(["a", "b"], explorer["axisPairs"])
+        self.assertIn(["c", "d"], explorer["axisPairs"])
+
+    def test_peer_bin_occupancy_projects_to_2d_matrix(self) -> None:
+        axes = [axis("a", domain_max=5), axis("b", domain_max=5), axis("c", domain_max=5)]
+        axis_order = ["a", "b", "c"]
+        axis_meta = app.projection_axis_meta(axes)
+        projection = app.build_pair_projection_from_bin_counts(
+            {"[1,2,3]": 5, "[1,4,0]": 2, "[9,0,0]": 99, "bad": 4},
+            axis_order,
+            axis_meta,
+            "a",
+            "c",
+        )
+        self.assertEqual(projection["counts"][3][1], 5)
+        self.assertEqual(projection["counts"][0][1], 2)
+        self.assertEqual(projection["maxCount"], 5)
+
+    def test_target_row_tuples_project_to_2d_matrix(self) -> None:
+        axes = [axis("a", domain_max=5), axis("b", domain_max=5), axis("c", domain_max=5)]
+        axis_order = ["a", "b", "c"]
+        axis_meta = app.projection_axis_meta(axes)
+        projection = app.build_pair_projection_from_row_tuples(
+            [[1, 2, 3], [1, 2, 3], [0, 2, 1], [8, 0, 0]],
+            axis_order,
+            axis_meta,
+            "a",
+            "c",
+        )
+        self.assertEqual(projection["counts"][3][1], 2)
+        self.assertEqual(projection["counts"][1][0], 1)
+        self.assertEqual(projection["maxCount"], 2)
+
+    def test_projection_selection_filters_matching_target_tuples(self) -> None:
+        selected = app.filter_row_tuples_for_axis_pair(
+            [[1, 2, 3], [1, 4, 3], [1, 2, 0], [0, 2, 3]],
+            ["a", "b", "c"],
+            "a",
+            "c",
+            1,
+            3,
+        )
+        self.assertEqual(selected, [[1, 2, 3], [1, 4, 3]])
+
+    def test_crosshair_markers_only_target_pairs_with_selected_axes(self) -> None:
+        markers = app.crosshair_markers_for_selection(
+            [["a", "b"], ["a", "c"], ["b", "c"], ["c", "d"]],
+            {"binsByAxis": {"a": 1, "b": 2}},
+        )
+        self.assertEqual(markers["a|b"], {"xBin": 1, "yBin": 2})
+        self.assertEqual(markers["a|c"], {"xBin": 1})
+        self.assertEqual(markers["b|c"], {"xBin": 2})
+        self.assertNotIn("c|d", markers)
+
+    def test_target_row_bin_tuples_are_visualization_only_not_stored(self) -> None:
+        selected_goal = goal(axes=[axis("x"), axis("y")])
+        vector, meta = app.build_dataset_summary([{"x": "2", "y": "3"}], {"x": "x", "y": "y"}, selected_goal)
+        self.assertEqual(meta["row_bin_tuples"], [[2, 3]])
+        record = app.make_cluster_record(selected_goal, selected_goal, vector, meta)
+        self.assertNotIn("row_bin_tuples", record)
+        self.assertNotIn("rowBinTuples", record)
+
 
 if __name__ == "__main__":
     unittest.main()
