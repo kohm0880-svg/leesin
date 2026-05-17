@@ -122,6 +122,30 @@ def normalize_axis_bin_occupancy(values: Any, axis_names: list[str]) -> dict[str
     return normalized
 
 
+def normalize_row_level_vectors(values: Any, width: int) -> list[list[float]]:
+    if not isinstance(values, list) or width <= 0:
+        return []
+    normalized: list[list[float]] = []
+    for row in values:
+        if not isinstance(row, list) or len(row) != width:
+            continue
+        vector: list[float] = []
+        row_ok = True
+        for value in row:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                row_ok = False
+                break
+            if not np.isfinite(numeric):
+                row_ok = False
+                break
+            vector.append(numeric)
+        if row_ok:
+            normalized.append(vector)
+    return normalized
+
+
 def normalize_bin_occupancy_meta(meta: Any, row_count: int, bin_occupancy: dict[str, int]) -> dict[str, Any]:
     source = meta if isinstance(meta, dict) else {}
     valid_count = source.get("validMultidimensionalRowCount")
@@ -433,6 +457,10 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
         bin_occupancy_meta = normalize_bin_occupancy_meta(item.get("binOccupancyMeta"), row_count, bin_occupancy)
         cluster_vector_row_count = int(item.get("clusterVectorRowCount") or item.get("validMultidimensionalNumericRowCount") or row_count or 0)
         axis_numeric_counts = normalize_int_count_map(item.get("axisNumericCounts"))
+        row_level_vector_axis_order = [str(name).strip() for name in (item.get("rowLevelVectorAxisOrder") or axis_names)]
+        row_level_vectors = normalize_row_level_vectors(item.get("rowLevelVectors"), len(row_level_vector_axis_order))
+        row_level_vector_count = len(row_level_vectors)
+        has_row_level_vectors = bool(row_level_vectors)
         occupancy_hash = str(item.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy))
         grid_signature = str(item.get("gridSignature") or "").strip()
         normalized = {
@@ -455,11 +483,16 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "clusterVectorRowCount": cluster_vector_row_count,
             "clusterVectorBasis": str(item.get("clusterVectorBasis") or "valid_multidimensional_numeric_rows"),
             "axisNumericCounts": axis_numeric_counts,
+            "rowLevelVectors": row_level_vectors,
+            "rowLevelVectorAxisOrder": row_level_vector_axis_order,
+            "rowLevelVectorCount": row_level_vector_count,
+            "rowLevelVectorBasis": str(item.get("rowLevelVectorBasis") or "valid_multidimensional_numeric_rows"),
+            "hasRowLevelVectors": has_row_level_vectors,
             "createdAt": created_at,
             "uploadedAt": uploaded_at,
             "sourceBatchId": item.get("sourceBatchId") or item.get("source_batch_id"),
             "summaryMethod": summary_method,
-            "storagePolicy": "sanitized_numeric_axis_vector",
+            "storagePolicy": "sanitized_row_level_axis_vectors",
             "analysisAtUpload": analysis,
             "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
             "engineAtUpload": analysis.get("engine"),
@@ -506,8 +539,8 @@ def save_cluster_store(clusters: list[dict[str, Any]]) -> None:
     normalized = [cluster for cluster in (_normalize_cluster(item) for item in clusters) if cluster]
     payload = {
         "version": 1,
-        "privacy": "Stores only mapped numeric axis summaries, row counts, row-level bin count summaries, grid signatures, and goal metadata. Raw uploaded rows, filenames, and unmapped columns are not stored.",
-        "clusterDefinition": "One CSV file is one data cluster. CSV rows are repeated observations summarized into row-level bin occupancy; density scoring uses eligible peer bin occupancy summaries.",
+        "privacy": "Stores only selected-axis sanitized numeric row vectors, compatibility mean summaries, row-level bin count summaries, grid signatures, and goal metadata. Raw uploaded rows, filenames, unmapped columns, and personal data columns are not stored.",
+        "clusterDefinition": "One CSV file is one saved record. Density scoring re-bins row-level sanitized axis vectors; the mean vector is compatibility/display metadata only.",
         "clusters": normalized,
     }
     if _db_enabled():
@@ -758,6 +791,10 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "hasRowLevelBinOccupancy": bool(bin_occupancy),
         "rowLevelValidCount": int(bin_meta.get("validMultidimensionalRowCount") or 0),
         "rowLevelOccupiedBinCount": len(bin_occupancy),
+        "rowLevelVectorCount": int(cluster.get("rowLevelVectorCount") or len(cluster.get("rowLevelVectors") or []) or 0),
+        "rowLevelVectorAxisOrder": list(cluster.get("rowLevelVectorAxisOrder") or []),
+        "rowLevelVectorBasis": str(cluster.get("rowLevelVectorBasis") or "valid_multidimensional_numeric_rows"),
+        "hasRowLevelVectors": bool(cluster.get("hasRowLevelVectors") or cluster.get("rowLevelVectors")),
         "clusterVectorRowCount": int(cluster.get("clusterVectorRowCount") or cluster.get("validMultidimensionalNumericRowCount") or 0),
         "clusterVectorBasis": str(cluster.get("clusterVectorBasis") or "valid_multidimensional_numeric_rows"),
         "axisNumericCounts": normalize_int_count_map(cluster.get("axisNumericCounts")),

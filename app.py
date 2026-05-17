@@ -7,6 +7,7 @@ import io
 import ipaddress
 import itertools
 import json
+import math
 import os
 import uuid
 from dataclasses import asdict
@@ -25,6 +26,7 @@ from storage import (
     GOAL_STORE_PATH,
     STORE_DIR,
     axis_subset_key,
+    bin_occupancy_hash,
     cluster_fingerprint,
     cluster_fingerprint_payload,
     delete_peer_cluster,
@@ -40,6 +42,7 @@ from storage import (
     normalize_goals_for_display,
     peer_group_key,
     save_data_cluster,
+    save_cluster_store,
     save_peer_cluster,
     save_goal_store,
     should_save_data_clusters,
@@ -166,7 +169,7 @@ def build_dataset_summary(
     density analysis uses row-level bin occupancy in the canonical axis order.
     """
     if method != "mean":
-        raise ValueError("Only mean cluster summarization is currently supported.")
+        raise ValueError("Only mean compatibility summarization is currently supported.")
     if not rows:
         raise ValueError("업로드된 데이터가 비어 있습니다.")
 
@@ -174,6 +177,7 @@ def build_dataset_summary(
     means = np.zeros(len(axes), dtype=float)
     m2 = np.zeros(len(axes), dtype=float)
     axis_numeric_counts = np.zeros(len(axes), dtype=int)
+    row_level_vectors: list[list[float]] = []
     cluster_vector_row_count = 0
     columns = list(rows[0].keys()) if rows else []
     axis_mapping_by_key = {normalize_axis_name(axis_name): column for axis_name, column in axis_mapping.items()}
@@ -204,6 +208,7 @@ def build_dataset_summary(
         if not row_is_numeric_for_all_axes or len(row_values) != len(axes):
             continue
 
+        row_level_vectors.append([float(value) for value in row_values])
         cluster_vector_row_count += 1
         for axis_index, numeric in enumerate(row_values):
             delta = numeric - means[axis_index]
@@ -226,11 +231,15 @@ def build_dataset_summary(
         "cluster_vector_row_count": int(cluster_vector_row_count),
         "cluster_vector_basis": "valid_multidimensional_numeric_rows",
         "axis_numeric_counts": {str(axis["name"]): int(axis_numeric_counts[index]) for index, axis in enumerate(axes)},
+        "row_level_vectors": row_level_vectors,
+        "row_level_vector_axis_order": [str(axis["name"]) for axis in axes],
+        "row_level_vector_count": len(row_level_vectors),
+        "row_level_vector_basis": "valid_multidimensional_numeric_rows",
         "bin_occupancy": occupancy["bin_occupancy"],
         "axis_bin_occupancy": occupancy["axis_bin_occupancy"],
         "row_bin_tuples": occupancy["row_bin_tuples"],
         "bin_occupancy_meta": occupancy["bin_occupancy_meta"],
-        "cluster_definition": "Stored record keeps a mean vector for compatibility; primary analysis uses row-level density-grid occupancy.",
+        "cluster_definition": "Stored record keeps a mean vector for compatibility; primary analysis re-bins row-level sanitized axis vectors.",
     }
 
 
@@ -466,6 +475,37 @@ def build_projection_explorer(
     }
 
 
+def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverage_info: dict[str, Any]) -> dict[str, Any]:
+    bin_counts = coverage_info.get("binCounts", {}) if isinstance(coverage_info, dict) else {}
+    counts = [int(value) for value in bin_counts.values() if int(value) > 0]
+    peer_valid_rows = int(sum(counts))
+    total_bins = 1
+    for axis in canonical_axis_order(selected_goal["axes"]):
+        total_bins *= axis_total_bins(axis)
+    occupied_bins = len(counts)
+    observation_support = peer_valid_rows / (peer_valid_rows + float(selected_goal.get("K_m", K_M))) if peer_valid_rows > 0 else 0.0
+    coverage = occupied_bins / total_bins if total_bins else 0.0
+    if occupied_bins <= 1 or peer_valid_rows <= 0:
+        equitability = 0.0
+    else:
+        proportions = [count / peer_valid_rows for count in counts]
+        equitability = -sum(p * math.log(p) for p in proportions if p > 0) / math.log(occupied_bins)
+    confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0)) if observation_support and coverage and equitability else 0.0
+    return {
+        "totalBins": int(total_bins),
+        "occupiedBins": int(occupied_bins),
+        "peerValidRows": int(peer_valid_rows),
+        "observationSupportZ": round(float(observation_support), 6),
+        "coverageC": round(float(coverage), 6),
+        "equitabilityE": round(float(equitability), 6),
+        "confidence": round(float(confidence), 6),
+        "eligibleRecords": int(coverage_info.get("coverageEligibleClusterCount") or 0),
+        "legacyExcluded": int(coverage_info.get("coverageLegacyExcludedClusterCount") or 0),
+        "gridSignatureExcluded": int(coverage_info.get("coverageGridSignatureExcludedClusterCount") or 0),
+        "gridSignature": str(coverage_info.get("gridSignature") or ""),
+    }
+
+
 def build_report_visualizations(
     goal: dict[str, Any],
     peer_group: np.ndarray,
@@ -475,6 +515,8 @@ def build_report_visualizations(
     target_bin_counts: dict[str, int] | None = None,
     target_meta: dict[str, Any] | None = None,
     target_row_bin_tuples: list[Any] | None = None,
+    target_row_vectors: list[Any] | None = None,
+    target_row_vector_axis_order: list[str] | None = None,
 ) -> dict[str, Any]:
     axes = canonical_axis_order(goal["axes"])
     coverage_axes = []
@@ -540,6 +582,9 @@ def build_report_visualizations(
             "totalRows": int(target_meta.get("totalRows") or result.target_total_rows),
         },
         "projectionExplorer": build_projection_explorer(goal, coverage_info or {}, target_row_bin_tuples or []),
+        "gridPreviewMetrics": density_preview_metrics_from_coverage(goal, coverage_info or {}),
+        "targetRowVectors": target_row_vectors or [],
+        "targetRowVectorAxisOrder": target_row_vector_axis_order or [axis["name"] for axis in axes],
         "axisNames": [axis["name"] for axis in axes],
     }
 
@@ -589,7 +634,7 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
         messages.append("The target shows moderate specificity. Additional peer observations can make the density baseline sharper.")
 
     if result.observation_support_S < 0.5:
-        messages.append("Observation Support is low. Add saved clusters with row-level bin occupancy for the same grid signature.")
+        messages.append("Observation Support is low. Add saved records with row-level sanitized axis vectors.")
     if result.coverage_C < 0.3:
         messages.append("Coverage is low. The peer density map occupies only a small portion of the configured domain-resolution grid.")
     if result.equitability_E < 0.5:
@@ -629,7 +674,13 @@ def make_cluster_record(
         "clusterVectorRowCount": int(dataset_meta.get("cluster_vector_row_count") or dataset_meta["row_count"]),
         "clusterVectorBasis": str(dataset_meta.get("cluster_vector_basis") or "valid_multidimensional_numeric_rows"),
         "axisNumericCounts": dataset_meta.get("axis_numeric_counts", {}),
+        "rowLevelVectors": dataset_meta.get("row_level_vectors", []),
+        "rowLevelVectorAxisOrder": dataset_meta.get("row_level_vector_axis_order", axis_names),
+        "rowLevelVectorCount": int(dataset_meta.get("row_level_vector_count") or 0),
+        "rowLevelVectorBasis": str(dataset_meta.get("row_level_vector_basis") or "valid_multidimensional_numeric_rows"),
+        "hasRowLevelVectors": bool(dataset_meta.get("row_level_vectors")),
         "binOccupancy": dataset_meta.get("bin_occupancy", {}),
+        "binOccupancyHash": bin_occupancy_hash(dataset_meta.get("bin_occupancy", {})),
         "axisBinOccupancy": dataset_meta.get("axis_bin_occupancy", {}),
         "binOccupancyMeta": dataset_meta.get(
             "bin_occupancy_meta",
@@ -646,7 +697,7 @@ def make_cluster_record(
         "uploadedAt": now,
         "sourceBatchId": source_batch_id,
         "summaryMethod": dataset_meta.get("summary_method", "mean"),
-        "storagePolicy": "sanitized_density_grid_summary",
+        "storagePolicy": "sanitized_row_level_axis_vectors",
         "analysisAtUpload": analysis,
         "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
         "engineAtUpload": analysis.get("engine"),
@@ -727,6 +778,91 @@ def count_map_total(source: dict[str, Any]) -> int:
     return total
 
 
+def row_vectors_for_axis_order(
+    row_vectors: list[Any],
+    source_axis_order: list[str],
+    target_axis_order: list[str],
+) -> list[list[float]] | None:
+    source_positions: dict[str, int] = {}
+    for index, axis_name in enumerate(source_axis_order or []):
+        axis_key = normalize_axis_name(axis_name)
+        if axis_key and axis_key not in source_positions:
+            source_positions[axis_key] = index
+    target_positions: list[int] = []
+    for axis_name in target_axis_order:
+        axis_key = normalize_axis_name(axis_name)
+        if axis_key not in source_positions:
+            return None
+        target_positions.append(source_positions[axis_key])
+
+    normalized: list[list[float]] = []
+    for row in row_vectors or []:
+        if not isinstance(row, list):
+            continue
+        try:
+            vector = [float(row[position]) for position in target_positions]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if all(np.isfinite(value) for value in vector):
+            normalized.append(vector)
+    return normalized
+
+
+def recompute_bin_occupancy_from_row_vectors(
+    row_vectors: list[Any],
+    axis_order: list[str],
+    selected_goal: dict[str, Any],
+) -> dict[str, Any] | None:
+    axes = canonical_axis_order(selected_goal["axes"])
+    target_axis_order = [str(axis["name"]) for axis in axes]
+    reordered_rows = row_vectors_for_axis_order(row_vectors, axis_order, target_axis_order)
+    if reordered_rows is None:
+        return None
+
+    bin_occupancy: dict[str, int] = {}
+    axis_bin_occupancy: dict[str, dict[str, int]] = {str(axis["name"]): {} for axis in axes}
+    row_bin_tuples: list[list[int]] = []
+    out_of_domain_rows = 0
+
+    for vector in reordered_rows:
+        multidimensional_indices: list[int] = []
+        row_out_of_domain = False
+        for axis, value in zip(axes, vector):
+            index, status = bin_index_for_value(
+                value,
+                float(axis["domainMin"]),
+                float(axis["domainMax"]),
+                float(axis["resolution"]),
+            )
+            if status == "valid" and index is not None:
+                axis_counts = axis_bin_occupancy[str(axis["name"])]
+                axis_counts[str(index)] = axis_counts.get(str(index), 0) + 1
+                multidimensional_indices.append(index)
+            else:
+                row_out_of_domain = True
+                break
+        if row_out_of_domain:
+            out_of_domain_rows += 1
+            continue
+        key = json.dumps(multidimensional_indices, separators=(",", ":"))
+        bin_occupancy[key] = bin_occupancy.get(key, 0) + 1
+        row_bin_tuples.append(list(multidimensional_indices))
+
+    return {
+        "bin_occupancy": bin_occupancy,
+        "axis_bin_occupancy": axis_bin_occupancy,
+        "row_bin_tuples": row_bin_tuples,
+        "bin_occupancy_meta": {
+            "version": 1,
+            "basis": "row_level_recomputed_from_sanitized_vectors",
+            "validMultidimensionalRowCount": int(sum(bin_occupancy.values())),
+            "invalidRowCount": 0,
+            "outOfDomainRowCount": out_of_domain_rows,
+            "totalRows": len(reordered_rows),
+        },
+    }
+
+
 def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: dict[str, Any] | list[str]) -> dict[str, Any]:
     if isinstance(selected_goal, dict):
         canonical_axes = canonical_axis_order(selected_goal["axes"])
@@ -744,27 +880,39 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
     row_level_observation_count = 0
 
     for cluster in peer_clusters:
-        cluster_bin_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
-        cluster_grid_signature = str(cluster.get("gridSignature") or "").strip()
-        if not cluster_bin_counts or not cluster_grid_signature:
-            legacy_excluded += 1
-            continue
-        if current_grid_signature and cluster_grid_signature != current_grid_signature:
-            grid_signature_excluded += 1
-            continue
-        if not current_grid_signature:
+        recomputed: dict[str, Any] | None = None
+        if current_grid_signature:
+            row_vectors = cluster.get("rowLevelVectors") if isinstance(cluster.get("rowLevelVectors"), list) else []
+            source_axis_order = [str(name) for name in (cluster.get("rowLevelVectorAxisOrder") or cluster.get("axisNames") or [])]
+            if not row_vectors:
+                legacy_excluded += 1
+                continue
+            recomputed = recompute_bin_occupancy_from_row_vectors(row_vectors, source_axis_order, selected_goal)
+            if recomputed is None:
+                grid_signature_excluded += 1
+                continue
+            cluster_bin_counts = recomputed["bin_occupancy"]
+            cluster_axis_counts = recomputed["axis_bin_occupancy"]
+            meta = recomputed["bin_occupancy_meta"]
+        else:
+            cluster_bin_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
+            cluster_grid_signature = str(cluster.get("gridSignature") or "").strip()
+            if not cluster_bin_counts or not cluster_grid_signature:
+                legacy_excluded += 1
+                continue
             stored_signature = str(cluster.get("storedAxisSignature") or cluster.get("axisSignature") or "")
             if stored_signature != selected_signature:
                 grid_signature_excluded += 1
                 continue
+            cluster_axis_counts = cluster.get("axisBinOccupancy") or {}
+            meta = cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {}
         eligible_count += 1
         merge_count_maps(bin_counts, cluster_bin_counts)
-        meta = cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {}
         try:
             row_level_observation_count += int(meta.get("validMultidimensionalRowCount") or count_map_total(cluster_bin_counts))
         except (TypeError, ValueError):
             row_level_observation_count += count_map_total(cluster_bin_counts)
-        for axis_name, counts in (cluster.get("axisBinOccupancy") or {}).items():
+        for axis_name, counts in (cluster_axis_counts or {}).items():
             axis_counts = axis_bin_counts.setdefault(str(axis_name), {})
             merge_count_maps(axis_counts, counts)
 
@@ -1007,11 +1155,11 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         stored_count = int(coverage_info["coverageEligibleClusterCount"])
         saved_text = "saved" if saved_cluster_is_new else "already stored"
         raise ValueError(
-            "Density analysis uses only saved clusters with row-level bin occupancy and the same grid signature. "
-            f"Eligible density clusters={stored_count}, peer row-level observations={coverage_info['rowLevelObservationCount']}. "
-            f"Excluded legacy clusters={coverage_info['coverageLegacyExcludedClusterCount']}, "
-            f"grid-signature mismatches={coverage_info['coverageGridSignatureExcludedClusterCount']}. "
-            f"This CSV was sanitized into a row-level bin occupancy summary and {saved_text}, but analysis is limited until eligible peer density exists. "
+            "Density analysis uses saved records with row-level sanitized axis vectors re-binned into the current grid. "
+            f"Eligible density records={stored_count}, peer row-level observations={coverage_info['rowLevelObservationCount']}. "
+            f"Excluded legacy records={coverage_info['coverageLegacyExcludedClusterCount']}, "
+            f"axis mismatches={coverage_info['coverageGridSignatureExcludedClusterCount']}. "
+            f"This CSV was sanitized into row-level axis vectors and bin occupancy and {saved_text}, but analysis is limited until eligible peer density exists. "
             f"Reason: {exc}"
         ) from exc
 
@@ -1030,11 +1178,11 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         saved_cluster, saved_cluster_is_new = save_data_cluster(pending_cluster)
 
     summary = build_summary(result)
-    summary.append("Density scoring uses only saved clusters with row-level bin occupancy and the same grid signature.")
+    summary.append("Density scoring re-bins saved row-level sanitized axis vectors into the current grid.")
     if analysis["warnings"]:
         summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
     if saved_cluster:
-        status = "saved as a new cluster" if saved_cluster_is_new else "detected as an existing duplicate and not saved again"
+        status = "saved as a new record" if saved_cluster_is_new else "detected as an existing duplicate and not saved again"
         summary.append(f"Raw uploaded rows, filename, and unmapped columns were not stored; only the sanitized density summary was {status}.")
 
     return {
@@ -1076,6 +1224,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             dataset_meta.get("bin_occupancy", {}),
             dataset_meta.get("bin_occupancy_meta", {}),
             dataset_meta.get("row_bin_tuples", []),
+            dataset_meta.get("row_level_vectors", []),
+            dataset_meta.get("row_level_vector_axis_order", []),
         ),
         "clusters": list_cluster_summaries(),
         "peerCounts": bootstrap_peer_counts(),
@@ -1088,6 +1238,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "axisNames": saved_cluster["axisNames"],
             "rowCount": saved_cluster["rowCount"],
             "clusterVectorRowCount": saved_cluster.get("clusterVectorRowCount"),
+            "rowLevelVectorCount": saved_cluster.get("rowLevelVectorCount"),
             "storeFile": storage_label(CLUSTER_STORE_PATH),
             "storagePolicy": saved_cluster["storagePolicy"],
         },
@@ -1143,6 +1294,7 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                 {
                     "rowCount": dataset_meta["row_count"],
                     "clusterVectorRowCount": dataset_meta.get("cluster_vector_row_count"),
+                    "rowLevelVectorCount": dataset_meta.get("row_level_vector_count"),
                     "rowLevelValidCount": dataset_meta.get("bin_occupancy_meta", {}).get("validMultidimensionalRowCount"),
                     "axisMappingStatus": "mapped",
                     "clusterVector": [round(float(value), 6) for value in cluster_vector],
@@ -1284,18 +1436,32 @@ def cluster_by_id(cluster_id: str) -> dict[str, Any]:
     raise ValueError("Cluster not found.")
 
 
+def record_density_counts_for_goal(cluster: dict[str, Any], selected_goal: dict[str, Any]) -> tuple[dict[str, int], dict[str, Any]]:
+    row_vectors = cluster.get("rowLevelVectors") if isinstance(cluster.get("rowLevelVectors"), list) else []
+    source_axis_order = [str(name) for name in (cluster.get("rowLevelVectorAxisOrder") or cluster.get("axisNames") or [])]
+    if row_vectors:
+        recomputed = recompute_bin_occupancy_from_row_vectors(row_vectors, source_axis_order, selected_goal)
+        if recomputed is not None:
+            return recomputed["bin_occupancy"], recomputed["bin_occupancy_meta"]
+    return (
+        cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {},
+        cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {},
+    )
+
+
 def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
     cluster = cluster_by_id(cluster_id)
     goal = find_goal(str(cluster["goalId"]))
     selected_goal = goal_subset(goal, [str(name) for name in cluster["axisNames"]])
     target = np.asarray(cluster["values"], dtype=float)
+    target_counts, target_meta = record_density_counts_for_goal(cluster, selected_goal)
     uploaded = normalize_analysis_snapshot(cluster.get("analysisAtUpload"))
     try:
         analysis = run_density_analysis(
             goal,
             selected_goal,
-            cluster.get("binOccupancy", {}),
-            cluster.get("binOccupancyMeta", {}),
+            target_counts,
+            target_meta,
             target,
             exclude_cluster_id=str(cluster["id"]),
         )
@@ -1333,11 +1499,11 @@ def reevaluation_interpretation(uploaded: dict[str, Any], current: dict[str, Any
     current_h = current.get("specificity_score")
     if uploaded_h is not None and current_h is not None:
         if float(uploaded_h) >= 0.75 and float(current_h) <= 0.55:
-            messages.append("The cluster looked highly specific at upload time, but is closer to the current density baseline now.")
+            messages.append("The record looked highly specific at upload time, but is closer to the current density baseline now.")
         elif float(current_h) >= 0.75:
-            messages.append("The cluster remains highly specific against the current density baseline.")
+            messages.append("The record remains highly specific against the current density baseline.")
         else:
-            messages.append("The cluster is only mildly specific against the current density baseline.")
+            messages.append("The record is only mildly specific against the current density baseline.")
     if uploaded_c is not None and float(uploaded_c) < 0.4:
         messages.append("Upload-time confidence was low, so the earlier judgment was support-limited.")
     return messages or ["Upload-time and current density results are broadly similar."]
@@ -1346,11 +1512,12 @@ def reevaluation_interpretation(uploaded: dict[str, Any], current: dict[str, Any
 def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], cluster: dict[str, Any], exclude_cluster_id: str | None) -> dict[str, Any]:
     try:
         target = np.asarray(cluster.get("values", []), dtype=float)
+        target_counts, target_meta = record_density_counts_for_goal(cluster, selected_goal)
         analysis = run_density_analysis(
             goal,
             selected_goal,
-            cluster.get("binOccupancy", {}),
-            cluster.get("binOccupancyMeta", {}),
+            target_counts,
+            target_meta,
             target,
             exclude_cluster_id=exclude_cluster_id,
         )
@@ -1384,7 +1551,7 @@ def delete_impact_request(payload: dict[str, Any]) -> dict[str, Any]:
         }
     without_peer_clusters = analysis_peer_clusters(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], str(cluster["id"]))
     without_density = build_global_bin_counts(without_peer_clusters, selected_goal)
-    target_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
+    target_counts, _target_meta = record_density_counts_for_goal(cluster, selected_goal)
     bin_uniqueness = bool(target_counts) and all(int(without_density["binCounts"].get(str(key), 0)) == 0 for key in target_counts)
     return {
         "cluster": {
@@ -1549,9 +1716,9 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     if total_bins > 100000:
         warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
     if coverage_info["coverageLegacyExcludedClusterCount"]:
-        warnings.append("일부 기존 군집은 row-level bin 정보가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.")
+        warnings.append("일부 기존 record는 row-level vectors가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.")
     if coverage_info["coverageGridSignatureExcludedClusterCount"]:
-        warnings.append("Grid signature가 다른 군집은 density 계산에서 제외됩니다.")
+        warnings.append("Axis 구성이 맞지 않는 record는 density 계산에서 제외됩니다.")
     return {
         "basis": coverage_info["coverageBasis"],
         "axisBins": axis_previews,
@@ -1565,6 +1732,190 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         "rowLevelObservationCount": coverage_info["rowLevelObservationCount"],
         "warning": " ".join(warnings),
         "warnings": warnings,
+    }
+
+
+def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], preview_axes: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_goal = goal_subset(goal, selected_axis_names)
+    preview_by_key = {normalize_axis_name(axis.get("name")): axis for axis in preview_axes if normalize_axis_name(axis.get("name"))}
+    axes: list[dict[str, Any]] = []
+    for axis in canonical_axis_order(selected_goal["axes"]):
+        preview = preview_by_key.get(normalize_axis_name(axis["name"]), {})
+        axes.append(
+            {
+                "name": axis["name"],
+                "unit": axis.get("unit", ""),
+                "domainMin": float(preview.get("domainMin", axis["domainMin"])),
+                "domainMax": float(preview.get("domainMax", axis["domainMax"])),
+                "resolution": float(preview.get("resolution", axis["resolution"])),
+            }
+        )
+    preview_goal = {
+        "id": selected_goal["id"],
+        "name": selected_goal["name"],
+        "K_m": float(selected_goal.get("K_m", K_M)),
+        "axes": axes,
+    }
+    experiment_config_from_goal(preview_goal)
+    return preview_goal
+
+
+def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
+    goal = find_goal(str(payload.get("goalId", "")))
+    selected_axis_names = payload.get("selectedAxes") or [axis["name"] for axis in goal["axes"]]
+    if not isinstance(selected_axis_names, list):
+        raise ValueError("selectedAxes must be a list.")
+    preview_axes = payload.get("previewAxes")
+    if not isinstance(preview_axes, list):
+        raise ValueError("previewAxes must be a list.")
+    preview_goal = grid_preview_goal(goal, [str(name) for name in selected_axis_names], preview_axes)
+    axis_names = [axis["name"] for axis in canonical_axis_order(preview_goal["axes"])]
+    peer_clusters = analysis_peer_clusters(goal, axis_names)
+    coverage_info = build_global_bin_counts(peer_clusters, preview_goal)
+    coverage_info["totalBins"] = density_preview_metrics_from_coverage(preview_goal, coverage_info)["totalBins"]
+
+    target_axis_order = [str(name) for name in (payload.get("targetRowVectorAxisOrder") or axis_names)]
+    target_vectors = payload.get("targetRowVectors") if isinstance(payload.get("targetRowVectors"), list) else []
+    target_recomputed = recompute_bin_occupancy_from_row_vectors(target_vectors, target_axis_order, preview_goal) or {
+        "bin_occupancy": {},
+        "axis_bin_occupancy": {},
+        "row_bin_tuples": [],
+        "bin_occupancy_meta": {"validMultidimensionalRowCount": 0, "invalidRowCount": 0, "outOfDomainRowCount": 0, "totalRows": 0},
+    }
+    metrics = density_preview_metrics_from_coverage(preview_goal, coverage_info)
+    projection_explorer = build_projection_explorer(preview_goal, coverage_info, target_recomputed["row_bin_tuples"])
+    projection_explorer["gridPreviewMetrics"] = metrics
+
+    result_payload: dict[str, Any] | None = None
+    if metrics["peerValidRows"] > 0 and target_recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"] > 0:
+        analyzer = DensityGridAnalyzer(experiment_config_from_goal(preview_goal))
+        analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+        result_payload = analyzer.diagnose(target_recomputed["bin_occupancy"], target_recomputed["bin_occupancy_meta"]).to_payload(axis_names)
+
+    return {
+        "previewGoal": preview_goal,
+        "metrics": metrics,
+        "result": result_payload,
+        "projectionExplorer": projection_explorer,
+        "targetBinOccupancy": target_recomputed["bin_occupancy"],
+        "targetBinOccupancyMeta": target_recomputed["bin_occupancy_meta"],
+        "coverageInfo": {key: value for key, value in coverage_info.items() if key not in {"binCounts", "axisBinCounts"}},
+    }
+
+
+def rebuild_record_for_goal_grid(record: dict[str, Any], selected_goal: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
+    axes = canonical_axis_order(selected_goal["axes"])
+    axis_names = [str(axis["name"]) for axis in axes]
+    row_vectors = record.get("rowLevelVectors") if isinstance(record.get("rowLevelVectors"), list) else []
+    source_axis_order = [str(name) for name in (record.get("rowLevelVectorAxisOrder") or record.get("axisNames") or [])]
+    reordered_rows = row_vectors_for_axis_order(row_vectors, source_axis_order, axis_names)
+    if not row_vectors or reordered_rows is None:
+        return dict(record), False, "legacy_missing_row_level_vectors"
+
+    recomputed = recompute_bin_occupancy_from_row_vectors(reordered_rows, axis_names, selected_goal)
+    if recomputed is None:
+        return dict(record), False, "axis_mismatch"
+
+    array = np.asarray(reordered_rows, dtype=float)
+    if array.size:
+        means = array.mean(axis=0)
+        variance = array.var(axis=0, ddof=1) if len(array) > 1 else np.zeros(len(axis_names), dtype=float)
+        std = np.sqrt(variance)
+    else:
+        means = np.asarray(record.get("values", [0.0 for _ in axis_names]), dtype=float)
+        variance = np.zeros(len(axis_names), dtype=float)
+        std = np.zeros(len(axis_names), dtype=float)
+
+    updated = dict(record)
+    updated["axisNames"] = axis_names
+    updated["axisSignature"] = axis_subset_key(axis_names)
+    updated["gridSignature"] = grid_signature_from_axes(axes)
+    updated["peerGroupKey"] = peer_group_key(str(record["goalId"]), axis_names)
+    updated["values"] = [round(float(value), 12) for value in means]
+    updated["valuesMean"] = [round(float(value), 12) for value in means]
+    updated["valuesVariance"] = [round(float(value), 12) for value in variance]
+    updated["valuesStd"] = [round(float(value), 12) for value in std]
+    updated["rowLevelVectors"] = [[round(float(value), 12) for value in row] for row in reordered_rows]
+    updated["rowLevelVectorAxisOrder"] = axis_names
+    updated["rowLevelVectorCount"] = len(reordered_rows)
+    updated["rowLevelVectorBasis"] = "valid_multidimensional_numeric_rows"
+    updated["hasRowLevelVectors"] = bool(reordered_rows)
+    updated["binOccupancy"] = recomputed["bin_occupancy"]
+    updated["axisBinOccupancy"] = recomputed["axis_bin_occupancy"]
+    updated["binOccupancyMeta"] = recomputed["bin_occupancy_meta"]
+    updated["binOccupancyHash"] = bin_occupancy_hash(recomputed["bin_occupancy"])
+    updated["storagePolicy"] = "sanitized_row_level_axis_vectors"
+    updated["fingerprint"] = cluster_fingerprint(updated)
+    return updated, True, "updated"
+
+
+def apply_goal_grid_defaults_request(payload: dict[str, Any]) -> dict[str, Any]:
+    goal_id = str(payload.get("goalId", "")).strip()
+    goals = normalize_goals_for_display(load_goal_store())
+    goal = next((item for item in goals if item["id"] == goal_id), None)
+    if goal is None:
+        raise ValueError("Selected Experiment Goal does not exist.")
+    selected_axis_names = payload.get("selectedAxes") or [axis["name"] for axis in goal["axes"]]
+    if not isinstance(selected_axis_names, list):
+        raise ValueError("selectedAxes must be a list.")
+    preview_axes = payload.get("previewAxes")
+    if not isinstance(preview_axes, list):
+        raise ValueError("previewAxes must be a list.")
+
+    preview_goal = grid_preview_goal(goal, [str(name) for name in selected_axis_names], preview_axes)
+    preview_by_key = {normalize_axis_name(axis["name"]): axis for axis in preview_goal["axes"]}
+    updated_goal = dict(goal)
+    updated_axes: list[dict[str, Any]] = []
+    for axis in goal["axes"]:
+        preview = preview_by_key.get(normalize_axis_name(axis["name"]))
+        if preview:
+            updated = dict(axis)
+            updated["domainMin"] = float(preview["domainMin"])
+            updated["domainMax"] = float(preview["domainMax"])
+            updated["resolution"] = float(preview["resolution"])
+            updated_axes.append(updated)
+        else:
+            updated_axes.append(dict(axis))
+    updated_goal["axes"] = updated_axes
+    updated_goal = validate_goal(updated_goal)
+    updated_goals = [updated_goal if item["id"] == goal_id else item for item in goals]
+
+    updated_clusters: list[dict[str, Any]] = []
+    updated_count = 0
+    legacy_excluded = 0
+    axis_excluded = 0
+    for cluster in load_cluster_store():
+        if str(cluster.get("goalId")) != goal_id:
+            updated_clusters.append(cluster)
+            continue
+        try:
+            cluster_goal = goal_subset(updated_goal, [str(name) for name in cluster.get("axisNames", [])])
+        except ValueError:
+            axis_excluded += 1
+            updated_clusters.append(cluster)
+            continue
+        rebuilt, changed, reason = rebuild_record_for_goal_grid(cluster, cluster_goal)
+        if changed:
+            updated_count += 1
+        elif reason == "legacy_missing_row_level_vectors":
+            legacy_excluded += 1
+        else:
+            axis_excluded += 1
+        updated_clusters.append(rebuilt)
+
+    save_goal_store(updated_goals)
+    save_cluster_store(updated_clusters)
+    normalized_goals = normalize_goals_for_display(updated_goals)
+    return {
+        "savedGoal": updated_goal,
+        "updatedRecordCount": updated_count,
+        "legacyExcludedRecordCount": legacy_excluded,
+        "axisExcludedRecordCount": axis_excluded,
+        "goals": normalized_goals,
+        "clusters": list_cluster_summaries(),
+        "peerCounts": bootstrap_peer_counts(),
+        "peerSubsetCounts": bootstrap_peer_subset_counts(),
+        "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalized_goals},
     }
 
 
@@ -1587,12 +1938,12 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
             "goalStoreFile": storage_label(GOAL_STORE_PATH),
             "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
             "clusterCount": len(load_cluster_store()),
-            "savedItems": ["Experiment Goal 설정", "비식별 mean vector 호환 필드", "row-level bin count summary"],
+            "savedItems": ["Experiment Goal 설정", "selected-axis row-level sanitized numeric vectors", "비식별 mean vector 호환 필드", "row-level bin count summary"],
             "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
         },
         "domainDefinitions": {
-            "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 평균 vector는 표시와 저장 호환성을 위해 유지되지만, 메인 분석은 row-level density-grid occupancy를 사용합니다.",
-            "coverage": "Coverage and Equitability are calculated from saved row-level bin occupancy summaries.",
+            "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
+            "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
             "K_m": "K_m is currently reused as K_density for Observation Support: S = peer row-level observations / (peer row-level observations + K_density).",
         },
     }
@@ -1644,6 +1995,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/export/report":
                 self._send_json(export_report_request(payload))
                 return
+            if parsed.path == "/api/grid-preview":
+                self._send_json(grid_preview_request(payload))
+                return
             if parsed.path == "/api/admin/clusters/batch-save":
                 if not self._admin_allowed():
                     self._send_json({"error": "Admin Token is required."}, status=HTTPStatus.FORBIDDEN)
@@ -1676,6 +2030,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 save_goal_store(goals)
                 self._send_json({"savedGoal": saved_goal, "goals": normalize_goals_for_display(goals), "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalize_goals_for_display(goals)}})
                 return
+            if parsed.path == "/api/admin/goals/apply-grid":
+                if not self._admin_allowed():
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
+                    return
+                self._send_json(apply_goal_grid_defaults_request(payload))
+                return
             if parsed.path == "/api/admin/goals/delete":
                 if not self._admin_allowed():
                     self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
@@ -1694,7 +2054,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 deleted = delete_peer_cluster(str(payload.get("id", "")))
                 if not deleted:
-                    raise ValueError("삭제할 군집을 찾을 수 없습니다.")
+                    raise ValueError("삭제할 record를 찾을 수 없습니다.")
                 self._send_json({"deleted": True, "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts()})
                 return
         except Exception as exc:

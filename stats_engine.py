@@ -145,7 +145,7 @@ class DensityGridAnalyzer:
         if peer_valid_rows <= 0:
             raise ValueError(
                 "Density grid analysis requires at least one peer row-level bin occupancy observation. "
-                "Saved legacy clusters without row-level bin occupancy/grid signature are excluded."
+                "Saved legacy records without row-level vectors are excluded."
             )
 
         target_tracker = BinGridTracker(self.config.domain_range, self.config.resolution)

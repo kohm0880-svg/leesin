@@ -103,14 +103,14 @@ class DensityGridBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(result.out_of_domain_rate, 0.5)
 
-    def test_grid_signature_mismatch_is_excluded_from_density(self) -> None:
+    def test_grid_signature_mismatch_recomputes_when_row_vectors_exist(self) -> None:
         selected_goal = goal(axes=[axis("x")])
         matching = record_from_rows(selected_goal, [{"x": "1"}, {"x": "2"}], "matching")
         mismatched = record_from_rows(goal(axes=[axis("x", resolution=0.5)]), [{"x": "1"}], "mismatched")
         coverage = app.build_global_bin_counts([matching, mismatched], selected_goal)
-        self.assertEqual(coverage["coverageEligibleClusterCount"], 1)
-        self.assertEqual(coverage["coverageGridSignatureExcludedClusterCount"], 1)
-        self.assertEqual(coverage["rowLevelObservationCount"], 2)
+        self.assertEqual(coverage["coverageEligibleClusterCount"], 2)
+        self.assertEqual(coverage["coverageGridSignatureExcludedClusterCount"], 0)
+        self.assertEqual(coverage["rowLevelObservationCount"], 3)
 
     def test_selected_axis_order_uses_canonical_grid_signature_and_bin_key(self) -> None:
         unsorted_goal = goal(axes=[axis("y"), axis("x")])
@@ -243,6 +243,94 @@ class DensityGridBehaviorTests(unittest.TestCase):
         record = app.make_cluster_record(selected_goal, selected_goal, vector, meta)
         self.assertNotIn("row_bin_tuples", record)
         self.assertNotIn("rowBinTuples", record)
+
+    def test_row_level_vectors_are_stored_and_recompute_original_bins(self) -> None:
+        selected_goal = goal(axes=[axis("x"), axis("y")])
+        rows = [{"x": "2", "y": "3"}, {"x": "4", "y": "5"}]
+        vector, meta = app.build_dataset_summary(rows, {"x": "x", "y": "y"}, selected_goal)
+        record = app.make_cluster_record(selected_goal, selected_goal, vector, meta)
+        self.assertEqual(record["rowLevelVectors"], [[2.0, 3.0], [4.0, 5.0]])
+        recomputed = app.recompute_bin_occupancy_from_row_vectors(
+            record["rowLevelVectors"],
+            record["rowLevelVectorAxisOrder"],
+            selected_goal,
+        )
+        self.assertEqual(recomputed["bin_occupancy"], record["binOccupancy"])
+        self.assertEqual(recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"], 2)
+
+    def test_widening_domain_brings_out_of_domain_vector_into_valid_bin(self) -> None:
+        narrow = goal(axes=[axis("x", domain_max=10)])
+        wide = goal(axes=[axis("x", domain_max=20)])
+        vectors = [[12.0]]
+        narrow_bins = app.recompute_bin_occupancy_from_row_vectors(vectors, ["x"], narrow)
+        wide_bins = app.recompute_bin_occupancy_from_row_vectors(vectors, ["x"], wide)
+        self.assertEqual(narrow_bins["bin_occupancy_meta"]["outOfDomainRowCount"], 1)
+        self.assertEqual(narrow_bins["bin_occupancy_meta"]["validMultidimensionalRowCount"], 0)
+        self.assertEqual(wide_bins["bin_occupancy"], {"[12]": 1})
+        self.assertEqual(wide_bins["bin_occupancy_meta"]["validMultidimensionalRowCount"], 1)
+
+    def test_resolution_change_changes_grid_signature_and_bin_occupancy(self) -> None:
+        coarse = goal(axes=[axis("x", resolution=1)])
+        fine = goal(axes=[axis("x", resolution=0.5)])
+        vectors = [[1.2], [1.7]]
+        coarse_bins = app.recompute_bin_occupancy_from_row_vectors(vectors, ["x"], coarse)
+        fine_bins = app.recompute_bin_occupancy_from_row_vectors(vectors, ["x"], fine)
+        self.assertNotEqual(storage.grid_signature_from_axes(coarse["axes"]), storage.grid_signature_from_axes(fine["axes"]))
+        self.assertNotEqual(coarse_bins["bin_occupancy"], fine_bins["bin_occupancy"])
+
+    def test_preview_metrics_recompute_from_row_level_vectors(self) -> None:
+        selected_goal = goal(axes=[axis("x", domain_max=10)])
+        peer = record_from_rows(selected_goal, [{"x": "1"}, {"x": "2"}, {"x": "8"}], "peer")
+        coverage = app.build_global_bin_counts([peer], selected_goal)
+        metrics = app.density_preview_metrics_from_coverage(selected_goal, coverage)
+        self.assertEqual(metrics["peerValidRows"], 3)
+        self.assertEqual(metrics["occupiedBins"], 3)
+        self.assertGreater(metrics["observationSupportZ"], 0)
+        self.assertIn("confidence", metrics)
+
+    def test_apply_goal_grid_defaults_updates_record_grid_hashes(self) -> None:
+        original_goal = goal(axes=[axis("x", domain_max=10, resolution=1)])
+        record = record_from_rows(original_goal, [{"x": "1.2"}, {"x": "1.7"}], "record")
+        old_grid = record["gridSignature"]
+        old_hash = record["binOccupancyHash"]
+        saved_goals: list[list[dict]] = []
+        saved_clusters: list[list[dict]] = []
+
+        def capture_goals(items: list[dict]) -> None:
+            saved_goals.append(items)
+
+        def capture_clusters(items: list[dict]) -> None:
+            saved_clusters.append(items)
+
+        with (
+            patch("app.load_goal_store", return_value=[original_goal]),
+            patch("app.load_cluster_store", return_value=[record]),
+            patch("storage.load_cluster_store", return_value=[record]),
+            patch("app.save_goal_store", side_effect=capture_goals),
+            patch("app.save_cluster_store", side_effect=capture_clusters),
+        ):
+            response = app.apply_goal_grid_defaults_request(
+                {
+                    "goalId": original_goal["id"],
+                    "selectedAxes": ["x"],
+                    "previewAxes": [{"name": "x", "domainMin": 0, "domainMax": 10, "resolution": 0.5}],
+                }
+            )
+        self.assertEqual(response["updatedRecordCount"], 1)
+        updated_record = saved_clusters[0][0]
+        self.assertNotEqual(updated_record["gridSignature"], old_grid)
+        self.assertNotEqual(updated_record["binOccupancyHash"], old_hash)
+
+    def test_report_template_does_not_render_coverage_axis_distribution(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("${renderCoverageAxisDistributions(report.visualizations)}", template)
+
+    def test_projection_zoom_ui_handlers_are_present(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("projectionZooms", template)
+        self.assertIn("event.ctrlKey", template)
+        self.assertIn("addEventListener('wheel'", template)
+        self.assertIn("addEventListener('dblclick'", template)
 
 
 if __name__ == "__main__":
