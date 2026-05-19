@@ -412,3 +412,46 @@ def is_bin_key_feasible(
     if cache is not None:
         cache[cache_key] = result
     return result
+
+
+def filter_bin_counts_by_feasible_domain(
+    bin_counts: dict[str, Any],
+    axes: list[dict[str, Any]],
+    expressions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return only bin counts inside the feasible domain.
+
+    Invalid bin keys are skipped because they cannot be safely interpreted as
+    density-grid observations. Infeasible keys are counted separately so callers
+    can report how many peer rows/bins were excluded by the mask.
+    """
+    normalized = normalize_feasible_expressions(expressions)
+    filtered: dict[str, int] = {}
+    infeasible_rows = 0
+    infeasible_bins = 0
+    cache: dict[str, bool] = {}
+
+    for raw_key, raw_count in (bin_counts or {}).items():
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        key = str(raw_key)
+        try:
+            feasible = is_bin_key_feasible(key, axes, normalized, cache)
+        except ValueError:
+            continue
+        if feasible:
+            filtered[key] = filtered.get(key, 0) + count
+        else:
+            infeasible_rows += count
+            infeasible_bins += 1
+
+    return {
+        "binCounts": filtered,
+        "filteredBinCounts": filtered,
+        "infeasibleRows": int(infeasible_rows),
+        "infeasibleBins": int(infeasible_bins),
+    }

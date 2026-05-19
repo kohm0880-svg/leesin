@@ -85,6 +85,7 @@ class DensityDiagnosisResult:
             "total_bins": self.total_bins,
             "valid_bins": self.valid_bins,
             "masked_bins": self.masked_bins,
+            "valid_domain_ratio": round(float(self.valid_bins / self.total_bins), 6) if self.total_bins else 0.0,
             "occupied_bins": self.occupied_bins,
             "feasible_mask_enabled": bool(self.feasible_mask_enabled),
         }

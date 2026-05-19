@@ -85,9 +85,12 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "totalBins": None,
     "validBins": None,
     "maskedBins": None,
+    "validDomainRatio": None,
     "occupiedBins": None,
     "feasibleMaskEnabled": None,
     "feasibleExpressions": [],
+    "infeasiblePeerRows": None,
+    "infeasiblePeerBins": None,
     "outOfDomainWarnings": [],
 }
 
@@ -222,8 +225,12 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
         "total_bins": "totalBins",
         "valid_bins": "validBins",
         "masked_bins": "maskedBins",
+        "valid_domain_ratio": "validDomainRatio",
         "occupied_bins": "occupiedBins",
         "feasible_mask_enabled": "feasibleMaskEnabled",
+        "feasible_expressions": "feasibleExpressions",
+        "infeasible_peer_rows": "infeasiblePeerRows",
+        "infeasible_peer_bins": "infeasiblePeerBins",
     }
     for key, value in source.items():
         normalized[aliases.get(key, key)] = value

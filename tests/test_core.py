@@ -11,6 +11,7 @@ from feasible_mask import (
     compile_gui_feasible_rule,
     compute_valid_bin_mask_for_axes,
     evaluate_feasible_expression_on_arrays,
+    filter_bin_counts_by_feasible_domain,
     validate_feasible_expression,
 )
 from models import ExperimentConfig
@@ -519,6 +520,72 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("data-rule-convert", template)
         self.assertIn("Convert to Advanced Expression", template)
         self.assertIn("feasibleDomainAdvancedExpressions", template)
+
+    def test_filter_bin_counts_by_feasible_domain_reports_exclusions(self) -> None:
+        axes = [axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
+        filtered = filter_bin_counts_by_feasible_domain(
+            {"[5,4]": 2, "[5,6]": 3},
+            axes,
+            ["temperature <= 50"],
+        )
+        self.assertEqual(filtered["binCounts"], {"[5,4]": 2})
+        self.assertEqual(filtered["infeasibleRows"], 3)
+        self.assertEqual(filtered["infeasibleBins"], 1)
+
+    def test_density_payload_includes_valid_domain_ratio(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 1})
+        analyzer.set_feasible_domain(valid_bins=5, masked_bins=5, feasible_mask_enabled=True)
+        result = analyzer.diagnose({"[0]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        payload = result.to_payload(["x"])
+        self.assertEqual(payload["valid_domain_ratio"], 0.5)
+
+    def test_projection_explorer_includes_feasible_valid_domain_ratio(self) -> None:
+        selected_goal = goal(axes=[axis("x"), axis("y")])
+        explorer = app.build_projection_explorer(
+            selected_goal,
+            {
+                "binCounts": {},
+                "feasibleMaskEnabled": True,
+                "validBins": 20,
+                "maskedBins": 80,
+                "validDomainRatio": 0.2,
+                "feasibleExpressions": ["x <= 5"],
+            },
+            [],
+        )
+        self.assertTrue(explorer["feasibleMaskEnabled"])
+        self.assertEqual(explorer["validDomainRatio"], 0.2)
+        self.assertEqual(explorer["feasibleExpressions"], ["x <= 5"])
+
+    def test_csv_export_includes_feasible_mask_fields(self) -> None:
+        response = app.export_report_request(
+            {
+                "format": "csv",
+                "report": {
+                    "meta": {"experiment_goal": "A", "goal_id": "goal_a", "axis_names": ["x"]},
+                    "result": {
+                        "engine": "density_grid",
+                        "feasible_mask_enabled": True,
+                        "feasibleExpressions": ["x <= 5"],
+                        "valid_bins": 5,
+                        "masked_bins": 5,
+                        "valid_domain_ratio": 0.5,
+                        "infeasible_target_rows": 2,
+                        "infeasiblePeerRows": 3,
+                        "infeasiblePeerBins": 1,
+                    },
+                    "visualizations": {},
+                    "confidenceReasons": [],
+                    "summary": [],
+                },
+            }
+        )
+        content = response["content"]
+        self.assertIn("feasible_expressions", content)
+        self.assertIn("valid_domain_ratio", content)
+        self.assertIn("infeasible_target_rows", content)
+        self.assertIn("infeasible_peer_rows", content)
 
 
 if __name__ == "__main__":

@@ -521,6 +521,7 @@ def build_projection_explorer(
         "feasibleMaskEnabled": bool(coverage_info.get("feasibleMaskEnabled")) if isinstance(coverage_info, dict) else False,
         "validBins": int(coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
         "maskedBins": int(coverage_info.get("maskedBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "validDomainRatio": float(coverage_info.get("validDomainRatio") or 0.0) if isinstance(coverage_info, dict) else 0.0,
         "feasibleExpressions": list(coverage_info.get("feasibleExpressions") or []) if isinstance(coverage_info, dict) else [],
         "maskRenderingTodo": "TODO: render masked 2D projection regions as gray overlay.",
         "targetRowBinTuples": payload_tuples,
@@ -1200,6 +1201,12 @@ def run_density_analysis(
     )
     result = analyzer.diagnose(target_bin_counts, target_meta)
     result_payload = result.to_payload(config.axis_names)
+    result_payload["totalBins"] = result_payload.get("total_bins")
+    result_payload["validTargetRows"] = result_payload.get("valid_target_rows")
+    result_payload["outOfDomainRows"] = result_payload.get("out_of_domain_rows")
+    result_payload["maskedOutTargetRows"] = result_payload.get("masked_out_target_rows")
+    result_payload["infeasibleTargetRows"] = result_payload.get("infeasible_target_rows")
+    result_payload["occupiedBins"] = result_payload.get("occupied_bins")
     result_payload["outOfDomainWarnings"] = warnings
     result_payload["outOfDomainWarningCount"] = len(warnings)
     result_payload["coverageBasis"] = coverage_info["coverageBasis"]
@@ -1212,6 +1219,7 @@ def run_density_analysis(
     result_payload["validBins"] = coverage_info.get("validBins", result.valid_bins)
     result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
     result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio", 1.0)
+    result_payload["valid_domain_ratio"] = coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio", 1.0))
     result_payload["feasibleMaskEnabled"] = coverage_info.get("feasibleMaskEnabled", False)
     result_payload["feasibleExpressions"] = coverage_info.get("feasibleExpressions", [])
     result_payload["infeasiblePeerRows"] = coverage_info.get("infeasiblePeerRows", 0)
@@ -1755,9 +1763,14 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "rare_bin_rate",
             "out_of_domain_rate",
             "masked_out_target_rows",
+            "infeasible_target_rows",
             "feasible_mask_enabled",
+            "feasible_expressions",
             "valid_bins",
             "masked_bins",
+            "valid_domain_ratio",
+            "infeasible_peer_rows",
+            "infeasible_peer_bins",
             "confidence",
             "observation_support_S",
             "coverage_C",
@@ -1794,9 +1807,14 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "rare_bin_rate": result.get("rare_bin_rate"),
                 "out_of_domain_rate": result.get("out_of_domain_rate"),
                 "masked_out_target_rows": result.get("masked_out_target_rows"),
+                "infeasible_target_rows": result.get("infeasible_target_rows"),
                 "feasible_mask_enabled": result.get("feasible_mask_enabled"),
+                "feasible_expressions": json.dumps(result.get("feasibleExpressions", result.get("feasible_expressions", [])), ensure_ascii=False),
                 "valid_bins": result.get("valid_bins"),
                 "masked_bins": result.get("masked_bins"),
+                "valid_domain_ratio": result.get("validDomainRatio", result.get("valid_domain_ratio")),
+                "infeasible_peer_rows": result.get("infeasiblePeerRows", result.get("infeasible_peer_rows")),
+                "infeasible_peer_bins": result.get("infeasiblePeerBins", result.get("infeasible_peer_bins")),
                 "confidence": result.get("confidence"),
                 "observation_support_S": result.get("observation_support_S"),
                 "coverage_C": result.get("coverage_C"),
