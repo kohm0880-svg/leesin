@@ -10,7 +10,12 @@ from typing import Any
 
 import numpy as np
 
-from feasible_mask import compute_valid_bin_mask_for_axes, normalize_feasible_expressions, validate_feasible_expression
+from feasible_mask import (
+    compute_valid_bin_mask_for_axes,
+    normalize_feasible_expressions,
+    normalize_feasible_rules,
+    validate_feasible_expression,
+)
 from models import K_M, ExperimentConfig
 
 try:
@@ -415,8 +420,19 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         resolution=[axis["resolution"] for axis in normalized_axes],
         K_m=k_m,
     )
-    feasible_expressions = normalize_feasible_expressions(goal.get("feasibleDomainExpressions"))
     allowed_axes = [axis["name"] for axis in normalized_axes]
+    feasible_rules = normalize_feasible_rules(goal.get("feasibleDomainRules"), allowed_axes)
+    rule_expressions = [rule["expression"] for rule in feasible_rules if rule.get("enabled", True)]
+    if "feasibleDomainAdvancedExpressions" in goal:
+        advanced_expressions = normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions"))
+    else:
+        source_expressions = normalize_feasible_expressions(goal.get("feasibleDomainExpressions"))
+        if feasible_rules:
+            rule_expression_set = set(rule_expressions)
+            advanced_expressions = [expression for expression in source_expressions if expression not in rule_expression_set]
+        else:
+            advanced_expressions = source_expressions
+    feasible_expressions = rule_expressions + advanced_expressions
     for expression in feasible_expressions:
         try:
             validate_feasible_expression(expression, allowed_axes)
@@ -429,6 +445,8 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         "name": name,
         "K_m": k_m,
         "axes": normalized_axes,
+        "feasibleDomainRules": feasible_rules,
+        "feasibleDomainAdvancedExpressions": advanced_expressions,
         "feasibleDomainExpressions": feasible_expressions,
     }
 

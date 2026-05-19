@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import math
 from typing import Any
@@ -58,6 +59,8 @@ COMPARE_OPS = {
     ast.NotEq: np.not_equal,
 }
 
+GUI_RULE_OPERATORS = {">", ">=", "<", "<=", "==", "!="}
+
 
 def normalize_feasible_expressions(expressions: Any) -> list[str]:
     if not isinstance(expressions, list):
@@ -67,6 +70,88 @@ def normalize_feasible_expressions(expressions: Any) -> list[str]:
         expression = str(raw_expression or "").strip()
         if expression:
             normalized.append(expression)
+    return normalized
+
+
+def _format_number(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Numeric rule value is invalid: {value}") from exc
+    if not np.isfinite(numeric):
+        raise ValueError(f"Numeric rule value must be finite: {value}")
+    return format(numeric, ".12g")
+
+
+def compile_gui_feasible_rule(rule: dict[str, Any], allowed_axes: list[str]) -> str:
+    allowed = _allowed_axis_set(allowed_axes)
+    gui_spec = rule.get("guiSpec") if isinstance(rule.get("guiSpec"), dict) else {}
+    if str(gui_spec.get("type") or "conditional_range") != "conditional_range":
+        raise ValueError("Only conditional_range feasible GUI rules are supported.")
+    if_spec = gui_spec.get("if") if isinstance(gui_spec.get("if"), dict) else {}
+    then_spec = gui_spec.get("then") if isinstance(gui_spec.get("then"), dict) else {}
+    if_axis = str(if_spec.get("axis") or "").strip()
+    then_axis = str(then_spec.get("axis") or "").strip()
+    operator = str(if_spec.get("op") or "").strip()
+    if if_axis not in allowed:
+        raise ValueError(f"Unknown IF axis '{if_axis}' in feasible GUI rule.")
+    if then_axis not in allowed:
+        raise ValueError(f"Unknown THEN axis '{then_axis}' in feasible GUI rule.")
+    if operator not in GUI_RULE_OPERATORS:
+        raise ValueError(f"Unsupported IF operator '{operator}' in feasible GUI rule.")
+    if_value = _format_number(if_spec.get("value"))
+    min_value = _format_number(then_spec.get("min"))
+    max_value = _format_number(then_spec.get("max"))
+    if float(min_value) > float(max_value):
+        raise ValueError("THEN minimum must be less than or equal to maximum.")
+    expression = f"not ({if_axis} {operator} {if_value} and ({then_axis} < {min_value} or {then_axis} > {max_value}))"
+    validate_feasible_expression(expression, allowed_axes)
+    return expression
+
+
+def _rule_id_for_expression(expression: str) -> str:
+    digest = hashlib.sha1(expression.encode("utf-8")).hexdigest()[:12]
+    return f"rule_{digest}"
+
+
+def normalize_feasible_rules(rules: Any, allowed_axes: list[str]) -> list[dict[str, Any]]:
+    if not isinstance(rules, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for raw_rule in rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        source_type = str(raw_rule.get("sourceType") or "gui_conditional")
+        editable_mode = str(raw_rule.get("editableMode") or "gui")
+        if source_type != "gui_conditional" or editable_mode != "gui":
+            continue
+        expression = compile_gui_feasible_rule(raw_rule, allowed_axes)
+        gui_spec = raw_rule.get("guiSpec") if isinstance(raw_rule.get("guiSpec"), dict) else {}
+        if_spec = gui_spec.get("if") if isinstance(gui_spec.get("if"), dict) else {}
+        then_spec = gui_spec.get("then") if isinstance(gui_spec.get("then"), dict) else {}
+        enabled = bool(raw_rule.get("enabled", True))
+        normalized.append(
+            {
+                "id": str(raw_rule.get("id") or _rule_id_for_expression(expression)),
+                "sourceType": "gui_conditional",
+                "editableMode": "gui",
+                "guiSpec": {
+                    "type": "conditional_range",
+                    "if": {
+                        "axis": str(if_spec.get("axis") or "").strip(),
+                        "op": str(if_spec.get("op") or "").strip(),
+                        "value": float(if_spec.get("value")),
+                    },
+                    "then": {
+                        "axis": str(then_spec.get("axis") or "").strip(),
+                        "min": float(then_spec.get("min")),
+                        "max": float(then_spec.get("max")),
+                    },
+                },
+                "expression": expression,
+                "enabled": enabled,
+            }
+        )
     return normalized
 
 

@@ -76,6 +76,8 @@ Experiment Goals can include `feasibleDomainExpressions`, a list of advanced exp
 
 Expressions are parsed with a Python AST whitelist rather than `eval` or `exec`. Allowed syntax includes numeric constants, axis names, arithmetic operators, comparisons, boolean `and`/`or`/`not`, parentheses, and safe functions such as `abs`, `min`, `max`, `sqrt`, `log`, and `exp`. Attribute access, imports, subscripts, comprehensions, lambdas, assignments, and unknown axis names are rejected.
 
+The Goal Admin UI also includes a first-step IF-THEN Rule Builder. A GUI rule such as `IF temperature > 80 THEN pressure must be between 2 and 5` is compiled into `not (temperature > 80 and (pressure < 2 or pressure > 5))`. The builder is only a helper: Leesin still stores and executes the canonical `feasibleDomainExpressions` list. GUI rules are kept separately in `feasibleDomainRules` for editing, while direct manual rules are stored as `feasibleDomainAdvancedExpressions`. Expression-to-GUI reverse parsing, 2D drag masks, focused mask editors, priority rules, and OR combine modes are not implemented in this MVP.
+
 With a mask enabled:
 
 - `valid_bins` is the number of bins whose centers satisfy every expression.

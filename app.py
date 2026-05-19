@@ -21,6 +21,7 @@ import numpy as np
 
 from feasible_mask import (
     compute_valid_bin_mask_for_axes,
+    expression_axis_names,
     is_bin_key_feasible,
     normalize_feasible_expressions,
 )
@@ -73,12 +74,22 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
         axes = canonical_axis_order([axis for axis in goal["axes"] if normalize_axis_name(axis["name"]) in requested])
     if not axes:
         raise ValueError("분석에 포함할 Axis를 하나 이상 선택하세요.")
+    axis_name_set = {str(axis["name"]) for axis in axes}
+    feasible_expressions = []
+    for expression in normalize_feasible_expressions(goal.get("feasibleDomainExpressions")):
+        try:
+            if expression_axis_names(expression).issubset(axis_name_set):
+                feasible_expressions.append(expression)
+        except ValueError:
+            continue
     return {
         "id": goal["id"],
         "name": goal["name"],
         "K_m": float(goal.get("K_m", K_M)),
         "axes": axes,
-        "feasibleDomainExpressions": normalize_feasible_expressions(goal.get("feasibleDomainExpressions")),
+        "feasibleDomainRules": list(goal.get("feasibleDomainRules") or []),
+        "feasibleDomainAdvancedExpressions": normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions")),
+        "feasibleDomainExpressions": feasible_expressions,
     }
 
 

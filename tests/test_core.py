@@ -7,7 +7,12 @@ import numpy as np
 
 import app
 import storage
-from feasible_mask import compute_valid_bin_mask_for_axes, evaluate_feasible_expression_on_arrays, validate_feasible_expression
+from feasible_mask import (
+    compile_gui_feasible_rule,
+    compute_valid_bin_mask_for_axes,
+    evaluate_feasible_expression_on_arrays,
+    validate_feasible_expression,
+)
 from models import ExperimentConfig
 from stats_engine import DensityGridAnalyzer
 
@@ -454,6 +459,66 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(coverage["validBins"], 50)
         self.assertAlmostEqual(result.coverage_C, 1 / 50)
         self.assertTrue(result.feasible_mask_enabled)
+
+    def test_gui_feasible_rule_compiles_to_expression(self) -> None:
+        rule = {
+            "guiSpec": {
+                "type": "conditional_range",
+                "if": {"axis": "temperature", "op": ">", "value": 80},
+                "then": {"axis": "pressure", "min": 2, "max": 5},
+            }
+        }
+        expression = compile_gui_feasible_rule(rule, ["temperature", "pressure"])
+        self.assertEqual(expression, "not (temperature > 80 and (pressure < 2 or pressure > 5))")
+
+    def test_validate_goal_merges_enabled_gui_rules_and_advanced_expressions(self) -> None:
+        payload = goal(axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)])
+        payload["feasibleDomainRules"] = [
+            {
+                "id": "rule_test",
+                "sourceType": "gui_conditional",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {
+                    "type": "conditional_range",
+                    "if": {"axis": "temperature", "op": ">", "value": 80},
+                    "then": {"axis": "pressure", "min": 2, "max": 5},
+                },
+            }
+        ]
+        payload["feasibleDomainAdvancedExpressions"] = ["pressure >= 0"]
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(len(normalized["feasibleDomainRules"]), 1)
+        self.assertEqual(
+            normalized["feasibleDomainExpressions"],
+            ["not (temperature > 80 and (pressure < 2 or pressure > 5))", "pressure >= 0"],
+        )
+
+    def test_existing_feasible_expressions_without_rules_remain_advanced(self) -> None:
+        payload = goal(axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)])
+        payload["feasibleDomainExpressions"] = ["temperature <= 50"]
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(normalized["feasibleDomainRules"], [])
+        self.assertEqual(normalized["feasibleDomainAdvancedExpressions"], ["temperature <= 50"])
+        self.assertEqual(normalized["feasibleDomainExpressions"], ["temperature <= 50"])
+
+    def test_gui_rule_rejects_bad_range(self) -> None:
+        rule = {
+            "guiSpec": {
+                "type": "conditional_range",
+                "if": {"axis": "temperature", "op": ">", "value": 80},
+                "then": {"axis": "pressure", "min": 5, "max": 2},
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "minimum"):
+            compile_gui_feasible_rule(rule, ["temperature", "pressure"])
+
+    def test_rule_builder_ui_controls_are_present(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("Feasible Rule Builder", template)
+        self.assertIn("data-rule-convert", template)
+        self.assertIn("Convert to Advanced Expression", template)
+        self.assertIn("feasibleDomainAdvancedExpressions", template)
 
 
 if __name__ == "__main__":

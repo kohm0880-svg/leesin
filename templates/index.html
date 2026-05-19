@@ -121,12 +121,17 @@
     .admin-toolbar { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; align-items:end; }
     .axis-row { display:grid; grid-template-columns:1fr .65fr .7fr .7fr .7fr auto; gap:8px; align-items:end; }
     .axis-sliders { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; grid-column:1 / -1; }
+    .rule-builder-list { display:grid; gap:10px; margin-top:8px; }
+    .rule-builder-card { display:grid; gap:10px; border:1px solid var(--line); border-radius:8px; padding:10px; background:#fff; }
+    .rule-builder-row { display:grid; grid-template-columns:auto minmax(140px,1fr) 90px minmax(110px,.6fr) auto minmax(140px,1fr) minmax(110px,.6fr) minmax(110px,.6fr); gap:8px; align-items:end; }
+    .rule-expression-preview { font-family:Consolas, "Courier New", monospace; font-size:12px; background:#f7f9fb; border:1px solid var(--line); border-radius:8px; padding:8px; overflow:auto; }
     .tag { display:inline-flex; align-items:center; width:max-content; gap:6px; padding:4px 8px; border-radius:999px; background:#eef4fb; color:var(--blue); font-size:12px; font-weight:800; }
     .tag.warn { background:#fff1ee; color:var(--red); }
     @media (max-width:960px) {
       .topbar,.toolbar,.quick-nav-grid,.grid,.mapper-head,.mapping-row,.metrics,.score-grid,.admin-toolbar,.axis-row,.axis-sliders,.batch-grid { grid-template-columns:1fr; }
       .topbar { flex-direction:column; }
       .admin-token-controls { grid-template-columns:1fr; }
+      .rule-builder-row { grid-template-columns:1fr; }
       .cluster-card-head,.cluster-toolbar { display:grid; grid-template-columns:1fr; justify-content:stretch; }
       .cluster-toolbar label { min-width:0; }
       .score.hero strong { font-size:46px; }
@@ -259,8 +264,16 @@
           <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
         </div>
         <div>
-          <h3>Feasible Domain Expressions</h3>
-          <p class="small">한 줄에 expression 하나를 입력하세요. 모든 expression은 AND로 결합됩니다. Expression에서는 현재 Axis name을 그대로 사용하며, 허용 함수는 abs, min, max, sqrt, log, exp입니다.</p>
+          <h3>Feasible Rule Builder</h3>
+          <p class="small">GUI rule은 expression을 생성하는 보조 UI입니다. 내부 저장/계산은 enabled GUI rule expression과 Advanced Expression을 합친 feasibleDomainExpressions만 사용합니다.</p>
+          <div id="feasible-rule-list" class="rule-builder-list"></div>
+          <div class="row-actions">
+            <button class="secondary" id="feasible-rule-add" type="button">IF-THEN Rule 추가</button>
+          </div>
+        </div>
+        <div>
+          <h3>Advanced Expressions</h3>
+          <p class="small">한 줄에 expression 하나를 입력하세요. 모든 expression은 AND로 결합됩니다. GUI rule로 역변환하지 않습니다. Expression에서는 현재 Axis name을 그대로 사용하며, 허용 함수는 abs, min, max, sqrt, log, exp입니다.</p>
           <label>Advanced Expression Rules<textarea id="feasible-expression-input" spellcheck="false" placeholder="pressure <= 0.05 * temperature ** 2&#10;not (temperature > 80 and pressure < 2)"></textarea></label>
           <div class="row-actions">
             <button class="secondary" id="validate-feasible-expressions" type="button">Validate Expressions</button>
@@ -345,7 +358,7 @@
     const clone = value => JSON.parse(JSON.stringify(value));
     const goalById = id => state.goals.find(goal => goal.id === id) || null;
     const blankAxis = () => ({ name:'', unit:'', domainMin:0, domainMax:100, resolution:1 });
-    const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()], feasibleDomainExpressions:[] });
+    const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()], feasibleDomainRules:[], feasibleDomainAdvancedExpressions:[], feasibleDomainExpressions:[] });
     const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
     const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
     const coverageBasisLabel = value => value === 'row_level_bin_occupancy' ? 'row-level bin occupancy' : (value === 'cluster_vector_fallback' ? 'legacy fallback' : String(value || '-'));
@@ -1363,10 +1376,96 @@
         ${(preview.axisBins || []).map(item => `<div class="small">${escapeHtml(item.axis)}: ${item.occupiedBins}/${item.totalBins} bins · ${formatPercent(item.coverage,1)}</div>`).join('')}
       `;
     }
+    const feasibleRuleOperators = ['>','>=','<','<=','==','!='];
+    function numberExpressionLiteral(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? String(Number(numeric.toPrecision(12))) : '';
+    }
+    function compileFeasibleGuiRule(rule) {
+      const spec = rule?.guiSpec || {};
+      const ifSpec = spec.if || {};
+      const thenSpec = spec.then || {};
+      const ifAxis = String(ifSpec.axis || '').trim();
+      const thenAxis = String(thenSpec.axis || '').trim();
+      const op = feasibleRuleOperators.includes(ifSpec.op) ? ifSpec.op : '>';
+      const ifValue = numberExpressionLiteral(ifSpec.value);
+      const minValue = numberExpressionLiteral(thenSpec.min);
+      const maxValue = numberExpressionLiteral(thenSpec.max);
+      if (!ifAxis || !thenAxis || !ifValue || !minValue || !maxValue) return '';
+      return `not (${ifAxis} ${op} ${ifValue} and (${thenAxis} < ${minValue} or ${thenAxis} > ${maxValue}))`;
+    }
+    function defaultFeasibleRule(goal=state.draftGoal) {
+      const axes = goal?.axes || [];
+      const ifAxis = axes[0]?.name || '';
+      const thenAxis = axes[1]?.name || ifAxis;
+      const then = axes.find(axis => axis.name === thenAxis) || axes[0] || blankAxis();
+      const min = Number(then.domainMin ?? 0);
+      const max = Number(then.domainMax ?? 100);
+      return {
+        id:`rule_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        sourceType:'gui_conditional',
+        editableMode:'gui',
+        enabled:true,
+        guiSpec:{
+          type:'conditional_range',
+          if:{ axis:ifAxis, op:'>', value:Number(axes[0]?.domainMin ?? 0) },
+          then:{ axis:thenAxis, min, max },
+        },
+      };
+    }
+    function normalizedFeasibleRulesForUi(goal) {
+      return (goal?.feasibleDomainRules || []).filter(rule => rule?.editableMode !== 'advanced').map(rule => ({
+        ...rule,
+        enabled: rule.enabled !== false,
+        guiSpec:{
+          type:'conditional_range',
+          if:{ axis:rule.guiSpec?.if?.axis || goal?.axes?.[0]?.name || '', op:rule.guiSpec?.if?.op || '>', value:Number(rule.guiSpec?.if?.value ?? 0) },
+          then:{ axis:rule.guiSpec?.then?.axis || goal?.axes?.[1]?.name || goal?.axes?.[0]?.name || '', min:Number(rule.guiSpec?.then?.min ?? 0), max:Number(rule.guiSpec?.then?.max ?? 0) },
+        },
+        expression: rule.expression || compileFeasibleGuiRule(rule),
+      }));
+    }
+    function advancedExpressionsForGoal(goal) {
+      if (Array.isArray(goal?.feasibleDomainAdvancedExpressions)) return goal.feasibleDomainAdvancedExpressions;
+      const ruleExpressions = new Set((goal?.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleGuiRule(rule)).filter(Boolean));
+      return (goal?.feasibleDomainExpressions || []).filter(expression => !ruleExpressions.has(expression));
+    }
+    function renderFeasibleRuleBuilder() {
+      const goal = state.draftGoal || blankGoal();
+      const axes = goal.axes || [];
+      const axisOptions = axisName => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === axisName ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
+      const rules = normalizedFeasibleRulesForUi(goal);
+      $('feasible-rule-list').innerHTML = rules.length ? rules.map(rule => {
+        const expression = compileFeasibleGuiRule(rule);
+        const ifSpec = rule.guiSpec.if;
+        const thenSpec = rule.guiSpec.then;
+        const sameAxisWarning = ifSpec.axis && ifSpec.axis === thenSpec.axis ? '<span class="tag warn">IF와 THEN이 같은 axis입니다.</span>' : '';
+        return `<div class="rule-builder-card" data-feasible-rule="${escapeHtml(rule.id)}">
+          <div class="rule-builder-row">
+            <label class="axis-toggle"><input type="checkbox" data-rule-field="enabled" ${rule.enabled !== false ? 'checked' : ''}><span>enabled</span></label>
+            <label>IF axis<select data-rule-field="ifAxis">${axisOptions(ifSpec.axis)}</select></label>
+            <label>op<select data-rule-field="ifOp">${feasibleRuleOperators.map(op => `<option value="${escapeHtml(op)}" ${op === ifSpec.op ? 'selected' : ''}>${escapeHtml(op)}</option>`).join('')}</select></label>
+            <label>value<input data-rule-field="ifValue" type="number" step="any" value="${escapeHtml(ifSpec.value)}"></label>
+            <strong>THEN</strong>
+            <label>axis<select data-rule-field="thenAxis">${axisOptions(thenSpec.axis)}</select></label>
+            <label>min<input data-rule-field="thenMin" type="number" step="any" value="${escapeHtml(thenSpec.min)}"></label>
+            <label>max<input data-rule-field="thenMax" type="number" step="any" value="${escapeHtml(thenSpec.max)}"></label>
+          </div>
+          <div class="rule-expression-preview" data-rule-expression="${escapeHtml(rule.id)}">Generated expression: ${escapeHtml(expression || 'incomplete rule')}</div>
+          <div class="row-actions">
+            ${sameAxisWarning}
+            <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Advanced Expression</button>
+            <button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button>
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty">IF-THEN GUI rule이 없습니다. Advanced Expression만 사용할 수도 있습니다.</div>';
+    }
     function renderAdmin() {
       state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
+      state.draftGoal.feasibleDomainRules = normalizedFeasibleRulesForUi(state.draftGoal);
+      state.draftGoal.feasibleDomainAdvancedExpressions = advancedExpressionsForGoal(state.draftGoal);
       $('admin-goal-name').value = state.draftGoal.name || '';
-      $('feasible-expression-input').value = (state.draftGoal.feasibleDomainExpressions || []).join('\n');
+      $('feasible-expression-input').value = (state.draftGoal.feasibleDomainAdvancedExpressions || []).join('\n');
       $('axis-editor').innerHTML = (state.draftGoal.axes || []).map((axis, index) => {
         const res = Math.max(Math.abs(Number(axis.resolution) || 1), 0.000001);
         const min = Number(axis.domainMin ?? 0); const max = Number(axis.domainMax ?? 100);
@@ -1386,6 +1485,7 @@
           </div>
         </div>`;
       }).join('');
+      renderFeasibleRuleBuilder();
       renderGoalSelects();
       renderGoalPreview();
       renderClusterList();
@@ -1576,11 +1676,41 @@
     }
 
     const feasibleExpressionsFromText = value => String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    function readFeasibleRulesFromBuilder() {
+      const cards = Array.from(document.querySelectorAll('[data-feasible-rule]'));
+      return cards.map(card => {
+        const valueOf = field => card.querySelector(`[data-rule-field="${field}"]`)?.value;
+        const rule = {
+          id: card.dataset.feasibleRule || `rule_${Date.now()}`,
+          sourceType:'gui_conditional',
+          editableMode:'gui',
+          enabled: Boolean(card.querySelector('[data-rule-field="enabled"]')?.checked),
+          guiSpec:{
+            type:'conditional_range',
+            if:{ axis:valueOf('ifAxis') || '', op:valueOf('ifOp') || '>', value:Number(valueOf('ifValue')) },
+            then:{ axis:valueOf('thenAxis') || '', min:Number(valueOf('thenMin')), max:Number(valueOf('thenMax')) },
+          },
+        };
+        return { ...rule, expression: compileFeasibleGuiRule(rule) };
+      });
+    }
+    function refreshFeasibleRulePreviews() {
+      readFeasibleRulesFromBuilder().forEach(rule => {
+        const node = document.querySelector(`[data-rule-expression="${CSS.escape(rule.id)}"]`);
+        if (!node) return;
+        node.textContent = `Generated expression: ${rule.expression || 'incomplete rule'}`;
+      });
+    }
     function syncDraftFromAdminForm() {
       state.draftGoal = state.draftGoal || blankGoal();
       state.draftGoal.name = $('admin-goal-name').value.trim();
       state.draftGoal.K_m = Number(state.draftGoal.K_m || 10);
-      state.draftGoal.feasibleDomainExpressions = feasibleExpressionsFromText($('feasible-expression-input')?.value || '');
+      state.draftGoal.feasibleDomainRules = readFeasibleRulesFromBuilder();
+      state.draftGoal.feasibleDomainAdvancedExpressions = feasibleExpressionsFromText($('feasible-expression-input')?.value || '');
+      state.draftGoal.feasibleDomainExpressions = [
+        ...state.draftGoal.feasibleDomainRules.filter(rule => rule.enabled !== false).map(rule => rule.expression).filter(Boolean),
+        ...state.draftGoal.feasibleDomainAdvancedExpressions,
+      ];
     }
     async function validateFeasibleExpressions(button=$('validate-feasible-expressions')) {
       syncDraftFromAdminForm();
@@ -1755,7 +1885,41 @@
       $('admin-goal-select').addEventListener('change', event => { state.draftGoal=clone(goalById(event.target.value) || blankGoal()); renderAdmin(); });
       $('admin-new-goal').addEventListener('click', () => { state.draftGoal=blankGoal(); renderAdmin(); });
       $('admin-goal-name').addEventListener('input', event => { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.name=event.target.value; });
-      $('feasible-expression-input').addEventListener('input', event => { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.feasibleDomainExpressions=feasibleExpressionsFromText(event.target.value); renderGoalPreview(); });
+      $('feasible-expression-input').addEventListener('input', event => {
+        state.draftGoal=state.draftGoal || blankGoal();
+        state.draftGoal.feasibleDomainAdvancedExpressions=feasibleExpressionsFromText(event.target.value);
+        state.draftGoal.feasibleDomainExpressions=[
+          ...(state.draftGoal.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleGuiRule(rule)).filter(Boolean),
+          ...state.draftGoal.feasibleDomainAdvancedExpressions,
+        ];
+        renderGoalPreview();
+      });
+      $('feasible-rule-add').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.feasibleDomainRules.push(defaultFeasibleRule(state.draftGoal)); renderAdmin(); });
+      $('feasible-rule-list').addEventListener('input', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); refreshFeasibleRulePreviews(); renderGoalPreview(); });
+      $('feasible-rule-list').addEventListener('change', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); renderFeasibleRuleBuilder(); renderGoalPreview(); });
+      $('feasible-rule-list').addEventListener('click', event => {
+        const convertId = event.target.dataset.ruleConvert;
+        const removeId = event.target.dataset.ruleRemove;
+        if (!convertId && !removeId) return;
+        syncDraftFromAdminForm();
+        if (convertId) {
+          const rule = state.draftGoal.feasibleDomainRules.find(item => item.id === convertId);
+          const expression = rule?.expression || compileFeasibleGuiRule(rule);
+          if (expression && confirm('이 규칙을 Advanced Expression으로 전환하면 더 이상 IF-THEN Rule Builder로 편집할 수 없습니다. 계속하시겠습니까?')) {
+            state.draftGoal.feasibleDomainRules = state.draftGoal.feasibleDomainRules.filter(item => item.id !== convertId);
+            state.draftGoal.feasibleDomainAdvancedExpressions = [...(state.draftGoal.feasibleDomainAdvancedExpressions || []), expression];
+            state.draftGoal.feasibleDomainExpressions = [
+              ...state.draftGoal.feasibleDomainRules.filter(rule => rule.enabled !== false).map(rule => rule.expression).filter(Boolean),
+              ...state.draftGoal.feasibleDomainAdvancedExpressions,
+            ];
+            renderAdmin();
+          }
+        }
+        if (removeId) {
+          state.draftGoal.feasibleDomainRules = state.draftGoal.feasibleDomainRules.filter(item => item.id !== removeId);
+          renderAdmin();
+        }
+      });
       $('validate-feasible-expressions').addEventListener('click', event => validateFeasibleExpressions(event.currentTarget));
       $('axis-add-button').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
       $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); renderGoalPreview(); });
