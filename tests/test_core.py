@@ -748,6 +748,8 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("sourceType:'focused_2d_mask'", template)
         self.assertIn("data-focused-edit", template)
         self.assertIn("data-focused-convert", template)
+        self.assertIn('id="focused-mask-x-axis"', template)
+        self.assertIn('id="focused-mask-y-axis"', template)
         self.assertIn('id="focused-mask-add"', template)
         self.assertIn('id="focused-mask-save"', template)
         self.assertIn("data-projection-card", template)

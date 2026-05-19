@@ -339,7 +339,16 @@
       } catch (_error) { return {}; }
     }
     function writeStoredFocusedMaskToolSettings(settings) {
-      try { localStorage.setItem(FOCUSED_MASK_TOOL_STORAGE_KEY, JSON.stringify(settings || {})); }
+      try {
+        const payload = { ...(settings || {}) };
+        if (Array.isArray(payload.activePair)) {
+          payload.xAxis = payload.activePair[0] || payload.xAxis || '';
+          payload.yAxis = payload.activePair[1] || payload.yAxis || '';
+        } else if (payload.xAxis && payload.yAxis) {
+          payload.activePair = [payload.xAxis, payload.yAxis];
+        }
+        localStorage.setItem(FOCUSED_MASK_TOOL_STORAGE_KEY, JSON.stringify(payload));
+      }
       catch (_error) {}
     }
     const state = {
@@ -826,10 +835,15 @@
     function ensureFocusedMaskTool(explorer) {
       const defaults = focusedMaskDefaultTool(explorer);
       const tool = { ...defaults, ...(state.focusedMaskTool || {}) };
+      if (!Array.isArray(tool.activePair) && tool.xAxis && tool.yAxis) {
+        tool.activePair = [tool.xAxis, tool.yAxis];
+      }
       const pairKey = Array.isArray(tool.activePair) ? projectionKey(tool.activePair[0], tool.activePair[1]) : '';
       const validPair = (explorer?.axisPairs || []).some(pair => projectionKey(pair[0], pair[1]) === pairKey);
       if (!validPair) tool.activePair = defaults.activePair;
       const [xAxis, yAxis] = tool.activePair || defaults.activePair;
+      tool.xAxis = xAxis;
+      tool.yAxis = yAxis;
       const xRange = axisRangeFromMeta(explorer, xAxis);
       const yRange = axisRangeFromMeta(explorer, yAxis);
       if (!Number.isFinite(Number(tool.xMin))) tool.xMin = xRange.min;
@@ -883,6 +897,7 @@
         const spec = rule.guiSpec || {};
         return `<div class="focused-rule-item ${rule.enabled === false ? 'disabled' : ''}" data-focused-rule="${escapeHtml(rule.id)}">
           <label class="axis-toggle"><input type="checkbox" data-focused-enabled="${escapeHtml(rule.id)}" ${rule.enabled !== false ? 'checked' : ''}><span>enabled</span></label>
+          <span class="tag">focused_2d_mask</span>
           <div class="small">${escapeHtml(spec.xAxis)} × ${escapeHtml(spec.yAxis)} · ${escapeHtml(spec.xMin)}~${escapeHtml(spec.xMax)} / ${escapeHtml(spec.yMin)}~${escapeHtml(spec.yMax)}</div>
           <div class="focused-expression">${escapeHtml(expression || 'incomplete rule')}</div>
           <div class="row-actions">
@@ -900,6 +915,8 @@
         const key = projectionKey(pair[0], pair[1]);
         return `<option value="${escapeHtml(key)}" ${key === projectionKey(xAxis, yAxis) ? 'selected' : ''}>${escapeHtml(pair[0])} × ${escapeHtml(pair[1])}</option>`;
       }).join('');
+      const xAxisOptions = (explorer.axisOrder || []).map(axisName => `<option value="${escapeHtml(axisName)}" ${axisName === xAxis ? 'selected' : ''} ${axisName === yAxis ? 'disabled' : ''}>${escapeHtml(axisName)}</option>`).join('');
+      const yAxisOptions = (explorer.axisOrder || []).map(axisName => `<option value="${escapeHtml(axisName)}" ${axisName === yAxis ? 'selected' : ''} ${axisName === xAxis ? 'disabled' : ''}>${escapeHtml(axisName)}</option>`).join('');
       const remainingAxes = (explorer.axisOrder || []).filter(axisName => axisName !== xAxis && axisName !== yAxis);
       const draftRule = focusedMaskRuleFromTool(explorer, state.focusedMaskEditingRuleId || null);
       const expression = draftRule.expression || 'Select different axes and valid numeric ranges.';
@@ -910,6 +927,10 @@
         </div>
         <label>Mask Mode<select id="focused-mask-mode"><option value="exclude" selected>Exclude selected region from feasible domain</option><option value="include" disabled>Include mode later</option></select></label>
         <label>Active Projection Pair<select id="focused-mask-pair">${pairOptions}</select></label>
+        <div class="focused-mask-fields">
+          <label>X Axis<select id="focused-mask-x-axis">${xAxisOptions}</select></label>
+          <label>Y Axis<select id="focused-mask-y-axis">${yAxisOptions}</select></label>
+        </div>
         <div class="small" id="focused-active-pair">Active: ${escapeHtml(xAxis)} × ${escapeHtml(yAxis)}</div>
         <div>
           <strong>Selected 2D Range</strong>
@@ -1271,8 +1292,13 @@
       if (!panel) return ensureFocusedMaskTool(explorer);
       const pairValue = panel.querySelector('#focused-mask-pair')?.value || '';
       const pair = pairValue.split('|');
+      const selectedX = panel.querySelector('#focused-mask-x-axis')?.value || '';
+      const selectedY = panel.querySelector('#focused-mask-y-axis')?.value || '';
       const tool = ensureFocusedMaskTool(explorer);
-      if (pair.length === 2) tool.activePair = pair;
+      if (selectedX && selectedY && selectedX !== selectedY) tool.activePair = [selectedX, selectedY];
+      else if (pair.length === 2) tool.activePair = pair;
+      tool.xAxis = tool.activePair?.[0] || '';
+      tool.yAxis = tool.activePair?.[1] || '';
       ['xMin','xMax','yMin','yMax'].forEach(field => {
         const input = panel.querySelector(`[data-focused-field="${field}"]`);
         if (input) tool[field] = Number(input.value);
@@ -1428,6 +1454,8 @@
       if (!xAxis || !yAxis) return;
       const tool = ensureFocusedMaskTool(explorer);
       tool.activePair = [xAxis, yAxis];
+      tool.xAxis = xAxis;
+      tool.yAxis = yAxis;
       state.focusedMaskTool = tool;
       writeStoredFocusedMaskToolSettings(tool);
       if (shouldRerender) rerenderFocusedMaskTool(explorer);
@@ -1436,6 +1464,14 @@
       const panel = $('focused-mask-tool');
       if (!panel || !explorer) return;
       panel.querySelector('#focused-mask-pair')?.addEventListener('change', () => {
+        const pair = panel.querySelector('#focused-mask-pair')?.value.split('|') || [];
+        if (pair.length === 2) setFocusedToolActivePair(explorer, pair[0], pair[1], true);
+      });
+      panel.querySelector('#focused-mask-x-axis')?.addEventListener('change', () => {
+        readFocusedMaskToolFromPanel(explorer);
+        rerenderFocusedMaskTool(explorer);
+      });
+      panel.querySelector('#focused-mask-y-axis')?.addEventListener('change', () => {
         readFocusedMaskToolFromPanel(explorer);
         rerenderFocusedMaskTool(explorer);
       });
