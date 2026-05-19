@@ -847,15 +847,15 @@ def delete_peer_cluster(cluster_id: str) -> bool:
     return True
 
 
-def list_cluster_summaries() -> list[dict[str, Any]]:
-    return [cluster_summary(cluster) for cluster in load_cluster_store()]
+def list_cluster_summaries(include_density: bool = False) -> list[dict[str, Any]]:
+    return [cluster_summary(cluster, include_density=include_density) for cluster in load_cluster_store()]
 
 
-def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
+def cluster_summary(cluster: dict[str, Any], include_density: bool = False) -> dict[str, Any]:
     bin_occupancy = normalize_int_count_map(cluster.get("binOccupancy"))
     axis_bin_occupancy = normalize_axis_bin_occupancy(cluster.get("axisBinOccupancy"), list(cluster.get("axisNames") or []))
     bin_meta = normalize_bin_occupancy_meta(cluster.get("binOccupancyMeta"), int(cluster.get("rowCount", 0) or 0), bin_occupancy)
-    return {
+    summary = {
         "id": str(cluster.get("id", "")),
         "goalId": str(cluster.get("goalId", "")),
         "goalName": str(cluster.get("goalName", "")),
@@ -868,9 +868,6 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "valuesVariance": [None if value is None else round(float(value), 6) for value in cluster.get("valuesVariance", [])],
         "valuesStd": [None if value is None else round(float(value), 6) for value in cluster.get("valuesStd", [])],
         "rowCount": int(cluster.get("rowCount", 0) or 0),
-        "binOccupancy": bin_occupancy,
-        "axisBinOccupancy": axis_bin_occupancy,
-        "binOccupancyMeta": bin_meta,
         "binOccupancyHash": str(cluster.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy)),
         "hasRowLevelBinOccupancy": bool(bin_occupancy),
         "rowLevelValidCount": int(bin_meta.get("validMultidimensionalRowCount") or 0),
@@ -888,7 +885,6 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "sourceBatchId": cluster.get("sourceBatchId"),
         "summaryMethod": str(cluster.get("summaryMethod", "mean")),
         "fingerprint": str(cluster.get("fingerprint", "")),
-        "analysisAtUpload": normalize_analysis_snapshot(cluster.get("analysisAtUpload")),
         "peerGroupSizeAtUpload": cluster.get("peerGroupSizeAtUpload"),
         "engineAtUpload": cluster.get("engineAtUpload"),
         "specificityScoreAtUpload": cluster.get("specificityScoreAtUpload"),
@@ -913,3 +909,15 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "maskedBinsAtUpload": cluster.get("maskedBinsAtUpload"),
         "occupiedBinsAtUpload": cluster.get("occupiedBinsAtUpload"),
     }
+    analysis = normalize_analysis_snapshot(cluster.get("analysisAtUpload"))
+    summary["feasibleMaskEnabledAtUpload"] = bool(analysis.get("feasibleMaskEnabled"))
+    if include_density:
+        summary.update(
+            {
+                "binOccupancy": bin_occupancy,
+                "axisBinOccupancy": axis_bin_occupancy,
+                "binOccupancyMeta": bin_meta,
+                "analysisAtUpload": analysis,
+            }
+        )
+    return summary

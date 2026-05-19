@@ -1757,8 +1757,42 @@
       updateButtons();
     }
 
+    function applyBootstrapData(data) {
+      state.goals = data.goals || [];
+      state.clusters = data.clusters || [];
+      state.peerCounts = data.peerCounts || {};
+      state.peerSubsetCounts = data.peerSubsetCounts || {};
+      state.goalBinPreview = data.goalBinPreview || {};
+      state.adminAllowed = Boolean(data.adminAllowed);
+      state.adminAuthRequired = Boolean(data.adminAuthRequired);
+      if (!state.selectedGoalId || !goalById(state.selectedGoalId)) {
+        state.selectedGoalId = state.goals?.[0]?.id || '';
+      }
+      const goal = goalById(state.selectedGoalId);
+      state.draftGoal = clone(goal || blankGoal());
+      resetSelection(goal, true);
+    }
+
+    async function loadBootstrapData() {
+      try {
+        const response = await fetch('/api/bootstrap', { headers:{'Accept':'application/json'} });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Bootstrap load failed');
+        applyBootstrapData(data);
+        renderAll();
+        updateAdminTokenPanel();
+      } catch (error) {
+        setError(error.message || 'Bootstrap load failed');
+      }
+    }
+
     function computeGoalPreview(goal) {
       if (!goal) return null;
+      const serverPreview = state.goalBinPreview?.[goal.id];
+      if (serverPreview) {
+        const expressionCount = (goal.feasibleDomainExpressions || []).filter(Boolean).length;
+        return { ...serverPreview, feasibleExpressionCount: expressionCount };
+      }
       const axes = goal.axes || [];
       const wantedSignature = axisSubsetKey(axes.map(axis => axis.name));
       const sameGoal = (state.clusters || []).filter(cluster => cluster.goalId === goal.id);
@@ -2477,6 +2511,7 @@
       state.selectedAxes = goal ? Object.fromEntries(goal.axes.map(axis => [axis.name, true])) : {};
       $('admin-token-input').value = state.adminToken || '';
       renderAll(); bindEvents(); updateAdminTokenPanel(); showView('analysis-view');
+      loadBootstrapData();
     }
     init();
   </script>

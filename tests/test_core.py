@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import unittest
 from unittest.mock import patch
 
@@ -43,6 +45,33 @@ class DensityGridBehaviorTests(unittest.TestCase):
         np.testing.assert_allclose(vector, np.array([2.0, 12.0]))
         self.assertEqual(meta["bin_occupancy_meta"]["validMultidimensionalRowCount"], 2)
         self.assertEqual(sum(meta["bin_occupancy"].values()), 2)
+
+    def test_render_page_uses_lightweight_bootstrap_without_storage_load(self) -> None:
+        with (
+            patch("app.load_goal_store", side_effect=AssertionError("GET / must not load goals")),
+            patch("app.load_cluster_store", side_effect=AssertionError("GET / must not load clusters")),
+        ):
+            html = app.render_page(admin_allowed=False)
+        match = re.search(r"const bootstrap = (.*?);", html)
+        self.assertIsNotNone(match)
+        payload = json.loads(match.group(1))
+        self.assertTrue(payload["deferBootstrap"])
+        self.assertEqual(payload["goals"], [])
+        self.assertEqual(payload["clusters"], [])
+
+    def test_cluster_summary_omits_heavy_density_payload_by_default(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        record = record_from_rows(selected_goal, [{"x": "1"}, {"x": "2"}], "record_a")
+        record["analysisAtUpload"] = {"specificityScore": 0.2, "feasibleMaskEnabled": True}
+        with patch("storage.load_cluster_store", return_value=[record]):
+            summary = storage.list_cluster_summaries()[0]
+        self.assertNotIn("binOccupancy", summary)
+        self.assertNotIn("axisBinOccupancy", summary)
+        self.assertNotIn("binOccupancyMeta", summary)
+        self.assertNotIn("analysisAtUpload", summary)
+        self.assertNotIn("rowLevelVectors", summary)
+        self.assertEqual(summary["rowLevelVectorCount"], 2)
+        self.assertTrue(summary["feasibleMaskEnabledAtUpload"])
 
     def test_unseen_peer_bin_increases_unseen_bin_rate(self) -> None:
         analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))

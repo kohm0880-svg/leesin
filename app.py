@@ -2259,9 +2259,37 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
     }
 
 
+def build_shell_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
+    admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
+    return {
+        "adminAllowed": admin_allowed,
+        "adminAuthRequired": admin_auth_required,
+        "goals": [],
+        "clusters": [],
+        "peerCounts": {},
+        "peerSubsetCounts": {},
+        "goalBinPreview": {},
+        "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
+        "deferBootstrap": True,
+        "storage": {
+            "storeDir": storage_label(STORE_DIR),
+            "goalStoreFile": storage_label(GOAL_STORE_PATH),
+            "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
+            "clusterCount": 0,
+            "savedItems": ["Experiment Goal 설정", "selected-axis row-level sanitized numeric vectors", "비식별 mean vector 호환 필드", "row-level bin count summary"],
+            "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
+        },
+        "domainDefinitions": {
+            "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
+            "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
+            "K_m": "K_m is currently reused as K_density for Observation Support.",
+        },
+    }
+
+
 def render_page(admin_allowed: bool) -> str:
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    bootstrap = json.dumps(build_bootstrap_payload(admin_allowed), ensure_ascii=False)
+    bootstrap = json.dumps(build_shell_bootstrap_payload(admin_allowed), ensure_ascii=False)
     return template.replace("__BOOTSTRAP__", bootstrap)
 
 
@@ -2284,6 +2312,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/bootstrap":
             self._send_json(build_bootstrap_payload(admin_allowed=self._admin_allowed()))
+            return
+        if parsed.path == "/healthz":
+            self._send_json({"ok": True})
             return
         if parsed.path == "/health":
             self._send_json({"status": "ok"})
@@ -2392,22 +2423,35 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _send_html(self, html: str) -> None:
         data = html.encode("utf-8")
+        size = len(data)
+        if size >= 1_000_000:
+            print(f"Large HTML response: {size} bytes. Consider lazy loading.")
+        else:
+            print(f"HTML response size: {size} bytes.")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self.send_header("Content-Length", str(size))
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format % args}")
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    # TODO: This app currently uses BaseHTTPRequestHandler rather than a WSGI app.
+    # Add a WSGI adapter before switching a Render start command to gunicorn.
     init_database()
     server = ThreadingHTTPServer((host, port), AppHandler)
     print(f"Serving Leesin data quality certification at http://{host}:{port}")
