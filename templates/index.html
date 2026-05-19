@@ -943,7 +943,8 @@
           <div class="focused-expression" id="focused-mask-expression">${escapeHtml(expression)}</div>
         </div>
         <div class="row-actions">
-          <button class="primary" id="focused-mask-add" type="button">${state.focusedMaskEditingRuleId ? 'Save Changes' : 'Add Mask Rule'}</button>
+          <button class="primary" id="focused-mask-add" type="button">Add Mask Rule</button>
+          <button class="secondary" id="focused-mask-save" type="button" ${state.focusedMaskEditingRuleId ? '' : 'disabled'}>Save Changes</button>
           <button class="ghost" id="focused-mask-reset" type="button">Reset Tool Settings</button>
         </div>
         <div>
@@ -1335,12 +1336,18 @@
         updateButtons();
       }
     }
-    async function upsertFocusedMaskRule(button=null) {
+    async function upsertFocusedMaskRule(button=null, options={}) {
       const explorer = state.projectionExplorer;
       const goal = clone(currentReportGoal());
       if (!explorer || !goal) return;
+      const forceNew = Boolean(options.forceNew);
+      const ruleId = forceNew ? null : (state.focusedMaskEditingRuleId || null);
+      if (!forceNew && !ruleId) {
+        setError('편집할 Focused Mask rule을 먼저 선택하세요.');
+        return;
+      }
       readFocusedMaskToolFromPanel(explorer);
-      const rule = focusedMaskRuleFromTool(explorer, state.focusedMaskEditingRuleId || null, true);
+      const rule = focusedMaskRuleFromTool(explorer, ruleId, true);
       if (!rule.expression) { setError('Focused Mask rule range is incomplete.'); return; }
       goal.feasibleDomainRules = normalizedFeasibleRulesForUi(goal);
       const index = goal.feasibleDomainRules.findIndex(item => item.id === rule.id);
@@ -1352,7 +1359,7 @@
         ...goal.feasibleDomainAdvancedExpressions,
       ];
       state.focusedMaskEditingRuleId = null;
-      await saveGoalPayloadFromProjection(goal, 'Focused Mask rule이 Goal에 저장되었습니다. 새 mask를 반영하려면 다시 분석하세요.', button);
+      await saveGoalPayloadFromProjection(goal, forceNew ? 'Focused Mask rule이 Goal에 추가되었습니다. 새 mask를 반영하려면 다시 분석하세요.' : 'Focused Mask rule 변경사항이 저장되었습니다. 새 mask를 반영하려면 다시 분석하세요.', button);
     }
     async function updateFocusedMaskRule(ruleId, updater, successMessage, button=null) {
       const goal = clone(currentReportGoal());
@@ -1417,6 +1424,14 @@
       writeStoredFocusedMaskToolSettings(tool);
       rerenderFocusedMaskTool(explorer);
     }
+    function setFocusedToolActivePair(explorer, xAxis, yAxis, shouldRerender=true) {
+      if (!xAxis || !yAxis) return;
+      const tool = ensureFocusedMaskTool(explorer);
+      tool.activePair = [xAxis, yAxis];
+      state.focusedMaskTool = tool;
+      writeStoredFocusedMaskToolSettings(tool);
+      if (shouldRerender) rerenderFocusedMaskTool(explorer);
+    }
     function hydrateFocusedMaskTool(explorer) {
       const panel = $('focused-mask-tool');
       if (!panel || !explorer) return;
@@ -1432,7 +1447,8 @@
           else refreshFocusedMaskExpressionPreview(explorer);
         });
       });
-      panel.querySelector('#focused-mask-add')?.addEventListener('click', event => upsertFocusedMaskRule(event.currentTarget));
+      panel.querySelector('#focused-mask-add')?.addEventListener('click', event => upsertFocusedMaskRule(event.currentTarget, { forceNew:true }));
+      panel.querySelector('#focused-mask-save')?.addEventListener('click', event => upsertFocusedMaskRule(event.currentTarget, { forceNew:false }));
       panel.querySelector('#focused-mask-reset')?.addEventListener('click', () => resetFocusedMaskTool(explorer));
       panel.querySelectorAll('[data-focused-edit]').forEach(button => button.addEventListener('click', () => loadFocusedRuleIntoTool(button.dataset.focusedEdit)));
       panel.querySelectorAll('[data-focused-enabled]').forEach(input => input.addEventListener('change', event => {
@@ -1501,6 +1517,14 @@
           scheduleGridPreview();
         });
       });
+      root.querySelectorAll('[data-projection-card]').forEach(card => {
+        card.addEventListener('click', event => {
+          if (event.target.closest('canvas,button,input,select,textarea')) return;
+          const canvas = card.querySelector('canvas[data-pair-key]');
+          if (!canvas) return;
+          setFocusedToolActivePair(explorer, canvas.dataset.xAxis, canvas.dataset.yAxis, true);
+        });
+      });
       root.querySelectorAll('canvas[data-pair-key]').forEach(canvas => {
         canvas.addEventListener('wheel', event => {
           if (!event.ctrlKey) return;
@@ -1524,10 +1548,7 @@
           const key = canvas.dataset.pairKey;
           const xAxis = canvas.dataset.xAxis;
           const yAxis = canvas.dataset.yAxis;
-          const tool = ensureFocusedMaskTool(explorer);
-          tool.activePair = [xAxis, yAxis];
-          state.focusedMaskTool = tool;
-          writeStoredFocusedMaskToolSettings(tool);
+          setFocusedToolActivePair(explorer, xAxis, yAxis, false);
           const zoomState = projectionZoomState(key);
           const startBin = canvasBinFromEvent(canvas, event);
           state.projectionDrag = event.altKey
@@ -1577,10 +1598,7 @@
           if (!bin) return;
           const xAxis = canvas.dataset.xAxis;
           const yAxis = canvas.dataset.yAxis;
-          const tool = ensureFocusedMaskTool(explorer);
-          tool.activePair = [xAxis, yAxis];
-          state.focusedMaskTool = tool;
-          writeStoredFocusedMaskToolSettings(tool);
+          setFocusedToolActivePair(explorer, xAxis, yAxis, false);
           const subset = filterProjectionTuples(explorer, xAxis, yAxis, bin.xBin, bin.yBin);
           state.projectionSubsetTuples = subset;
           state.projectionSelection = {

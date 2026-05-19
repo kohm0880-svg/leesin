@@ -748,6 +748,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("sourceType:'focused_2d_mask'", template)
         self.assertIn("data-focused-edit", template)
         self.assertIn("data-focused-convert", template)
+        self.assertIn('id="focused-mask-add"', template)
+        self.assertIn('id="focused-mask-save"', template)
+        self.assertIn("data-projection-card", template)
+        self.assertIn("setFocusedToolActivePair", template)
 
     def test_filter_bin_counts_by_feasible_domain_reports_exclusions(self) -> None:
         axes = [axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
