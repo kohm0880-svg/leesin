@@ -278,6 +278,7 @@
         <div>
           <h3>Feasible Rule Builder</h3>
           <p class="small">GUI rule은 expression을 생성하는 보조 UI입니다. 내부 저장/계산은 enabled GUI rule expression과 Advanced Expression을 합친 feasibleDomainExpressions만 사용합니다.</p>
+          <div id="focused-mask-admin-builder"></div>
           <div id="feasible-rule-list" class="rule-builder-list"></div>
           <div class="row-actions">
             <button class="secondary" id="feasible-rule-add" type="button">IF-THEN Rule 추가</button>
@@ -381,6 +382,7 @@
       projectionDrag: null,
       focusedMaskTool: readStoredFocusedMaskToolSettings(),
       focusedMaskEditingRuleId: null,
+      adminFocusedMaskBuilder: null,
       gridPreviewMetrics: null,
       gridPreviewTimer: null,
       gridPreviewBusy: false,
@@ -1929,6 +1931,88 @@
         },
       };
     }
+    function axisByName(goal, axisName) {
+      return (goal?.axes || []).find(axis => axis.name === axisName) || null;
+    }
+    function axisDomainRange(axis) {
+      return {
+        min:Number(axis?.domainMin ?? 0),
+        max:Number(axis?.domainMax ?? 100),
+      };
+    }
+    function defaultAdminFocusedMaskBuilder(goal=state.draftGoal) {
+      const axes = goal?.axes || [];
+      const xAxis = axes[0]?.name || '';
+      const yAxis = axes[1]?.name || '';
+      const xRange = axisDomainRange(axes[0]);
+      const yRange = axisDomainRange(axes[1]);
+      const scope = {};
+      axes.forEach(axis => { scope[axis.name] = { mode:'all' }; });
+      return {
+        editingRuleId:null,
+        xAxis,
+        yAxis,
+        xMin:xRange.min,
+        xMax:xRange.max,
+        yMin:yRange.min,
+        yMax:yRange.max,
+        scope,
+      };
+    }
+    function ensureAdminFocusedMaskBuilder(goal=state.draftGoal) {
+      const axes = goal?.axes || [];
+      const names = axes.map(axis => axis.name).filter(Boolean);
+      const defaults = defaultAdminFocusedMaskBuilder(goal);
+      const builder = { ...defaults, ...(state.adminFocusedMaskBuilder || {}) };
+      if (!names.includes(builder.xAxis)) builder.xAxis = defaults.xAxis;
+      if (!names.includes(builder.yAxis) || builder.yAxis === builder.xAxis) {
+        builder.yAxis = names.find(name => name !== builder.xAxis) || defaults.yAxis;
+      }
+      const xRange = axisDomainRange(axisByName(goal, builder.xAxis));
+      const yRange = axisDomainRange(axisByName(goal, builder.yAxis));
+      if (!Number.isFinite(Number(builder.xMin))) builder.xMin = xRange.min;
+      if (!Number.isFinite(Number(builder.xMax))) builder.xMax = xRange.max;
+      if (!Number.isFinite(Number(builder.yMin))) builder.yMin = yRange.min;
+      if (!Number.isFinite(Number(builder.yMax))) builder.yMax = yRange.max;
+      builder.scope = builder.scope || {};
+      axes.forEach(axis => {
+        const current = builder.scope[axis.name] || { mode:'all' };
+        const range = axisDomainRange(axis);
+        builder.scope[axis.name] = current.mode === 'range'
+          ? { mode:'range', min:Number(current.min ?? range.min), max:Number(current.max ?? range.max) }
+          : { mode:'all' };
+      });
+      state.adminFocusedMaskBuilder = builder;
+      return builder;
+    }
+    function adminFocusedMaskRuleFromBuilder(goal=state.draftGoal, id=null) {
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      const scope = {};
+      (goal?.axes || []).forEach(axis => {
+        if (axis.name === builder.xAxis || axis.name === builder.yAxis) return;
+        const item = builder.scope?.[axis.name] || { mode:'all' };
+        scope[axis.name] = item.mode === 'range'
+          ? { mode:'range', min:Number(item.min), max:Number(item.max) }
+          : { mode:'all' };
+      });
+      const rule = {
+        id: id || `rule_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        sourceType:'focused_2d_mask',
+        editableMode:'gui',
+        enabled:true,
+        guiSpec:{
+          type:'focused_2d_mask',
+          xAxis:builder.xAxis,
+          yAxis:builder.yAxis,
+          xMin:Number(builder.xMin),
+          xMax:Number(builder.xMax),
+          yMin:Number(builder.yMin),
+          yMax:Number(builder.yMax),
+          scope,
+        },
+      };
+      return { ...rule, expression: compileFocusedMaskRule(rule) };
+    }
     function normalizedFeasibleRulesForUi(goal) {
       return (goal?.feasibleDomainRules || []).filter(rule => rule?.editableMode !== 'advanced').map(rule => {
         const type = rule?.sourceType || rule?.guiSpec?.type || 'gui_conditional';
@@ -1976,11 +2060,70 @@
       const ruleExpressions = new Set((goal?.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean));
       return (goal?.feasibleDomainExpressions || []).filter(expression => !ruleExpressions.has(expression));
     }
+    function renderAdminFocusedMaskBuilder() {
+      const goal = state.draftGoal || blankGoal();
+      const axes = goal.axes || [];
+      const node = $('focused-mask-admin-builder');
+      if (!node) return;
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      if (axes.length < 2) {
+        node.innerHTML = `<div class="rule-builder-card">
+          <h4>Focused 2D Mask Builder</h4>
+          <div class="small">2D Focused Mask can be created here manually, or after analysis from Report &gt; Projection Explorer by dragging a projection region.</div>
+          <div class="empty">Focused 2D Mask requires at least 2 axes.</div>
+        </div>`;
+        return;
+      }
+      const axisOptions = (selected, other) => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === selected ? 'selected' : ''} ${axis.name === other ? 'disabled' : ''}>${escapeHtml(axis.name)}</option>`).join('');
+      const remainingAxes = axes.filter(axis => axis.name !== builder.xAxis && axis.name !== builder.yAxis);
+      const draftRule = adminFocusedMaskRuleFromBuilder(goal, builder.editingRuleId || null);
+      node.innerHTML = `<div class="rule-builder-card" id="focused-mask-admin-card">
+        <div>
+          <h4>Focused 2D Mask Builder</h4>
+          <div class="small">2D Focused Mask can be created here manually, or after analysis from Report &gt; Projection Explorer by dragging a projection region.</div>
+        </div>
+        <div class="rule-builder-row">
+          <label>X Axis<select data-admin-focused-field="xAxis">${axisOptions(builder.xAxis, builder.yAxis)}</select></label>
+          <label>X min<input data-admin-focused-field="xMin" type="number" step="any" value="${escapeHtml(builder.xMin)}"></label>
+          <label>X max<input data-admin-focused-field="xMax" type="number" step="any" value="${escapeHtml(builder.xMax)}"></label>
+          <label>Y Axis<select data-admin-focused-field="yAxis">${axisOptions(builder.yAxis, builder.xAxis)}</select></label>
+          <label>Y min<input data-admin-focused-field="yMin" type="number" step="any" value="${escapeHtml(builder.yMin)}"></label>
+          <label>Y max<input data-admin-focused-field="yMax" type="number" step="any" value="${escapeHtml(builder.yMax)}"></label>
+        </div>
+        <div>
+          <strong>Remaining Axis Scope</strong>
+          <div class="focused-scope-list">
+            ${remainingAxes.map(axis => {
+              const item = builder.scope?.[axis.name] || { mode:'all' };
+              const isRange = item.mode === 'range';
+              const range = axisDomainRange(axis);
+              return `<div class="focused-scope-item" data-admin-focused-scope="${escapeHtml(axis.name)}">
+                <label>${escapeHtml(axis.name)} mode<select data-admin-focused-scope-field="mode"><option value="all" ${!isRange ? 'selected' : ''}>all</option><option value="range" ${isRange ? 'selected' : ''}>range</option></select></label>
+                <div class="focused-mask-fields">
+                  <label>min<input data-admin-focused-scope-field="min" type="number" step="any" value="${escapeHtml(isRange ? item.min : range.min)}" ${isRange ? '' : 'disabled'}></label>
+                  <label>max<input data-admin-focused-scope-field="max" type="number" step="any" value="${escapeHtml(isRange ? item.max : range.max)}" ${isRange ? '' : 'disabled'}></label>
+                </div>
+              </div>`;
+            }).join('') || '<div class="empty">No remaining axes.</div>'}
+          </div>
+        </div>
+        <div>
+          <strong>Generated Expression Preview</strong>
+          <div class="rule-expression-preview" id="focused-admin-expression">Generated expression: ${escapeHtml(draftRule.expression || 'incomplete rule')}</div>
+        </div>
+        <div class="row-actions">
+          <button class="secondary" id="focused-admin-add" type="button">Add Focused 2D Mask Rule</button>
+          <button class="secondary" id="focused-admin-save" type="button" ${builder.editingRuleId ? '' : 'disabled'}>Save Focused Mask Changes</button>
+          <button class="ghost" id="focused-admin-reset" type="button">Reset Focused Mask Builder</button>
+        </div>
+      </div>`;
+    }
     function renderFeasibleRuleBuilder() {
       const goal = state.draftGoal || blankGoal();
       const axes = goal.axes || [];
       const axisOptions = axisName => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === axisName ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
       const rules = normalizedFeasibleRulesForUi(goal);
+      renderAdminFocusedMaskBuilder();
       $('feasible-rule-list').innerHTML = rules.length ? rules.map(rule => {
         const expression = compileFeasibleRule(rule);
         if ((rule.sourceType || rule.guiSpec?.type) === 'focused_2d_mask') {
@@ -1996,6 +2139,7 @@
             <div class="small">${escapeHtml(scopeSummary)}</div>
             <div class="rule-expression-preview" data-rule-expression="${escapeHtml(rule.id)}">Generated expression: ${escapeHtml(expression || 'incomplete rule')}</div>
             <div class="row-actions">
+              <button class="secondary" type="button" data-rule-edit="${escapeHtml(rule.id)}">Edit</button>
               <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Advanced Expression</button>
               <button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button>
             </div>
@@ -2240,6 +2384,97 @@
     }
 
     const feasibleExpressionsFromText = value => String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    function readAdminFocusedMaskBuilderFromForm() {
+      const goal = state.draftGoal || blankGoal();
+      const node = $('focused-mask-admin-builder');
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      if (!node) return builder;
+      ['xAxis','yAxis','xMin','xMax','yMin','yMax'].forEach(field => {
+        const input = node.querySelector(`[data-admin-focused-field="${field}"]`);
+        if (!input) return;
+        builder[field] = field.endsWith('Axis') ? input.value : Number(input.value);
+      });
+      builder.scope = builder.scope || {};
+      node.querySelectorAll('[data-admin-focused-scope]').forEach(item => {
+        const axisName = item.dataset.adminFocusedScope;
+        const mode = item.querySelector('[data-admin-focused-scope-field="mode"]')?.value || 'all';
+        if (mode === 'range') {
+          builder.scope[axisName] = {
+            mode:'range',
+            min:Number(item.querySelector('[data-admin-focused-scope-field="min"]')?.value),
+            max:Number(item.querySelector('[data-admin-focused-scope-field="max"]')?.value),
+          };
+        } else {
+          builder.scope[axisName] = { mode:'all' };
+        }
+      });
+      state.adminFocusedMaskBuilder = builder;
+      return builder;
+    }
+    function refreshAdminFocusedMaskBuilderPreview() {
+      readAdminFocusedMaskBuilderFromForm();
+      const node = $('focused-admin-expression');
+      if (!node) return;
+      const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal);
+      node.textContent = `Generated expression: ${rule.expression || 'incomplete rule'}`;
+    }
+    function resetAdminFocusedMaskBuilder() {
+      state.adminFocusedMaskBuilder = defaultAdminFocusedMaskBuilder(state.draftGoal || blankGoal());
+      renderFeasibleRuleBuilder();
+    }
+    function addAdminFocusedMaskRule() {
+      syncDraftFromAdminForm();
+      readAdminFocusedMaskBuilderFromForm();
+      const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal, null);
+      if (!rule.expression) {
+        setAdminMessage('error', 'Focused 2D Mask range is incomplete or invalid.');
+        return;
+      }
+      state.draftGoal.feasibleDomainRules = [...(state.draftGoal.feasibleDomainRules || []), rule];
+      state.draftGoal.feasibleDomainExpressions = [
+        ...state.draftGoal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
+        ...advancedExpressionsForGoal(state.draftGoal),
+      ];
+      state.adminFocusedMaskBuilder = { ...ensureAdminFocusedMaskBuilder(state.draftGoal), editingRuleId:null };
+      renderAdmin();
+    }
+    function saveAdminFocusedMaskRule() {
+      syncDraftFromAdminForm();
+      const builder = readAdminFocusedMaskBuilderFromForm();
+      if (!builder.editingRuleId) {
+        setAdminMessage('error', '편집할 Focused 2D Mask rule을 먼저 선택하세요.');
+        return;
+      }
+      const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal, builder.editingRuleId);
+      if (!rule.expression) {
+        setAdminMessage('error', 'Focused 2D Mask range is incomplete or invalid.');
+        return;
+      }
+      state.draftGoal.feasibleDomainRules = (state.draftGoal.feasibleDomainRules || []).map(item => item.id === builder.editingRuleId ? rule : item);
+      state.draftGoal.feasibleDomainExpressions = [
+        ...state.draftGoal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
+        ...advancedExpressionsForGoal(state.draftGoal),
+      ];
+      state.adminFocusedMaskBuilder = { ...ensureAdminFocusedMaskBuilder(state.draftGoal), editingRuleId:null };
+      renderAdmin();
+    }
+    function loadAdminFocusedRuleIntoBuilder(ruleId) {
+      syncDraftFromAdminForm();
+      const rule = (state.draftGoal.feasibleDomainRules || []).find(item => item.id === ruleId);
+      if (!rule?.guiSpec || (rule.sourceType || rule.guiSpec?.type) !== 'focused_2d_mask') return;
+      const spec = rule.guiSpec;
+      state.adminFocusedMaskBuilder = {
+        editingRuleId:rule.id,
+        xAxis:spec.xAxis,
+        yAxis:spec.yAxis,
+        xMin:Number(spec.xMin),
+        xMax:Number(spec.xMax),
+        yMin:Number(spec.yMin),
+        yMax:Number(spec.yMax),
+        scope:clone(spec.scope || {}),
+      };
+      renderFeasibleRuleBuilder();
+    }
     function readFeasibleRulesFromBuilder() {
       const cards = Array.from(document.querySelectorAll('[data-feasible-rule]'));
       return cards.map(card => {
@@ -2465,13 +2700,37 @@
         renderGoalPreview();
       });
       $('feasible-rule-add').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.feasibleDomainRules.push(defaultFeasibleRule(state.draftGoal)); renderAdmin(); });
+      $('focused-mask-admin-builder').addEventListener('input', event => {
+        if (!event.target.dataset.adminFocusedField && !event.target.dataset.adminFocusedScopeField) return;
+        refreshAdminFocusedMaskBuilderPreview();
+      });
+      $('focused-mask-admin-builder').addEventListener('change', event => {
+        if (!event.target.dataset.adminFocusedField && !event.target.dataset.adminFocusedScopeField) return;
+        readAdminFocusedMaskBuilderFromForm();
+        if (event.target.dataset.adminFocusedField?.endsWith('Axis') || event.target.dataset.adminFocusedScopeField === 'mode') {
+          renderFeasibleRuleBuilder();
+        } else {
+          refreshAdminFocusedMaskBuilderPreview();
+        }
+        renderGoalPreview();
+      });
+      $('focused-mask-admin-builder').addEventListener('click', event => {
+        if (event.target.id === 'focused-admin-add') addAdminFocusedMaskRule();
+        if (event.target.id === 'focused-admin-save') saveAdminFocusedMaskRule();
+        if (event.target.id === 'focused-admin-reset') resetAdminFocusedMaskBuilder();
+      });
       $('feasible-rule-list').addEventListener('input', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); refreshFeasibleRulePreviews(); renderGoalPreview(); });
       $('feasible-rule-list').addEventListener('change', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); renderFeasibleRuleBuilder(); renderGoalPreview(); });
       $('feasible-rule-list').addEventListener('click', event => {
+        const editId = event.target.dataset.ruleEdit;
         const convertId = event.target.dataset.ruleConvert;
         const removeId = event.target.dataset.ruleRemove;
-        if (!convertId && !removeId) return;
+        if (!editId && !convertId && !removeId) return;
         syncDraftFromAdminForm();
+        if (editId) {
+          loadAdminFocusedRuleIntoBuilder(editId);
+          return;
+        }
         if (convertId) {
           const rule = state.draftGoal.feasibleDomainRules.find(item => item.id === convertId);
           const expression = rule?.expression || compileFeasibleRule(rule);

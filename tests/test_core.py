@@ -769,6 +769,14 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("data-rule-convert", template)
         self.assertIn("Convert to Advanced Expression", template)
         self.assertIn("feasibleDomainAdvancedExpressions", template)
+        self.assertIn("Focused 2D Mask Builder", template)
+        self.assertIn("Add Focused 2D Mask Rule", template)
+        self.assertIn("Reset Focused Mask Builder", template)
+        self.assertIn("Focused 2D Mask requires at least 2 axes.", template)
+        self.assertIn("data-admin-focused-field=\"xAxis\"", template)
+        self.assertIn("data-admin-focused-scope-field=\"mode\"", template)
+        self.assertIn("loadAdminFocusedRuleIntoBuilder", template)
+        self.assertIn("data-rule-edit", template)
 
     def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
