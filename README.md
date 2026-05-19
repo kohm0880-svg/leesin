@@ -17,23 +17,29 @@ Storage and deletion happen at the record level. Leesin's density calculation do
 
 ## Specificity Engine
 
-For each occupied target bin `g`, Leesin estimates peer density with Jeffreys-style smoothing:
+Leesin compares each target bin's peer count against the distribution of occupied peer bin counts.
 
 ```text
-p_hat_g = (peer_bin_count[g] + 0.5) / (peer_valid_rows + 0.5 * total_bins)
-rarity_g = -ln(p_hat_g)
+C_occupied = [peer_count[g] for g where peer_count[g] > 0]
+b = len(C_occupied)
+
+if C_i == 0:
+    S_i = 1.0
+else:
+    S_i = 1 - count(C_j <= C_i for C_j in C_occupied) / b
 ```
 
-Target bin counts weight the row-level rarity:
+Target bin counts weight the bin-level specificity:
 
 ```text
-mean_rarity = sum(target_count[g] * rarity_g) / target_valid_rows
-specificity_score = 1 - exp(-mean_rarity / log(peer_valid_rows + total_bins + 1))
+specificity_score = sum(target_count[i] * S_i) / target_valid_rows
 ```
 
-Additional result fields include `max_rarity`, `unseen_bin_rate`, `rare_bin_rate`, and `out_of_domain_rate`.
+Additional result fields include `mean_bin_specificity`, `max_specificity`, `extreme_specificity_rate`, `unseen_bin_rate`, `rare_bin_rate`, and `out_of_domain_rate`. `rare_bin_rate` is retained for UI/export compatibility and currently mirrors the fraction of valid target rows with bin-level specificity `S_i >= 0.95`.
 
-Specificity Score is an engineering score that compresses peer-density rarity into a 0-1 range. It is not a p-value, posterior probability, or statistical probability.
+`mean_rarity` and `max_rarity` remain available as advanced compatibility metrics, but they do not drive `specificity_score`.
+
+Specificity Score is an engineering score that compares target-bin peer counts against the occupied peer-bin count eCDF. It is not a p-value, posterior probability, or statistical probability.
 
 If `peer_valid_rows == 0`, density analysis is limited and Leesin returns a clear error. Legacy records without row-level vectors are excluded from density scoring.
 
@@ -63,6 +69,22 @@ The analysis payload reports:
 - `coverageLegacyExcludedClusterCount`
 - `coverageGridSignatureExcludedClusterCount`
 - `rowLevelObservationCount`
+
+## Feasible Domain Mask
+
+Experiment Goals can include `feasibleDomainExpressions`, a list of advanced expression rules evaluated at bin centers. All rules are combined with AND. When the list is empty, Leesin uses the full Cartesian Domain Range exactly as before.
+
+Expressions are parsed with a Python AST whitelist rather than `eval` or `exec`. Allowed syntax includes numeric constants, axis names, arithmetic operators, comparisons, boolean `and`/`or`/`not`, parentheses, and safe functions such as `abs`, `min`, `max`, `sqrt`, `log`, and `exp`. Attribute access, imports, subscripts, comprehensions, lambdas, assignments, and unknown axis names are rejected.
+
+With a mask enabled:
+
+- `valid_bins` is the number of bins whose centers satisfy every expression.
+- `masked_bins = total_bins - valid_bins`.
+- Coverage is `occupied_bins / valid_bins`, not `occupied_bins / total_bins`.
+- Peer bins outside the feasible domain are excluded from the density map.
+- Target rows inside the axis Domain Range but outside the feasible mask are reported as `masked_out_target_rows` and excluded from specificity scoring.
+
+MVP note: GUI rule builders, 2D drag masks, focused mask editors, expression reverse parsing, and audit-log grid revisions are intentionally not implemented yet.
 
 ## Projection Explorer
 
@@ -109,7 +131,11 @@ Duplicate detection still includes `binOccupancyHash`, so records with the same 
 Analysis results include density fields such as:
 
 - `engine = "density_grid"`
+- `specificity_method = "occupied_bin_count_ecdf"`
 - `specificity_score`
+- `mean_bin_specificity`
+- `max_specificity`
+- `extreme_specificity_rate`
 - `mean_rarity`
 - `max_rarity`
 - `unseen_bin_rate`
@@ -123,8 +149,12 @@ Analysis results include density fields such as:
 - `valid_target_rows`
 - `invalid_target_rows`
 - `out_of_domain_rows`
+- `masked_out_target_rows`
 - `total_bins`
+- `valid_bins`
+- `masked_bins`
 - `occupied_bins`
+- `feasible_mask_enabled`
 
 Report visualizations include `projectionExplorer`, which carries canonical `axisOrder`, `axisMeta`, all 2D `axisPairs`, peer/target projection matrices, and target row bin-index tuples for in-session linked highlighting.
 

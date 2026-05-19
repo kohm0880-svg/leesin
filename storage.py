@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from feasible_mask import compute_valid_bin_mask_for_axes, normalize_feasible_expressions, validate_feasible_expression
 from models import K_M, ExperimentConfig
 
 try:
@@ -55,7 +56,12 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "analysisTimestamp": None,
     "peerGroupSize": None,
     "engine": None,
+    "specificityMethod": None,
+    "specificityInterpretation": None,
     "specificityScore": None,
+    "meanBinSpecificity": None,
+    "maxSpecificity": None,
+    "extremeSpecificityRate": None,
     "meanRarity": None,
     "maxRarity": None,
     "unseenBinRate": None,
@@ -69,8 +75,14 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "validTargetRows": None,
     "invalidTargetRows": None,
     "outOfDomainRows": None,
+    "maskedOutTargetRows": None,
+    "infeasibleTargetRows": None,
     "totalBins": None,
+    "validBins": None,
+    "maskedBins": None,
     "occupiedBins": None,
+    "feasibleMaskEnabled": None,
+    "feasibleExpressions": [],
     "outOfDomainWarnings": [],
 }
 
@@ -155,8 +167,12 @@ def normalize_bin_occupancy_meta(meta: Any, row_count: int, bin_occupancy: dict[
         "version": int(source.get("version") or 1),
         "basis": str(source.get("basis") or ("row_level" if bin_occupancy else "unavailable")),
         "validMultidimensionalRowCount": int(valid_count or 0),
+        "feasibleValidRowCount": int(source.get("feasibleValidRowCount") or valid_count or 0),
         "invalidRowCount": int(source.get("invalidRowCount") or 0),
         "outOfDomainRowCount": int(source.get("outOfDomainRowCount") or 0),
+        "maskedOutRowCount": int(source.get("maskedOutRowCount") or source.get("infeasibleRowCount") or 0),
+        "infeasibleRowCount": int(source.get("infeasibleRowCount") or source.get("maskedOutRowCount") or 0),
+        "maskedOutBinCount": int(source.get("maskedOutBinCount") or 0),
         "totalRows": int(source.get("totalRows") or row_count or 0),
     }
 
@@ -176,6 +192,11 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
     normalized["outOfDomainWarnings"] = []
     aliases = {
         "specificity_score": "specificityScore",
+        "specificity_method": "specificityMethod",
+        "specificity_interpretation": "specificityInterpretation",
+        "mean_bin_specificity": "meanBinSpecificity",
+        "max_specificity": "maxSpecificity",
+        "extreme_specificity_rate": "extremeSpecificityRate",
         "mean_rarity": "meanRarity",
         "max_rarity": "maxRarity",
         "unseen_bin_rate": "unseenBinRate",
@@ -191,8 +212,13 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
         "valid_target_rows": "validTargetRows",
         "invalid_target_rows": "invalidTargetRows",
         "out_of_domain_rows": "outOfDomainRows",
+        "masked_out_target_rows": "maskedOutTargetRows",
+        "infeasible_target_rows": "infeasibleTargetRows",
         "total_bins": "totalBins",
+        "valid_bins": "validBins",
+        "masked_bins": "maskedBins",
         "occupied_bins": "occupiedBins",
+        "feasible_mask_enabled": "feasibleMaskEnabled",
     }
     for key, value in source.items():
         normalized[aliases.get(key, key)] = value
@@ -389,11 +415,21 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         resolution=[axis["resolution"] for axis in normalized_axes],
         K_m=k_m,
     )
+    feasible_expressions = normalize_feasible_expressions(goal.get("feasibleDomainExpressions"))
+    allowed_axes = [axis["name"] for axis in normalized_axes]
+    for expression in feasible_expressions:
+        try:
+            validate_feasible_expression(expression, allowed_axes)
+        except ValueError as exc:
+            raise ValueError(f"Invalid feasible domain expression '{expression}': {exc}") from exc
+    if feasible_expressions:
+        compute_valid_bin_mask_for_axes(normalized_axes, feasible_expressions)
     return {
         "id": str(goal.get("id") or f"goal_{abs(hash(name))}"),
         "name": name,
         "K_m": k_m,
         "axes": normalized_axes,
+        "feasibleDomainExpressions": feasible_expressions,
     }
 
 
@@ -497,6 +533,10 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
             "engineAtUpload": analysis.get("engine"),
             "specificityScoreAtUpload": analysis.get("specificityScore"),
+            "specificityMethodAtUpload": analysis.get("specificityMethod"),
+            "meanBinSpecificityAtUpload": analysis.get("meanBinSpecificity"),
+            "maxSpecificityAtUpload": analysis.get("maxSpecificity"),
+            "extremeSpecificityRateAtUpload": analysis.get("extremeSpecificityRate"),
             "meanRarityAtUpload": analysis.get("meanRarity"),
             "maxRarityAtUpload": analysis.get("maxRarity"),
             "unseenBinRateAtUpload": analysis.get("unseenBinRate"),
@@ -506,9 +546,12 @@ def _normalize_cluster(item: dict[str, Any]) -> dict[str, Any] | None:
             "observationSupportSAtUpload": analysis.get("observationSupportS"),
             "peerObservationCountAtUpload": analysis.get("peerObservationCount"),
             "validTargetRowsAtUpload": analysis.get("validTargetRows"),
+            "maskedOutTargetRowsAtUpload": analysis.get("maskedOutTargetRows"),
             "coverageCAtUpload": analysis.get("coverageC"),
             "equitabilityEAtUpload": analysis.get("equitabilityE"),
             "totalBinsAtUpload": analysis.get("totalBins"),
+            "validBinsAtUpload": analysis.get("validBins"),
+            "maskedBinsAtUpload": analysis.get("maskedBins"),
             "occupiedBinsAtUpload": analysis.get("occupiedBins"),
         }
         normalized["fingerprint"] = cluster_fingerprint(normalized)
@@ -790,6 +833,7 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "binOccupancyHash": str(cluster.get("binOccupancyHash") or bin_occupancy_hash(bin_occupancy)),
         "hasRowLevelBinOccupancy": bool(bin_occupancy),
         "rowLevelValidCount": int(bin_meta.get("validMultidimensionalRowCount") or 0),
+        "rowLevelMaskedOutCount": int(bin_meta.get("maskedOutRowCount") or bin_meta.get("infeasibleRowCount") or 0),
         "rowLevelOccupiedBinCount": len(bin_occupancy),
         "rowLevelVectorCount": int(cluster.get("rowLevelVectorCount") or len(cluster.get("rowLevelVectors") or []) or 0),
         "rowLevelVectorAxisOrder": list(cluster.get("rowLevelVectorAxisOrder") or []),
@@ -807,6 +851,10 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "peerGroupSizeAtUpload": cluster.get("peerGroupSizeAtUpload"),
         "engineAtUpload": cluster.get("engineAtUpload"),
         "specificityScoreAtUpload": cluster.get("specificityScoreAtUpload"),
+        "specificityMethodAtUpload": cluster.get("specificityMethodAtUpload"),
+        "meanBinSpecificityAtUpload": cluster.get("meanBinSpecificityAtUpload"),
+        "maxSpecificityAtUpload": cluster.get("maxSpecificityAtUpload"),
+        "extremeSpecificityRateAtUpload": cluster.get("extremeSpecificityRateAtUpload"),
         "meanRarityAtUpload": cluster.get("meanRarityAtUpload"),
         "maxRarityAtUpload": cluster.get("maxRarityAtUpload"),
         "unseenBinRateAtUpload": cluster.get("unseenBinRateAtUpload"),
@@ -816,8 +864,11 @@ def cluster_summary(cluster: dict[str, Any]) -> dict[str, Any]:
         "observationSupportSAtUpload": cluster.get("observationSupportSAtUpload"),
         "peerObservationCountAtUpload": cluster.get("peerObservationCountAtUpload"),
         "validTargetRowsAtUpload": cluster.get("validTargetRowsAtUpload"),
+        "maskedOutTargetRowsAtUpload": cluster.get("maskedOutTargetRowsAtUpload"),
         "coverageCAtUpload": cluster.get("coverageCAtUpload"),
         "equitabilityEAtUpload": cluster.get("equitabilityEAtUpload"),
         "totalBinsAtUpload": cluster.get("totalBinsAtUpload"),
+        "validBinsAtUpload": cluster.get("validBinsAtUpload"),
+        "maskedBinsAtUpload": cluster.get("maskedBinsAtUpload"),
         "occupiedBinsAtUpload": cluster.get("occupiedBinsAtUpload"),
     }

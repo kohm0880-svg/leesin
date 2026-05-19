@@ -32,6 +32,9 @@ class ExperimentConfig:
 class DensityDiagnosisResult:
     engine: str
     specificity_score: float
+    mean_bin_specificity: float
+    max_specificity: float
+    extreme_specificity_rate: float
     mean_rarity: float
     max_rarity: float
     unseen_bin_rate: float
@@ -45,15 +48,24 @@ class DensityDiagnosisResult:
     valid_target_rows: int
     invalid_target_rows: int
     out_of_domain_rows: int
+    masked_out_target_rows: int
     target_total_rows: int
     total_bins: int
+    valid_bins: int
+    masked_bins: int
     occupied_bins: int
+    feasible_mask_enabled: bool
 
     def to_payload(self, axis_names: list[str]) -> dict[str, Any]:
         return {
             "engine": self.engine,
             "axis_names": list(axis_names),
+            "specificity_method": "occupied_bin_count_ecdf",
+            "specificity_interpretation": "Higher means target rows fall in lower-density or unseen peer bins.",
             "specificity_score": round(float(self.specificity_score), 6),
+            "mean_bin_specificity": round(float(self.mean_bin_specificity), 6),
+            "max_specificity": round(float(self.max_specificity), 6),
+            "extreme_specificity_rate": round(float(self.extreme_specificity_rate), 6),
             "mean_rarity": round(float(self.mean_rarity), 6),
             "max_rarity": round(float(self.max_rarity), 6),
             "unseen_bin_rate": round(float(self.unseen_bin_rate), 6),
@@ -67,9 +79,14 @@ class DensityDiagnosisResult:
             "valid_target_rows": int(self.valid_target_rows),
             "invalid_target_rows": int(self.invalid_target_rows),
             "out_of_domain_rows": int(self.out_of_domain_rows),
+            "masked_out_target_rows": int(self.masked_out_target_rows),
+            "infeasible_target_rows": int(self.masked_out_target_rows),
             "target_total_rows": int(self.target_total_rows),
             "total_bins": self.total_bins,
+            "valid_bins": self.valid_bins,
+            "masked_bins": self.masked_bins,
             "occupied_bins": self.occupied_bins,
+            "feasible_mask_enabled": bool(self.feasible_mask_enabled),
         }
 
 

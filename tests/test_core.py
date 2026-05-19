@@ -7,6 +7,7 @@ import numpy as np
 
 import app
 import storage
+from feasible_mask import compute_valid_bin_mask_for_axes, evaluate_feasible_expression_on_arrays, validate_feasible_expression
 from models import ExperimentConfig
 from stats_engine import DensityGridAnalyzer
 
@@ -52,12 +53,44 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertGreater(rare.specificity_score, common.specificity_score)
 
     def test_rare_peer_bin_increases_rare_bin_rate(self) -> None:
-        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
-        analyzer.set_peer_bin_counts({"[0]": 10, "[5]": 1})
-        common = analyzer.diagnose({"[0]": 3}, {"validMultidimensionalRowCount": 3, "totalRows": 3})
-        rare = analyzer.diagnose({"[5]": 3}, {"validMultidimensionalRowCount": 3, "totalRows": 3})
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 30)], [1]))
+        analyzer.set_peer_bin_counts({f"[{index}]": index + 1 for index in range(21)})
+        common = analyzer.diagnose({"[20]": 3}, {"validMultidimensionalRowCount": 3, "totalRows": 3})
+        rare = analyzer.diagnose({"[0]": 3}, {"validMultidimensionalRowCount": 3, "totalRows": 3})
         self.assertEqual(common.rare_bin_rate, 0.0)
         self.assertEqual(rare.rare_bin_rate, 1.0)
+        self.assertEqual(rare.extreme_specificity_rate, 1.0)
+
+    def test_ecdf_specificity_unseen_bin_is_exact_one(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 20)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 1, "[1]": 1, "[2]": 2, "[3]": 5, "[4]": 10})
+        result = analyzer.diagnose({"[9]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertEqual(result.specificity_score, 1.0)
+        self.assertEqual(result.max_specificity, 1.0)
+        self.assertEqual(result.unseen_bin_rate, 1.0)
+
+    def test_ecdf_specificity_count_one_uses_occupied_rank(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 20)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 1, "[1]": 1, "[2]": 2, "[3]": 5, "[4]": 10})
+        result = analyzer.diagnose({"[0]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertAlmostEqual(result.specificity_score, 0.6)
+        self.assertEqual(result.rare_bin_rate, 0.0)
+
+    def test_ecdf_specificity_dense_bin_is_zero(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 20)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 1, "[1]": 1, "[2]": 2, "[3]": 5, "[4]": 10})
+        result = analyzer.diagnose({"[4]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertEqual(result.specificity_score, 0.0)
+        self.assertEqual(result.max_specificity, 0.0)
+
+    def test_ecdf_specificity_weighted_across_target_bins(self) -> None:
+        analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 20)], [1]))
+        analyzer.set_peer_bin_counts({"[0]": 1, "[1]": 1, "[2]": 2, "[3]": 5, "[4]": 10})
+        result = analyzer.diagnose({"[9]": 3, "[0]": 7}, {"validMultidimensionalRowCount": 10, "totalRows": 10})
+        self.assertAlmostEqual(result.specificity_score, 0.72)
+        self.assertAlmostEqual(result.mean_bin_specificity, 0.72)
+        self.assertEqual(result.max_specificity, 1.0)
+        self.assertEqual(result.extreme_specificity_rate, 0.3)
 
     def test_empty_peer_density_raises_clear_error(self) -> None:
         analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
@@ -160,6 +193,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(response["result"]["peer_observation_count"], 1)
         for key in [
             "specificity_score",
+            "specificity_method",
+            "mean_bin_specificity",
+            "max_specificity",
+            "extreme_specificity_rate",
             "mean_rarity",
             "unseen_bin_rate",
             "rare_bin_rate",
@@ -167,6 +204,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
             "coverage_C",
             "equitability_E",
             "confidence",
+            "valid_bins",
+            "masked_bins",
+            "feasible_mask_enabled",
+            "masked_out_target_rows",
         ]:
             self.assertIn(key, response["result"])
 
@@ -352,6 +393,67 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("관리자 작업이 차단되었습니다", template)
         self.assertIn("Render Environment Variables의 ADMIN_TOKEN", template)
         self.assertIn("Admin Token missing or invalid", template)
+
+    def test_feasible_mask_temperature_expression_reduces_valid_bins(self) -> None:
+        axes = [axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
+        info = compute_valid_bin_mask_for_axes(axes, ["temperature <= 50"])
+        self.assertEqual(info["totalBins"], 100)
+        self.assertEqual(info["validBins"], 50)
+        self.assertEqual(info["maskedBins"], 50)
+        self.assertTrue(info["feasibleMaskEnabled"])
+
+    def test_feasible_expression_evaluator_returns_boolean_array(self) -> None:
+        temperature = np.array([0.0, 10.0, 20.0])
+        pressure = np.array([0.0, 8.0, 15.0])
+        mask = evaluate_feasible_expression_on_arrays(
+            "pressure <= 0.05 * temperature ** 2",
+            {"temperature": temperature, "pressure": pressure},
+            ["temperature", "pressure"],
+        )
+        np.testing.assert_array_equal(mask, np.array([True, False, True]))
+
+    def test_feasible_expression_rejects_import_call(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_feasible_expression('__import__("os").system("echo hacked")', ["temperature"])
+
+    def test_feasible_expression_rejects_unknown_axis(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown axis name"):
+            validate_feasible_expression("unknown_axis > 3", ["temperature"])
+
+    def test_target_row_inside_domain_but_outside_feasible_mask_is_masked_out(self) -> None:
+        selected_goal = goal(
+            axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
+        )
+        selected_goal["feasibleDomainExpressions"] = ["temperature <= 50"]
+        recomputed = app.recompute_bin_occupancy_from_row_vectors(
+            [[60.0, 5.0], [40.0, 5.0]],
+            ["temperature", "pressure"],
+            selected_goal,
+        )
+        self.assertEqual(recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"], 1)
+        self.assertEqual(recomputed["bin_occupancy_meta"]["outOfDomainRowCount"], 0)
+        self.assertEqual(recomputed["bin_occupancy_meta"]["maskedOutRowCount"], 1)
+        self.assertEqual(recomputed["bin_occupancy"], {"[5,4]": 1})
+
+    def test_coverage_uses_feasible_valid_bins_denominator(self) -> None:
+        selected_goal = goal(
+            axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
+        )
+        selected_goal["feasibleDomainExpressions"] = ["temperature <= 50"]
+        peer = record_from_rows(selected_goal, [{"temperature": "40", "pressure": "5"}], "peer")
+        coverage = app.build_global_bin_counts([peer], selected_goal)
+        analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(selected_goal))
+        analyzer.set_peer_bin_counts(coverage["binCounts"])
+        analyzer.set_feasible_domain(
+            valid_bins=coverage["validBins"],
+            masked_bins=coverage["maskedBins"],
+            feasible_mask_enabled=coverage["feasibleMaskEnabled"],
+        )
+        result = analyzer.diagnose({"[4,5]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertEqual(coverage["totalBins"], 100)
+        self.assertEqual(coverage["validBins"], 50)
+        self.assertAlmostEqual(result.coverage_C, 1 / 50)
+        self.assertTrue(result.feasible_mask_enabled)
 
 
 if __name__ == "__main__":

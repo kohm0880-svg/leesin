@@ -127,6 +127,9 @@ class DensityGridAnalyzer:
     def __init__(self, config: ExperimentConfig):
         self.config = canonical_experiment_config(config)
         self._peer_density = BinGridTracker(self.config.domain_range, self.config.resolution)
+        self._valid_bins_override: int | None = None
+        self._masked_bins: int = 0
+        self._feasible_mask_enabled: bool = False
 
     def set_peer_bin_counts(self, bin_counts: dict[str, int]) -> None:
         self._peer_density = BinGridTracker(self.config.domain_range, self.config.resolution)
@@ -134,6 +137,16 @@ class DensityGridAnalyzer:
 
     def add_peer_bin_counts(self, bin_counts: dict[str, int]) -> None:
         self._peer_density.add_bin_counts(bin_counts)
+
+    def set_feasible_domain(
+        self,
+        valid_bins: int | None = None,
+        masked_bins: int = 0,
+        feasible_mask_enabled: bool = False,
+    ) -> None:
+        self._valid_bins_override = int(valid_bins) if valid_bins is not None else None
+        self._masked_bins = max(0, int(masked_bins or 0))
+        self._feasible_mask_enabled = bool(feasible_mask_enabled)
 
     def diagnose(
         self,
@@ -156,45 +169,70 @@ class DensityGridAnalyzer:
         meta = target_meta or {}
         invalid_target_rows = int(meta.get("invalidRowCount") or 0)
         out_of_domain_rows = int(meta.get("outOfDomainRowCount") or 0)
+        masked_out_target_rows = int(meta.get("maskedOutRowCount") or meta.get("infeasibleRowCount") or 0)
         target_total_rows = int(meta.get("totalRows") or (target_valid_rows + invalid_target_rows + out_of_domain_rows))
         if target_valid_rows <= 0:
             raise ValueError("Density grid analysis requires at least one valid target row-level observation.")
 
         total_bins = self._peer_density.total_bins
+        valid_bins = int(self._valid_bins_override if self._valid_bins_override is not None else total_bins)
+        if valid_bins <= 0:
+            raise ValueError("Feasible Domain Mask leaves zero valid bins; density analysis cannot run.")
         alpha = 0.5
         denominator = peer_valid_rows + alpha * total_bins
+        occupied_counts = np.array([count for count in peer_bin_counts.values() if int(count) > 0], dtype=float)
+        occupied_counts.sort()
+        occupied_bin_count = int(occupied_counts.size)
+        if occupied_bin_count <= 0:
+            raise ValueError(
+                "Density grid analysis requires at least one peer row-level bin occupancy observation. "
+                "Saved legacy records without row-level vectors are excluded."
+            )
         weighted_rarity = 0.0
+        weighted_specificity = 0.0
         max_rarity = 0.0
+        max_specificity = 0.0
         unseen_target_rows = 0
-        rare_target_rows = 0
+        extreme_target_rows = 0
 
         for key, target_count in normalized_target_counts.items():
             peer_count = int(peer_bin_counts.get(key, 0))
             p_hat_g = (peer_count + alpha) / denominator
             rarity_g = -math.log(p_hat_g)
-            weighted_rarity += int(target_count) * rarity_g
+            count = int(target_count)
+            if peer_count <= 0:
+                specificity_i = 1.0
+            else:
+                rank = int(np.searchsorted(occupied_counts, float(peer_count), side="right"))
+                specificity_i = 1.0 - (rank / occupied_bin_count)
+
+            weighted_rarity += count * rarity_g
+            weighted_specificity += count * specificity_i
             max_rarity = max(max_rarity, rarity_g)
+            max_specificity = max(max_specificity, specificity_i)
             if peer_count == 0:
-                unseen_target_rows += int(target_count)
-            if peer_count <= 1:
-                rare_target_rows += int(target_count)
+                unseen_target_rows += count
+            if specificity_i >= 0.95:
+                extreme_target_rows += count
 
         mean_rarity = weighted_rarity / target_valid_rows
-        scale = max(1e-12, math.log(peer_valid_rows + total_bins + 1))
-        specificity_score = 1.0 - math.exp(-mean_rarity / scale)
+        specificity_score = weighted_specificity / target_valid_rows
 
         observation_support_S = peer_valid_rows / (peer_valid_rows + self.config.K_m)
-        coverage_C = self._peer_density.coverage
+        coverage_C = self._peer_density.occupied_bins / valid_bins if valid_bins else 0.0
         equitability_E = self._peer_density.equitability
         confidence = float((observation_support_S * coverage_C * equitability_E) ** (1.0 / 3.0))
 
         return DensityDiagnosisResult(
             engine="density_grid",
             specificity_score=float(specificity_score),
+            mean_bin_specificity=float(specificity_score),
+            max_specificity=float(max_specificity),
+            extreme_specificity_rate=float(extreme_target_rows / target_valid_rows),
             mean_rarity=float(mean_rarity),
             max_rarity=float(max_rarity),
             unseen_bin_rate=float(unseen_target_rows / target_valid_rows),
-            rare_bin_rate=float(rare_target_rows / target_valid_rows),
+            rare_bin_rate=float(extreme_target_rows / target_valid_rows),
             out_of_domain_rate=float(out_of_domain_rows / target_total_rows) if target_total_rows > 0 else 0.0,
             observation_support_S=float(observation_support_S),
             coverage_C=float(coverage_C),
@@ -204,7 +242,11 @@ class DensityGridAnalyzer:
             valid_target_rows=int(target_valid_rows),
             invalid_target_rows=int(invalid_target_rows),
             out_of_domain_rows=int(out_of_domain_rows),
+            masked_out_target_rows=int(masked_out_target_rows),
             target_total_rows=int(target_total_rows),
             total_bins=int(total_bins),
+            valid_bins=int(valid_bins),
+            masked_bins=int(self._masked_bins),
             occupied_bins=int(self._peer_density.occupied_bins),
+            feasible_mask_enabled=bool(self._feasible_mask_enabled),
         )

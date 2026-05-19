@@ -19,6 +19,11 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from feasible_mask import (
+    compute_valid_bin_mask_for_axes,
+    is_bin_key_feasible,
+    normalize_feasible_expressions,
+)
 from models import K_M, DensityDiagnosisResult, ExperimentConfig
 from stats_engine import BinGridTracker, DensityGridAnalyzer
 from storage import (
@@ -73,6 +78,7 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
         "name": goal["name"],
         "K_m": float(goal.get("K_m", K_M)),
         "axes": axes,
+        "feasibleDomainExpressions": normalize_feasible_expressions(goal.get("feasibleDomainExpressions")),
     }
 
 
@@ -92,6 +98,26 @@ def bin_index_for_value(value: Any, domain_min: float, domain_max: float, resolu
     return max(0, min(total_bins - 1, index)), "valid"
 
 
+def feasible_expressions_for_goal(selected_goal: dict[str, Any]) -> list[str]:
+    return normalize_feasible_expressions(selected_goal.get("feasibleDomainExpressions"))
+
+
+def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]:
+    return compute_valid_bin_mask_for_axes(
+        canonical_axis_order(selected_goal["axes"]),
+        feasible_expressions_for_goal(selected_goal),
+    )
+
+
+def is_bin_key_feasible_for_goal(bin_key: str, selected_goal: dict[str, Any], cache: dict[str, bool] | None = None) -> bool:
+    return is_bin_key_feasible(
+        bin_key,
+        canonical_axis_order(selected_goal["axes"]),
+        feasible_expressions_for_goal(selected_goal),
+        cache,
+    )
+
+
 def compute_row_level_bin_occupancy(
     rows: list[dict[str, Any]],
     axis_mapping: dict[str, str],
@@ -105,6 +131,9 @@ def compute_row_level_bin_occupancy(
     valid_multidimensional = 0
     invalid_rows = 0
     out_of_domain_rows = 0
+    masked_out_rows = 0
+    masked_out_bin_occupancy: dict[str, int] = {}
+    feasible_cache: dict[str, bool] = {}
 
     for row in rows:
         multidimensional_indices: list[int] = []
@@ -121,9 +150,6 @@ def compute_row_level_bin_occupancy(
                 float(axis["resolution"]),
             )
             if status == "valid" and index is not None:
-                key = str(index)
-                axis_counts = axis_bin_occupancy[axis_name]
-                axis_counts[key] = axis_counts.get(key, 0) + 1
                 multidimensional_indices.append(index)
             elif status == "invalid":
                 row_has_invalid = True
@@ -138,6 +164,14 @@ def compute_row_level_bin_occupancy(
             continue
         if len(multidimensional_indices) == len(axes):
             key = json.dumps(multidimensional_indices, separators=(",", ":"))
+            if not is_bin_key_feasible_for_goal(key, selected_goal, feasible_cache):
+                masked_out_rows += 1
+                masked_out_bin_occupancy[key] = masked_out_bin_occupancy.get(key, 0) + 1
+                continue
+            for axis, index in zip(axes, multidimensional_indices):
+                axis_name = str(axis["name"])
+                axis_counts = axis_bin_occupancy[axis_name]
+                axis_counts[str(index)] = axis_counts.get(str(index), 0) + 1
             bin_occupancy[key] = bin_occupancy.get(key, 0) + 1
             row_bin_tuples.append(list(multidimensional_indices))
             valid_multidimensional += 1
@@ -150,10 +184,15 @@ def compute_row_level_bin_occupancy(
             "version": 1,
             "basis": "row_level",
             "validMultidimensionalRowCount": valid_multidimensional,
+            "feasibleValidRowCount": valid_multidimensional,
             "invalidRowCount": invalid_rows,
             "outOfDomainRowCount": out_of_domain_rows,
+            "maskedOutRowCount": masked_out_rows,
+            "infeasibleRowCount": masked_out_rows,
+            "maskedOutBinCount": len(masked_out_bin_occupancy),
             "totalRows": len(rows),
         },
+        "masked_out_bin_occupancy": masked_out_bin_occupancy,
     }
 
 
@@ -468,6 +507,11 @@ def build_projection_explorer(
         "axisPairs": axis_pairs,
         "peerProjections": peer_projections,
         "targetProjections": target_projections,
+        "feasibleMaskEnabled": bool(coverage_info.get("feasibleMaskEnabled")) if isinstance(coverage_info, dict) else False,
+        "validBins": int(coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "maskedBins": int(coverage_info.get("maskedBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "feasibleExpressions": list(coverage_info.get("feasibleExpressions") or []) if isinstance(coverage_info, dict) else [],
+        "maskRenderingTodo": "TODO: render masked 2D projection regions as gray overlay.",
         "targetRowBinTuples": payload_tuples,
         "targetRowTupleSampled": tuple_sampled,
         "targetRowTupleLimit": PROJECTION_ROW_TUPLE_LIMIT,
@@ -479,12 +523,13 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
     bin_counts = coverage_info.get("binCounts", {}) if isinstance(coverage_info, dict) else {}
     counts = [int(value) for value in bin_counts.values() if int(value) > 0]
     peer_valid_rows = int(sum(counts))
-    total_bins = 1
-    for axis in canonical_axis_order(selected_goal["axes"]):
-        total_bins *= axis_total_bins(axis)
+    mask_info = feasible_mask_info_for_goal(selected_goal)
+    total_bins = int(coverage_info.get("totalBins") or mask_info["totalBins"])
+    valid_bins = int(coverage_info.get("validBins") or mask_info["validBins"])
+    masked_bins = int(coverage_info.get("maskedBins") or mask_info["maskedBins"])
     occupied_bins = len(counts)
     observation_support = peer_valid_rows / (peer_valid_rows + float(selected_goal.get("K_m", K_M))) if peer_valid_rows > 0 else 0.0
-    coverage = occupied_bins / total_bins if total_bins else 0.0
+    coverage = occupied_bins / valid_bins if valid_bins else 0.0
     if occupied_bins <= 1 or peer_valid_rows <= 0:
         equitability = 0.0
     else:
@@ -493,6 +538,11 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
     confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0)) if observation_support and coverage and equitability else 0.0
     return {
         "totalBins": int(total_bins),
+        "validBins": int(valid_bins),
+        "maskedBins": int(masked_bins),
+        "validDomainRatio": round(float(valid_bins / total_bins), 6) if total_bins else 0.0,
+        "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
+        "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
         "occupiedBins": int(occupied_bins),
         "peerValidRows": int(peer_valid_rows),
         "observationSupportZ": round(float(observation_support), 6),
@@ -579,6 +629,8 @@ def build_report_visualizations(
             "validMultidimensionalRowCount": int(target_meta.get("validMultidimensionalRowCount") or result.valid_target_rows),
             "invalidRowCount": int(target_meta.get("invalidRowCount") or result.invalid_target_rows),
             "outOfDomainRowCount": int(target_meta.get("outOfDomainRowCount") or result.out_of_domain_rows),
+            "maskedOutRowCount": int(target_meta.get("maskedOutRowCount") or result.masked_out_target_rows),
+            "infeasibleRowCount": int(target_meta.get("infeasibleRowCount") or result.masked_out_target_rows),
             "totalRows": int(target_meta.get("totalRows") or result.target_total_rows),
         },
         "projectionExplorer": build_projection_explorer(goal, coverage_info or {}, target_row_bin_tuples or []),
@@ -625,11 +677,11 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
 def build_summary(result: DensityDiagnosisResult) -> list[str]:
     messages: list[str] = []
     if result.specificity_score > 0.75 and result.confidence > 0.7:
-        messages.append("Specificity Score and confidence are both high. The target rows occupy rare regions of the peer density grid.")
+        messages.append("Specificity Score and confidence are both high. Target rows fall in low-density or unseen bins relative to the occupied peer bin count distribution.")
     elif result.specificity_score > 0.75 and result.confidence <= 0.4:
-        messages.append("Specificity Score is high, but confidence is low. Interpret the outlier signal cautiously until peer density support improves.")
+        messages.append("Target rows are rare against the current peer density map, but the peer map itself has limited support. Interpret the outlier signal cautiously.")
     elif result.specificity_score <= 0.5:
-        messages.append("The target row-level occupancy is broadly consistent with the current peer density map.")
+        messages.append("Target rows mostly fall in dense or ordinary occupied peer bins.")
     else:
         messages.append("The target shows moderate specificity. Additional peer observations can make the density baseline sharper.")
 
@@ -641,6 +693,10 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
         messages.append("Equitability is low. Peer observations are concentrated in a small number of occupied bins.")
     if result.unseen_bin_rate > 0:
         messages.append(f"{result.unseen_bin_rate:.1%} of valid target rows fall in bins unseen in the peer density map.")
+    if result.extreme_specificity_rate > 0:
+        messages.append(f"{result.extreme_specificity_rate:.1%} of valid target rows have bin-level specificity >= 0.95.")
+    if result.masked_out_target_rows > 0:
+        messages.append(f"{result.masked_out_target_rows} target rows were inside the axis Domain Range but outside the Feasible Domain Mask and were excluded from specificity scoring.")
     return messages
 
 
@@ -702,6 +758,10 @@ def make_cluster_record(
         "peerGroupSizeAtUpload": analysis.get("peerGroupSize"),
         "engineAtUpload": analysis.get("engine"),
         "specificityScoreAtUpload": analysis.get("specificityScore"),
+        "specificityMethodAtUpload": analysis.get("specificityMethod"),
+        "meanBinSpecificityAtUpload": analysis.get("meanBinSpecificity"),
+        "maxSpecificityAtUpload": analysis.get("maxSpecificity"),
+        "extremeSpecificityRateAtUpload": analysis.get("extremeSpecificityRate"),
         "meanRarityAtUpload": analysis.get("meanRarity"),
         "maxRarityAtUpload": analysis.get("maxRarity"),
         "unseenBinRateAtUpload": analysis.get("unseenBinRate"),
@@ -711,9 +771,12 @@ def make_cluster_record(
         "observationSupportSAtUpload": analysis.get("observationSupportS"),
         "peerObservationCountAtUpload": analysis.get("peerObservationCount"),
         "validTargetRowsAtUpload": analysis.get("validTargetRows"),
+        "maskedOutTargetRowsAtUpload": analysis.get("maskedOutTargetRows"),
         "coverageCAtUpload": analysis.get("coverageC"),
         "equitabilityEAtUpload": analysis.get("equitabilityE"),
         "totalBinsAtUpload": analysis.get("totalBins"),
+        "validBinsAtUpload": analysis.get("validBins"),
+        "maskedBinsAtUpload": analysis.get("maskedBins"),
         "occupiedBinsAtUpload": analysis.get("occupiedBins"),
     }
     record["fingerprint"] = cluster_fingerprint(record)
@@ -823,6 +886,9 @@ def recompute_bin_occupancy_from_row_vectors(
     axis_bin_occupancy: dict[str, dict[str, int]] = {str(axis["name"]): {} for axis in axes}
     row_bin_tuples: list[list[int]] = []
     out_of_domain_rows = 0
+    masked_out_rows = 0
+    masked_out_bin_occupancy: dict[str, int] = {}
+    feasible_cache: dict[str, bool] = {}
 
     for vector in reordered_rows:
         multidimensional_indices: list[int] = []
@@ -835,8 +901,6 @@ def recompute_bin_occupancy_from_row_vectors(
                 float(axis["resolution"]),
             )
             if status == "valid" and index is not None:
-                axis_counts = axis_bin_occupancy[str(axis["name"])]
-                axis_counts[str(index)] = axis_counts.get(str(index), 0) + 1
                 multidimensional_indices.append(index)
             else:
                 row_out_of_domain = True
@@ -845,6 +909,13 @@ def recompute_bin_occupancy_from_row_vectors(
             out_of_domain_rows += 1
             continue
         key = json.dumps(multidimensional_indices, separators=(",", ":"))
+        if not is_bin_key_feasible_for_goal(key, selected_goal, feasible_cache):
+            masked_out_rows += 1
+            masked_out_bin_occupancy[key] = masked_out_bin_occupancy.get(key, 0) + 1
+            continue
+        for axis, index in zip(axes, multidimensional_indices):
+            axis_counts = axis_bin_occupancy[str(axis["name"])]
+            axis_counts[str(index)] = axis_counts.get(str(index), 0) + 1
         bin_occupancy[key] = bin_occupancy.get(key, 0) + 1
         row_bin_tuples.append(list(multidimensional_indices))
 
@@ -856,10 +927,15 @@ def recompute_bin_occupancy_from_row_vectors(
             "version": 1,
             "basis": "row_level_recomputed_from_sanitized_vectors",
             "validMultidimensionalRowCount": int(sum(bin_occupancy.values())),
+            "feasibleValidRowCount": int(sum(bin_occupancy.values())),
             "invalidRowCount": 0,
             "outOfDomainRowCount": out_of_domain_rows,
+            "maskedOutRowCount": masked_out_rows,
+            "infeasibleRowCount": masked_out_rows,
+            "maskedOutBinCount": len(masked_out_bin_occupancy),
             "totalRows": len(reordered_rows),
         },
+        "masked_out_bin_occupancy": masked_out_bin_occupancy,
     }
 
 
@@ -868,9 +944,18 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         canonical_axes = canonical_axis_order(selected_goal["axes"])
         selected_axis_names = [str(axis["name"]) for axis in canonical_axes]
         current_grid_signature = grid_signature_from_axes(canonical_axes)
+        mask_info = feasible_mask_info_for_goal(selected_goal)
     else:
         selected_axis_names = [str(name) for name in selected_goal]
         current_grid_signature = ""
+        mask_info = {
+            "totalBins": 0,
+            "validBins": 0,
+            "maskedBins": 0,
+            "feasibleExpressions": [],
+            "feasibleMaskEnabled": False,
+            "validDomainRatio": 0.0,
+        }
     selected_signature = axis_subset_key(selected_axis_names)
     bin_counts: dict[str, int] = {}
     axis_bin_counts: dict[str, dict[str, int]] = {}
@@ -878,6 +963,8 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
     legacy_excluded = 0
     grid_signature_excluded = 0
     row_level_observation_count = 0
+    infeasible_peer_rows = 0
+    infeasible_peer_bin_keys: set[str] = set()
 
     for cluster in peer_clusters:
         recomputed: dict[str, Any] | None = None
@@ -894,6 +981,8 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
             cluster_bin_counts = recomputed["bin_occupancy"]
             cluster_axis_counts = recomputed["axis_bin_occupancy"]
             meta = recomputed["bin_occupancy_meta"]
+            infeasible_peer_rows += int(meta.get("maskedOutRowCount") or meta.get("infeasibleRowCount") or 0)
+            infeasible_peer_bin_keys.update(str(key) for key in (recomputed.get("masked_out_bin_occupancy") or {}).keys())
         else:
             cluster_bin_counts = cluster.get("binOccupancy") if isinstance(cluster.get("binOccupancy"), dict) else {}
             cluster_grid_signature = str(cluster.get("gridSignature") or "").strip()
@@ -906,6 +995,7 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
                 continue
             cluster_axis_counts = cluster.get("axisBinOccupancy") or {}
             meta = cluster.get("binOccupancyMeta") if isinstance(cluster.get("binOccupancyMeta"), dict) else {}
+            infeasible_peer_rows += int(meta.get("maskedOutRowCount") or meta.get("infeasibleRowCount") or 0)
         eligible_count += 1
         merge_count_maps(bin_counts, cluster_bin_counts)
         try:
@@ -926,6 +1016,14 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         "coverageAxisSignatureExcludedClusterCount": grid_signature_excluded,
         "rowLevelObservationCount": row_level_observation_count,
         "occupiedBins": len(bin_counts),
+        "totalBins": int(mask_info.get("totalBins") or 0),
+        "validBins": int(mask_info.get("validBins") or mask_info.get("totalBins") or 0),
+        "maskedBins": int(mask_info.get("maskedBins") or 0),
+        "validDomainRatio": float(mask_info.get("validDomainRatio") or 0.0),
+        "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
+        "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
+        "infeasiblePeerRows": int(infeasible_peer_rows),
+        "infeasiblePeerBins": int(len(infeasible_peer_bin_keys)),
         "gridSignature": current_grid_signature,
     }
 
@@ -937,6 +1035,7 @@ def out_of_domain_warnings(
     warnings: list[dict[str, Any]] = []
     meta = target_meta or {}
     out_of_domain_count = int(meta.get("outOfDomainRowCount") or 0)
+    masked_out_count = int(meta.get("maskedOutRowCount") or meta.get("infeasibleRowCount") or 0)
     total_rows = int(meta.get("totalRows") or 0)
     if out_of_domain_count > 0:
         warnings.append(
@@ -946,6 +1045,17 @@ def out_of_domain_warnings(
                 "totalRows": total_rows,
                 "axes": [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])],
                 "message": "Target rows outside the configured domain range were excluded from density occupancy.",
+            }
+        )
+    if masked_out_count > 0:
+        warnings.append(
+            {
+                "role": "target",
+                "maskedOutRowCount": masked_out_count,
+                "infeasibleRowCount": masked_out_count,
+                "totalRows": total_rows,
+                "axes": [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])],
+                "message": "Some target rows are inside the axis Domain Range but outside the Feasible Domain Mask. These rows were excluded from specificity scoring and reported separately.",
             }
         )
     return warnings
@@ -975,7 +1085,12 @@ def analysis_snapshot(
             "analysisTimestamp": utc_now_iso(),
             "peerGroupSize": int(peer_group_size),
             "engine": payload["engine"],
+            "specificityMethod": payload.get("specificity_method"),
+            "specificityInterpretation": payload.get("specificity_interpretation"),
             "specificityScore": payload["specificity_score"],
+            "meanBinSpecificity": payload.get("mean_bin_specificity"),
+            "maxSpecificity": payload.get("max_specificity"),
+            "extremeSpecificityRate": payload.get("extreme_specificity_rate"),
             "meanRarity": payload["mean_rarity"],
             "maxRarity": payload["max_rarity"],
             "unseenBinRate": payload["unseen_bin_rate"],
@@ -989,8 +1104,14 @@ def analysis_snapshot(
             "validTargetRows": payload["valid_target_rows"],
             "invalidTargetRows": payload["invalid_target_rows"],
             "outOfDomainRows": payload["out_of_domain_rows"],
+            "maskedOutTargetRows": payload.get("masked_out_target_rows"),
+            "infeasibleTargetRows": payload.get("infeasible_target_rows"),
             "totalBins": payload["total_bins"],
+            "validBins": payload.get("valid_bins"),
+            "maskedBins": payload.get("masked_bins"),
             "occupiedBins": payload["occupied_bins"],
+            "feasibleMaskEnabled": payload.get("feasible_mask_enabled"),
+            "feasibleExpressions": coverage_info.get("feasibleExpressions", []) if coverage_info else [],
             "outOfDomainWarnings": warnings or [],
         }
     )
@@ -1061,6 +1182,11 @@ def run_density_analysis(
     warnings = out_of_domain_warnings(selected_goal, target_meta)
     analyzer = DensityGridAnalyzer(config)
     analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+    analyzer.set_feasible_domain(
+        valid_bins=int(coverage_info.get("validBins") or coverage_info.get("totalBins") or 0),
+        masked_bins=int(coverage_info.get("maskedBins") or 0),
+        feasible_mask_enabled=bool(coverage_info.get("feasibleMaskEnabled")),
+    )
     result = analyzer.diagnose(target_bin_counts, target_meta)
     result_payload = result.to_payload(config.axis_names)
     result_payload["outOfDomainWarnings"] = warnings
@@ -1072,6 +1198,13 @@ def run_density_analysis(
     result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
     result_payload["rowLevelObservationCount"] = coverage_info["rowLevelObservationCount"]
     result_payload["gridSignature"] = coverage_info["gridSignature"]
+    result_payload["validBins"] = coverage_info.get("validBins", result.valid_bins)
+    result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
+    result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio", 1.0)
+    result_payload["feasibleMaskEnabled"] = coverage_info.get("feasibleMaskEnabled", False)
+    result_payload["feasibleExpressions"] = coverage_info.get("feasibleExpressions", [])
+    result_payload["infeasiblePeerRows"] = coverage_info.get("infeasiblePeerRows", 0)
+    result_payload["infeasiblePeerBins"] = coverage_info.get("infeasiblePeerBins", 0)
     return {
         "config": config,
         "peerRows": peer_rows,
@@ -1080,6 +1213,8 @@ def run_density_analysis(
         "coverageInfo": {
             **coverage_info,
             "totalBins": result.total_bins,
+            "validBins": result.valid_bins,
+            "maskedBins": result.masked_bins,
             "occupiedBins": result.occupied_bins,
         },
         "warnings": warnings,
@@ -1598,12 +1733,20 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "target_vector",
             "peer_group_size",
             "engine",
+            "specificity_method",
             "specificity_score",
+            "mean_bin_specificity",
+            "max_specificity",
+            "extreme_specificity_rate",
             "mean_rarity",
             "max_rarity",
             "unseen_bin_rate",
             "rare_bin_rate",
             "out_of_domain_rate",
+            "masked_out_target_rows",
+            "feasible_mask_enabled",
+            "valid_bins",
+            "masked_bins",
             "confidence",
             "observation_support_S",
             "coverage_C",
@@ -1629,12 +1772,20 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "target_vector": json.dumps(report.get("visualizations", {}).get("targetVector", []), ensure_ascii=False),
                 "peer_group_size": meta.get("peer_group_size"),
                 "engine": result.get("engine"),
+                "specificity_method": result.get("specificity_method"),
                 "specificity_score": result.get("specificity_score"),
+                "mean_bin_specificity": result.get("mean_bin_specificity"),
+                "max_specificity": result.get("max_specificity"),
+                "extreme_specificity_rate": result.get("extreme_specificity_rate"),
                 "mean_rarity": result.get("mean_rarity"),
                 "max_rarity": result.get("max_rarity"),
                 "unseen_bin_rate": result.get("unseen_bin_rate"),
                 "rare_bin_rate": result.get("rare_bin_rate"),
                 "out_of_domain_rate": result.get("out_of_domain_rate"),
+                "masked_out_target_rows": result.get("masked_out_target_rows"),
+                "feasible_mask_enabled": result.get("feasible_mask_enabled"),
+                "valid_bins": result.get("valid_bins"),
+                "masked_bins": result.get("masked_bins"),
                 "confidence": result.get("confidence"),
                 "observation_support_S": result.get("observation_support_S"),
                 "coverage_C": result.get("coverage_C"),
@@ -1687,7 +1838,10 @@ def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
                 names = list(subset)
                 selected_goal = goal_subset(goal, names)
                 peer_clusters = load_peer_clusters(str(goal["id"]), names)
-                goal_counts[axis_subset_key(names)] = int(build_global_bin_counts(peer_clusters, selected_goal)["coverageEligibleClusterCount"])
+                try:
+                    goal_counts[axis_subset_key(names)] = int(build_global_bin_counts(peer_clusters, selected_goal)["coverageEligibleClusterCount"])
+                except ValueError:
+                    goal_counts[axis_subset_key(names)] = 0
         counts[goal["id"]] = goal_counts
     return counts
 
@@ -1712,6 +1866,8 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
             }
         )
     occupied_bins = len(coverage_info["binCounts"])
+    valid_bins = int(coverage_info.get("validBins") or total_bins)
+    masked_bins = int(coverage_info.get("maskedBins") or 0)
     warnings = []
     if total_bins > 100000:
         warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
@@ -1719,12 +1875,19 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         warnings.append("일부 기존 record는 row-level vectors가 없어 coverage 계산에서 제외됩니다. 정확한 coverage를 원하면 CSV를 다시 업로드하세요.")
     if coverage_info["coverageGridSignatureExcludedClusterCount"]:
         warnings.append("Axis 구성이 맞지 않는 record는 density 계산에서 제외됩니다.")
+    if coverage_info.get("feasibleMaskEnabled"):
+        warnings.append("Feasible Domain Mask가 활성화되어 coverage는 occupied bins / valid bins 기준입니다.")
     return {
         "basis": coverage_info["coverageBasis"],
         "axisBins": axis_previews,
         "totalBins": total_bins,
+        "validBins": valid_bins,
+        "maskedBins": masked_bins,
+        "validDomainRatio": coverage_info.get("validDomainRatio", valid_bins / total_bins if total_bins else 0.0),
+        "feasibleMaskEnabled": coverage_info.get("feasibleMaskEnabled", False),
+        "feasibleExpressions": coverage_info.get("feasibleExpressions", []),
         "occupiedBins": occupied_bins,
-        "estimatedCoverage": occupied_bins / total_bins if total_bins else 0.0,
+        "estimatedCoverage": occupied_bins / valid_bins if valid_bins else 0.0,
         "coverageEligibleClusterCount": coverage_info["coverageEligibleClusterCount"],
         "coverageLegacyExcludedClusterCount": coverage_info["coverageLegacyExcludedClusterCount"],
         "coverageGridSignatureExcludedClusterCount": coverage_info["coverageGridSignatureExcludedClusterCount"],
@@ -1755,6 +1918,7 @@ def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], prev
         "name": selected_goal["name"],
         "K_m": float(selected_goal.get("K_m", K_M)),
         "axes": axes,
+        "feasibleDomainExpressions": feasible_expressions_for_goal(selected_goal),
     }
     experiment_config_from_goal(preview_goal)
     return preview_goal
@@ -1790,6 +1954,11 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
     if metrics["peerValidRows"] > 0 and target_recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"] > 0:
         analyzer = DensityGridAnalyzer(experiment_config_from_goal(preview_goal))
         analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+        analyzer.set_feasible_domain(
+            valid_bins=metrics["validBins"],
+            masked_bins=metrics["maskedBins"],
+            feasible_mask_enabled=metrics["feasibleMaskEnabled"],
+        )
         result_payload = analyzer.diagnose(target_recomputed["bin_occupancy"], target_recomputed["bin_occupancy_meta"]).to_payload(axis_names)
 
     return {
@@ -2029,6 +2198,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     goals[existing_index] = saved_goal
                 save_goal_store(goals)
                 self._send_json({"savedGoal": saved_goal, "goals": normalize_goals_for_display(goals), "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts(), "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalize_goals_for_display(goals)}})
+                return
+            if parsed.path == "/api/admin/goals/validate-expressions":
+                if not self._admin_allowed():
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
+                    return
+                validated_goal = validate_goal(payload)
+                self._send_json({"ok": True, "goal": validated_goal, "maskInfo": feasible_mask_info_for_goal(validated_goal)})
                 return
             if parsed.path == "/api/admin/goals/apply-grid":
                 if not self._admin_allowed():
