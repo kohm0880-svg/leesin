@@ -8,6 +8,7 @@ import numpy as np
 import app
 import storage
 from feasible_mask import (
+    compile_focused_2d_mask_rule,
     compile_gui_feasible_rule,
     compute_valid_bin_mask_for_axes,
     evaluate_feasible_expression_on_arrays,
@@ -472,6 +473,151 @@ class DensityGridBehaviorTests(unittest.TestCase):
         expression = compile_gui_feasible_rule(rule, ["temperature", "pressure"])
         self.assertEqual(expression, "not (temperature > 80 and (pressure < 2 or pressure > 5))")
 
+    def test_focused_2d_mask_compiles_without_all_scope(self) -> None:
+        rule = {
+            "sourceType": "focused_2d_mask",
+            "guiSpec": {
+                "type": "focused_2d_mask",
+                "xAxis": "temperature",
+                "yAxis": "pressure",
+                "xMin": 80,
+                "xMax": 100,
+                "yMin": 0,
+                "yMax": 2,
+                "scope": {"concentration": {"mode": "all"}},
+            },
+        }
+        expression = compile_focused_2d_mask_rule(rule, ["temperature", "pressure", "concentration"])
+        self.assertEqual(
+            expression,
+            "not (temperature >= 80 and temperature <= 100 and pressure >= 0 and pressure <= 2)",
+        )
+
+    def test_focused_2d_mask_compiles_range_scope(self) -> None:
+        rule = {
+            "sourceType": "focused_2d_mask",
+            "guiSpec": {
+                "type": "focused_2d_mask",
+                "xAxis": "temperature",
+                "yAxis": "pressure",
+                "xMin": 80,
+                "xMax": 100,
+                "yMin": 0,
+                "yMax": 2,
+                "scope": {"concentration": {"mode": "range", "min": 70, "max": 100}},
+            },
+        }
+        expression = compile_focused_2d_mask_rule(rule, ["temperature", "pressure", "concentration"])
+        self.assertIn("concentration >= 70", expression)
+        self.assertIn("concentration <= 100", expression)
+
+    def test_focused_2d_mask_rejects_same_axis(self) -> None:
+        rule = {
+            "sourceType": "focused_2d_mask",
+            "guiSpec": {
+                "type": "focused_2d_mask",
+                "xAxis": "temperature",
+                "yAxis": "temperature",
+                "xMin": 80,
+                "xMax": 100,
+                "yMin": 0,
+                "yMax": 2,
+                "scope": {},
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "different X and Y"):
+            compile_focused_2d_mask_rule(rule, ["temperature", "pressure"])
+
+    def test_focused_2d_mask_rejects_bad_range(self) -> None:
+        rule = {
+            "sourceType": "focused_2d_mask",
+            "guiSpec": {
+                "type": "focused_2d_mask",
+                "xAxis": "temperature",
+                "yAxis": "pressure",
+                "xMin": 100,
+                "xMax": 80,
+                "yMin": 0,
+                "yMax": 2,
+                "scope": {},
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "X minimum"):
+            compile_focused_2d_mask_rule(rule, ["temperature", "pressure"])
+
+    def test_focused_2d_mask_reduces_valid_bins_and_coverage_denominator(self) -> None:
+        selected_goal = goal(
+            axes=[
+                axis("temperature", domain_max=100, resolution=10),
+                axis("pressure", domain_max=10, resolution=1),
+                axis("concentration", domain_max=100, resolution=10),
+            ]
+        )
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {
+                    "type": "focused_2d_mask",
+                    "xAxis": "temperature",
+                    "yAxis": "pressure",
+                    "xMin": 80,
+                    "xMax": 100,
+                    "yMin": 0,
+                    "yMax": 2,
+                    "scope": {"concentration": {"mode": "all"}},
+                },
+            }
+        ]
+        normalized = storage.validate_goal(selected_goal)
+        mask_info = compute_valid_bin_mask_for_axes(normalized["axes"], normalized["feasibleDomainExpressions"])
+        self.assertEqual(mask_info["totalBins"], 1000)
+        self.assertEqual(mask_info["maskedBins"], 40)
+        self.assertEqual(mask_info["validBins"], 960)
+        peer = record_from_rows(normalized, [{"temperature": "40", "pressure": "5", "concentration": "50"}], "peer")
+        coverage = app.build_global_bin_counts([peer], normalized)
+        analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(normalized))
+        analyzer.set_peer_bin_counts(coverage["binCounts"])
+        analyzer.set_feasible_domain(coverage["validBins"], coverage["maskedBins"], coverage["feasibleMaskEnabled"])
+        result = analyzer.diagnose(coverage["binCounts"], {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertAlmostEqual(result.coverage_C, 1 / 960)
+
+    def test_focused_2d_mask_marks_target_inside_domain_as_masked_out(self) -> None:
+        selected_goal = goal(
+            axes=[
+                axis("temperature", domain_max=100, resolution=10),
+                axis("pressure", domain_max=10, resolution=1),
+                axis("concentration", domain_max=100, resolution=10),
+            ]
+        )
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {
+                    "type": "focused_2d_mask",
+                    "xAxis": "temperature",
+                    "yAxis": "pressure",
+                    "xMin": 80,
+                    "xMax": 100,
+                    "yMin": 0,
+                    "yMax": 2,
+                    "scope": {"concentration": {"mode": "all"}},
+                },
+            }
+        ]
+        normalized = storage.validate_goal(selected_goal)
+        recomputed = app.recompute_bin_occupancy_from_row_vectors(
+            [[90.0, 1.0, 50.0], [40.0, 5.0, 50.0]],
+            ["temperature", "pressure", "concentration"],
+            normalized,
+        )
+        self.assertEqual(recomputed["bin_occupancy_meta"]["outOfDomainRowCount"], 0)
+        self.assertEqual(recomputed["bin_occupancy_meta"]["maskedOutRowCount"], 1)
+        self.assertEqual(recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"], 1)
+
     def test_validate_goal_merges_enabled_gui_rules_and_advanced_expressions(self) -> None:
         payload = goal(axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)])
         payload["feasibleDomainRules"] = [
@@ -493,6 +639,34 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(
             normalized["feasibleDomainExpressions"],
             ["not (temperature > 80 and (pressure < 2 or pressure > 5))", "pressure >= 0"],
+        )
+
+    def test_validate_goal_merges_focused_mask_rules(self) -> None:
+        payload = goal(axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)])
+        payload["feasibleDomainRules"] = [
+            {
+                "id": "rule_mask",
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {
+                    "type": "focused_2d_mask",
+                    "xAxis": "temperature",
+                    "yAxis": "pressure",
+                    "xMin": 80,
+                    "xMax": 100,
+                    "yMin": 0,
+                    "yMax": 2,
+                    "scope": {},
+                },
+            }
+        ]
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(len(normalized["feasibleDomainRules"]), 1)
+        self.assertEqual(normalized["feasibleDomainRules"][0]["sourceType"], "focused_2d_mask")
+        self.assertEqual(
+            normalized["feasibleDomainExpressions"],
+            ["not (temperature >= 80 and temperature <= 100 and pressure >= 0 and pressure <= 2)"],
         )
 
     def test_existing_feasible_expressions_without_rules_remain_advanced(self) -> None:
@@ -520,6 +694,14 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("data-rule-convert", template)
         self.assertIn("Convert to Advanced Expression", template)
         self.assertIn("feasibleDomainAdvancedExpressions", template)
+
+    def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:
+        template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("Focused Mask Tool Settings", template)
+        self.assertIn("leesinFocusedMaskToolSettings", template)
+        self.assertIn("sourceType:'focused_2d_mask'", template)
+        self.assertIn("data-focused-edit", template)
+        self.assertIn("data-focused-convert", template)
 
     def test_filter_bin_counts_by_feasible_domain_reports_exclusions(self) -> None:
         axes = [axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]

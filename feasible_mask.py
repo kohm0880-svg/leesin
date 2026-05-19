@@ -109,6 +109,60 @@ def compile_gui_feasible_rule(rule: dict[str, Any], allowed_axes: list[str]) -> 
     return expression
 
 
+def compile_focused_2d_mask_rule(rule: dict[str, Any], allowed_axes: list[str]) -> str:
+    allowed = _allowed_axis_set(allowed_axes)
+    gui_spec = rule.get("guiSpec") if isinstance(rule.get("guiSpec"), dict) else {}
+    if str(gui_spec.get("type") or "") != "focused_2d_mask":
+        raise ValueError("Only focused_2d_mask feasible GUI rules are supported.")
+
+    x_axis = str(gui_spec.get("xAxis") or "").strip()
+    y_axis = str(gui_spec.get("yAxis") or "").strip()
+    if x_axis not in allowed:
+        raise ValueError(f"Unknown focused mask X axis '{x_axis}'.")
+    if y_axis not in allowed:
+        raise ValueError(f"Unknown focused mask Y axis '{y_axis}'.")
+    if x_axis == y_axis:
+        raise ValueError("Focused 2D Mask requires different X and Y axes.")
+
+    x_min = _format_number(gui_spec.get("xMin"))
+    x_max = _format_number(gui_spec.get("xMax"))
+    y_min = _format_number(gui_spec.get("yMin"))
+    y_max = _format_number(gui_spec.get("yMax"))
+    if float(x_min) > float(x_max):
+        raise ValueError("Focused 2D Mask X minimum must be less than or equal to X maximum.")
+    if float(y_min) > float(y_max):
+        raise ValueError("Focused 2D Mask Y minimum must be less than or equal to Y maximum.")
+
+    conditions = [
+        f"{x_axis} >= {x_min}",
+        f"{x_axis} <= {x_max}",
+        f"{y_axis} >= {y_min}",
+        f"{y_axis} <= {y_max}",
+    ]
+    scope = gui_spec.get("scope") if isinstance(gui_spec.get("scope"), dict) else {}
+    for raw_axis, raw_scope in scope.items():
+        axis_name = str(raw_axis or "").strip()
+        if axis_name not in allowed:
+            raise ValueError(f"Unknown focused mask scope axis '{axis_name}'.")
+        if axis_name in {x_axis, y_axis}:
+            continue
+        scope_spec = raw_scope if isinstance(raw_scope, dict) else {}
+        mode = str(scope_spec.get("mode") or "all").strip().lower()
+        if mode == "all":
+            continue
+        if mode != "range":
+            raise ValueError(f"Unsupported focused mask scope mode '{mode}'.")
+        min_value = _format_number(scope_spec.get("min"))
+        max_value = _format_number(scope_spec.get("max"))
+        if float(min_value) > float(max_value):
+            raise ValueError(f"Focused mask scope range for '{axis_name}' is invalid.")
+        conditions.extend([f"{axis_name} >= {min_value}", f"{axis_name} <= {max_value}"])
+
+    expression = f"not ({' and '.join(conditions)})"
+    validate_feasible_expression(expression, allowed_axes)
+    return expression
+
+
 def _rule_id_for_expression(expression: str) -> str:
     digest = hashlib.sha1(expression.encode("utf-8")).hexdigest()[:12]
     return f"rule_{digest}"
@@ -121,15 +175,58 @@ def normalize_feasible_rules(rules: Any, allowed_axes: list[str]) -> list[dict[s
     for raw_rule in rules:
         if not isinstance(raw_rule, dict):
             continue
-        source_type = str(raw_rule.get("sourceType") or "gui_conditional")
-        editable_mode = str(raw_rule.get("editableMode") or "gui")
-        if source_type != "gui_conditional" or editable_mode != "gui":
-            continue
-        expression = compile_gui_feasible_rule(raw_rule, allowed_axes)
         gui_spec = raw_rule.get("guiSpec") if isinstance(raw_rule.get("guiSpec"), dict) else {}
+        source_type = str(raw_rule.get("sourceType") or gui_spec.get("type") or "gui_conditional")
+        editable_mode = str(raw_rule.get("editableMode") or "gui")
+        if source_type not in {"gui_conditional", "focused_2d_mask"} or editable_mode != "gui":
+            continue
+        enabled = bool(raw_rule.get("enabled", True))
+        if source_type == "focused_2d_mask" or str(gui_spec.get("type") or "") == "focused_2d_mask":
+            expression = compile_focused_2d_mask_rule(raw_rule, allowed_axes)
+            x_axis = str(gui_spec.get("xAxis") or "").strip()
+            y_axis = str(gui_spec.get("yAxis") or "").strip()
+            scope = gui_spec.get("scope") if isinstance(gui_spec.get("scope"), dict) else {}
+            normalized_scope: dict[str, dict[str, Any]] = {}
+            for raw_axis, raw_scope in scope.items():
+                axis_name = str(raw_axis or "").strip()
+                if axis_name not in _allowed_axis_set(allowed_axes):
+                    continue
+                if axis_name in {x_axis, y_axis}:
+                    continue
+                scope_spec = raw_scope if isinstance(raw_scope, dict) else {}
+                mode = str(scope_spec.get("mode") or "all").strip().lower()
+                if mode == "range":
+                    normalized_scope[axis_name] = {
+                        "mode": "range",
+                        "min": float(scope_spec.get("min")),
+                        "max": float(scope_spec.get("max")),
+                    }
+                else:
+                    normalized_scope[axis_name] = {"mode": "all"}
+            normalized.append(
+                {
+                    "id": str(raw_rule.get("id") or _rule_id_for_expression(expression)),
+                    "sourceType": "focused_2d_mask",
+                    "editableMode": "gui",
+                    "guiSpec": {
+                        "type": "focused_2d_mask",
+                        "xAxis": x_axis,
+                        "yAxis": y_axis,
+                        "xMin": float(gui_spec.get("xMin")),
+                        "xMax": float(gui_spec.get("xMax")),
+                        "yMin": float(gui_spec.get("yMin")),
+                        "yMax": float(gui_spec.get("yMax")),
+                        "scope": normalized_scope,
+                    },
+                    "expression": expression,
+                    "enabled": enabled,
+                }
+            )
+            continue
+
+        expression = compile_gui_feasible_rule(raw_rule, allowed_axes)
         if_spec = gui_spec.get("if") if isinstance(gui_spec.get("if"), dict) else {}
         then_spec = gui_spec.get("then") if isinstance(gui_spec.get("then"), dict) else {}
-        enabled = bool(raw_rule.get("enabled", True))
         normalized.append(
             {
                 "id": str(raw_rule.get("id") or _rule_id_for_expression(expression)),
