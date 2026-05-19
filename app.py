@@ -523,6 +523,10 @@ def build_projection_explorer(
         "maskedBins": int(coverage_info.get("maskedBins") or 0) if isinstance(coverage_info, dict) else 0,
         "validDomainRatio": float(coverage_info.get("validDomainRatio") or 0.0) if isinstance(coverage_info, dict) else 0.0,
         "feasibleExpressions": list(coverage_info.get("feasibleExpressions") or []) if isinstance(coverage_info, dict) else [],
+        "targetIncludedInReference": bool(coverage_info.get("targetIncludedInReference", True)) if isinstance(coverage_info, dict) else True,
+        "internalDensityMode": bool(coverage_info.get("internalDensityMode")) if isinstance(coverage_info, dict) else False,
+        "externalPeerObservationCount": int(coverage_info.get("externalPeerObservationCount") or 0) if isinstance(coverage_info, dict) else 0,
+        "referenceObservationCount": int(coverage_info.get("referenceObservationCount") or 0) if isinstance(coverage_info, dict) else 0,
         "maskRenderingTodo": "TODO: render masked 2D projection regions as gray overlay.",
         "targetRowBinTuples": payload_tuples,
         "targetRowTupleSampled": tuple_sampled,
@@ -557,6 +561,8 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
         "occupiedBins": int(occupied_bins),
         "peerValidRows": int(peer_valid_rows),
+        "referenceObservationCount": int(peer_valid_rows),
+        "targetIncludedInReference": True,
         "observationSupportZ": round(float(observation_support), 6),
         "coverageC": round(float(coverage), 6),
         "equitabilityE": round(float(equitability), 6),
@@ -659,19 +665,19 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
             "label": "Observation Support",
             "score": round(float(result.observation_support_S), 4),
             "impact": "down" if result.observation_support_S < 0.6 else "stable",
-            "message": "Observation Support uses peer row-level observations: S = peer rows / (peer rows + K_density). K_density currently reuses the goal K_m value.",
+            "message": "Observation Support uses target-included reference row-level observations: S = reference rows / (reference rows + K_density). K_density currently reuses the goal K_m value.",
         },
         {
             "label": "Coverage",
             "score": round(float(result.coverage_C), 4),
             "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage measures how much of the configured density grid is occupied by eligible peer row-level observations.",
+            "message": "Coverage measures how much of the feasible density grid is occupied by target-included reference row-level observations.",
         },
         {
             "label": "Equitability",
             "score": round(float(result.equitability_E), 4),
             "impact": "down" if result.equitability_E < 0.5 else "stable",
-            "message": "Equitability measures whether peer observations are balanced across occupied density bins.",
+            "message": "Equitability measures whether reference observations are balanced across occupied density bins.",
         },
     ]
     if warnings:
@@ -689,22 +695,22 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
 def build_summary(result: DensityDiagnosisResult) -> list[str]:
     messages: list[str] = []
     if result.specificity_score > 0.75 and result.confidence > 0.7:
-        messages.append("Specificity Score and confidence are both high. Target rows fall in low-density or unseen bins relative to the occupied peer bin count distribution.")
+        messages.append("Specificity Score and confidence are both high. Target rows fall in low-density bins relative to the target-included reference count distribution.")
     elif result.specificity_score > 0.75 and result.confidence <= 0.4:
-        messages.append("Target rows are rare against the current peer density map, but the peer map itself has limited support. Interpret the outlier signal cautiously.")
+        messages.append("Target rows are rare against the current target-included reference density map, but the map itself has limited support. Interpret the outlier signal cautiously.")
     elif result.specificity_score <= 0.5:
-        messages.append("Target rows mostly fall in dense or ordinary occupied peer bins.")
+        messages.append("Target rows mostly fall in dense or ordinary occupied reference bins.")
     else:
-        messages.append("The target shows moderate specificity. Additional peer observations can make the density baseline sharper.")
+        messages.append("The target shows moderate specificity. Additional external peer observations can make the reference density baseline sharper.")
 
     if result.observation_support_S < 0.5:
-        messages.append("Observation Support is low. Add saved records with row-level sanitized axis vectors.")
+        messages.append("Observation Support is low. Add more row-level observations or saved external records with row-level sanitized axis vectors.")
     if result.coverage_C < 0.3:
-        messages.append("Coverage is low. The peer density map occupies only a small portion of the configured domain-resolution grid.")
+        messages.append("Coverage is low. The target-included reference density map occupies only a small portion of the feasible domain-resolution grid.")
     if result.equitability_E < 0.5:
-        messages.append("Equitability is low. Peer observations are concentrated in a small number of occupied bins.")
+        messages.append("Equitability is low. Reference observations are concentrated in a small number of occupied bins.")
     if result.unseen_bin_rate > 0:
-        messages.append(f"{result.unseen_bin_rate:.1%} of valid target rows fall in bins unseen in the peer density map.")
+        messages.append(f"{result.unseen_bin_rate:.1%} of valid target rows fall in bins unseen in the reference density map.")
     if result.extreme_specificity_rate > 0:
         messages.append(f"{result.extreme_specificity_rate:.1%} of valid target rows have bin-level specificity >= 0.95.")
     if result.masked_out_target_rows > 0:
@@ -1192,8 +1198,29 @@ def run_density_analysis(
         peer_group = np.empty((0, len(axis_names)), dtype=float)
     coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
     warnings = out_of_domain_warnings(selected_goal, target_meta)
+    external_bin_counts = {str(key): int(value) for key, value in (coverage_info.get("binCounts") or {}).items()}
+    reference_bin_counts = dict(external_bin_counts)
+    merge_count_maps(reference_bin_counts, target_bin_counts)
+    external_peer_record_count = int(coverage_info.get("coverageEligibleClusterCount") or 0)
+    external_peer_observation_count = count_map_total(external_bin_counts)
+    reference_observation_count = count_map_total(reference_bin_counts)
+    reference_occupied_bins = len(reference_bin_counts)
+    internal_density_mode = external_peer_record_count == 0 or external_peer_observation_count == 0
+    self_contained_warning = bool(internal_density_mode and reference_observation_count > 0)
+    if self_contained_warning:
+        warnings.append(
+            {
+                "role": "reference",
+                "internalDensityMode": True,
+                "message": (
+                    "특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. "
+                    "외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 "
+                    "업로드된 데이터 내부의 상대적 희소 구간을 의미합니다."
+                ),
+            }
+        )
     analyzer = DensityGridAnalyzer(config)
-    analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+    analyzer.set_peer_bin_counts(reference_bin_counts)
     analyzer.set_feasible_domain(
         valid_bins=int(coverage_info.get("validBins") or coverage_info.get("totalBins") or 0),
         masked_bins=int(coverage_info.get("maskedBins") or 0),
@@ -1214,7 +1241,7 @@ def run_density_analysis(
     result_payload["coverageLegacyExcludedClusterCount"] = coverage_info["coverageLegacyExcludedClusterCount"]
     result_payload["coverageGridSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
     result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
-    result_payload["rowLevelObservationCount"] = coverage_info["rowLevelObservationCount"]
+    result_payload["rowLevelObservationCount"] = reference_observation_count
     result_payload["gridSignature"] = coverage_info["gridSignature"]
     result_payload["validBins"] = coverage_info.get("validBins", result.valid_bins)
     result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
@@ -1224,13 +1251,45 @@ def run_density_analysis(
     result_payload["feasibleExpressions"] = coverage_info.get("feasibleExpressions", [])
     result_payload["infeasiblePeerRows"] = coverage_info.get("infeasiblePeerRows", 0)
     result_payload["infeasiblePeerBins"] = coverage_info.get("infeasiblePeerBins", 0)
+    result_payload["targetIncludedInReference"] = True
+    result_payload["target_included_in_reference"] = True
+    result_payload["internalDensityMode"] = internal_density_mode
+    result_payload["internal_density_mode"] = internal_density_mode
+    result_payload["selfContainedReferenceWarning"] = self_contained_warning
+    result_payload["self_contained_reference_warning"] = self_contained_warning
+    result_payload["externalPeerRecordCount"] = external_peer_record_count
+    result_payload["external_peer_record_count"] = external_peer_record_count
+    result_payload["peerRecordCount"] = external_peer_record_count
+    result_payload["peer_record_count"] = external_peer_record_count
+    result_payload["externalPeerObservationCount"] = external_peer_observation_count
+    result_payload["external_peer_observation_count"] = external_peer_observation_count
+    result_payload["referenceObservationCount"] = reference_observation_count
+    result_payload["reference_observation_count"] = reference_observation_count
+    result_payload["referenceOccupiedBins"] = reference_occupied_bins
+    result_payload["reference_occupied_bins"] = reference_occupied_bins
+    result_payload["referenceDensityPolicy"] = "target_included"
+    coverage_for_result = {
+        **coverage_info,
+        "externalBinCounts": external_bin_counts,
+        "storedPeerBinCounts": external_bin_counts,
+        "binCounts": reference_bin_counts,
+        "referenceBinCounts": reference_bin_counts,
+        "externalPeerRecordCount": external_peer_record_count,
+        "peerRecordCount": external_peer_record_count,
+        "externalPeerObservationCount": external_peer_observation_count,
+        "referenceObservationCount": reference_observation_count,
+        "referenceOccupiedBins": reference_occupied_bins,
+        "targetIncludedInReference": True,
+        "internalDensityMode": internal_density_mode,
+        "selfContainedReferenceWarning": self_contained_warning,
+    }
     return {
         "config": config,
         "peerRows": peer_rows,
         "peerClusters": peer_clusters,
         "peerGroup": peer_group,
         "coverageInfo": {
-            **coverage_info,
+            **coverage_for_result,
             "totalBins": result.total_bins,
             "validBins": result.valid_bins,
             "maskedBins": result.masked_bins,
@@ -1244,7 +1303,7 @@ def run_density_analysis(
             axis_names,
             len(peer_group),
             warnings,
-            coverage_info={**coverage_info, "totalBins": result.total_bins, "occupiedBins": result.occupied_bins},
+            coverage_info={**coverage_for_result, "totalBins": result.total_bins, "occupiedBins": result.occupied_bins},
         ),
     }
 
@@ -1309,11 +1368,11 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         stored_count = int(coverage_info["coverageEligibleClusterCount"])
         saved_text = "saved" if saved_cluster_is_new else "already stored"
         raise ValueError(
-            "Density analysis uses saved records with row-level sanitized axis vectors re-binned into the current grid. "
-            f"Eligible density records={stored_count}, peer row-level observations={coverage_info['rowLevelObservationCount']}. "
+            "Density analysis uses target-included reference row-level bin occupancy in the current grid. "
+            f"Eligible external density records={stored_count}, external peer row-level observations={coverage_info['rowLevelObservationCount']}. "
             f"Excluded legacy records={coverage_info['coverageLegacyExcludedClusterCount']}, "
             f"axis mismatches={coverage_info['coverageGridSignatureExcludedClusterCount']}. "
-            f"This CSV was sanitized into row-level axis vectors and bin occupancy and {saved_text}, but analysis is limited until eligible peer density exists. "
+            f"This CSV was sanitized into row-level axis vectors and bin occupancy and {saved_text}, but analysis could not run because the target/reference rows did not satisfy the analysis requirements. "
             f"Reason: {exc}"
         ) from exc
 
@@ -1333,6 +1392,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
 
     summary = build_summary(result)
     summary.append("Density scoring re-bins saved row-level sanitized axis vectors into the current grid.")
+    if result_payload.get("selfContainedReferenceWarning"):
+        summary.append("특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.")
     if analysis["warnings"]:
         summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
     if saved_cluster:
@@ -1350,6 +1411,13 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "uploaded_columns": dataset_meta["columns"],
             "summary_method": dataset_meta["summary_method"],
             "peer_group_size": int(len(peer_group)),
+            "peerRecordCount": result_payload.get("peerRecordCount"),
+            "externalPeerRecordCount": result_payload.get("externalPeerRecordCount"),
+            "externalPeerObservationCount": result_payload.get("externalPeerObservationCount"),
+            "referenceObservationCount": result_payload.get("referenceObservationCount"),
+            "referenceOccupiedBins": result_payload.get("referenceOccupiedBins"),
+            "targetIncludedInReference": True,
+            "internalDensityMode": result_payload.get("internalDensityMode"),
             "axis_names": config.axis_names,
             "axes": canonical_axis_order(selected_goal["axes"]),
             "available_axes": goal["axes"],
@@ -1361,7 +1429,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "coverageLegacyExcludedClusterCount": analysis["coverageInfo"]["coverageLegacyExcludedClusterCount"],
             "coverageGridSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageGridSignatureExcludedClusterCount"],
             "coverageAxisSignatureExcludedClusterCount": analysis["coverageInfo"]["coverageGridSignatureExcludedClusterCount"],
-            "rowLevelObservationCount": analysis["coverageInfo"]["rowLevelObservationCount"],
+            "rowLevelObservationCount": analysis["coverageInfo"]["referenceObservationCount"],
             "occupiedBins": analysis["coverageInfo"]["occupiedBins"],
             "totalBins": analysis["coverageInfo"]["totalBins"],
             "storage_policy": "Raw upload rows, filenames, and unmapped columns are not stored.",
@@ -1751,6 +1819,13 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "axis_names",
             "target_vector",
             "peer_group_size",
+            "peer_record_count",
+            "external_peer_record_count",
+            "external_peer_observation_count",
+            "reference_observation_count",
+            "reference_occupied_bins",
+            "target_included_in_reference",
+            "internal_density_mode",
             "engine",
             "specificity_method",
             "specificity_score",
@@ -1795,6 +1870,13 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "axis_names": json.dumps(meta.get("axis_names", []), ensure_ascii=False),
                 "target_vector": json.dumps(report.get("visualizations", {}).get("targetVector", []), ensure_ascii=False),
                 "peer_group_size": meta.get("peer_group_size"),
+                "peer_record_count": result.get("peerRecordCount", result.get("peer_record_count")),
+                "external_peer_record_count": result.get("externalPeerRecordCount", result.get("external_peer_record_count")),
+                "external_peer_observation_count": result.get("externalPeerObservationCount", result.get("external_peer_observation_count")),
+                "reference_observation_count": result.get("referenceObservationCount", result.get("reference_observation_count")),
+                "reference_occupied_bins": result.get("referenceOccupiedBins", result.get("reference_occupied_bins")),
+                "target_included_in_reference": result.get("targetIncludedInReference", result.get("target_included_in_reference")),
+                "internal_density_mode": result.get("internalDensityMode", result.get("internal_density_mode")),
                 "engine": result.get("engine"),
                 "specificity_method": result.get("specificity_method"),
                 "specificity_score": result.get("specificity_score"),
@@ -1975,14 +2057,30 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
         "row_bin_tuples": [],
         "bin_occupancy_meta": {"validMultidimensionalRowCount": 0, "invalidRowCount": 0, "outOfDomainRowCount": 0, "totalRows": 0},
     }
-    metrics = density_preview_metrics_from_coverage(preview_goal, coverage_info)
-    projection_explorer = build_projection_explorer(preview_goal, coverage_info, target_recomputed["row_bin_tuples"])
+    external_bin_counts = {str(key): int(value) for key, value in (coverage_info.get("binCounts") or {}).items()}
+    reference_bin_counts = dict(external_bin_counts)
+    merge_count_maps(reference_bin_counts, target_recomputed["bin_occupancy"])
+    preview_coverage_info = {
+        **coverage_info,
+        "externalBinCounts": external_bin_counts,
+        "storedPeerBinCounts": external_bin_counts,
+        "binCounts": reference_bin_counts,
+        "referenceBinCounts": reference_bin_counts,
+        "externalPeerRecordCount": int(coverage_info.get("coverageEligibleClusterCount") or 0),
+        "externalPeerObservationCount": count_map_total(external_bin_counts),
+        "referenceObservationCount": count_map_total(reference_bin_counts),
+        "referenceOccupiedBins": len(reference_bin_counts),
+        "targetIncludedInReference": True,
+        "internalDensityMode": count_map_total(external_bin_counts) == 0,
+    }
+    metrics = density_preview_metrics_from_coverage(preview_goal, preview_coverage_info)
+    projection_explorer = build_projection_explorer(preview_goal, preview_coverage_info, target_recomputed["row_bin_tuples"])
     projection_explorer["gridPreviewMetrics"] = metrics
 
     result_payload: dict[str, Any] | None = None
     if metrics["peerValidRows"] > 0 and target_recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"] > 0:
         analyzer = DensityGridAnalyzer(experiment_config_from_goal(preview_goal))
-        analyzer.set_peer_bin_counts(coverage_info["binCounts"])
+        analyzer.set_peer_bin_counts(reference_bin_counts)
         analyzer.set_feasible_domain(
             valid_bins=metrics["validBins"],
             masked_bins=metrics["maskedBins"],
@@ -1997,7 +2095,7 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
         "projectionExplorer": projection_explorer,
         "targetBinOccupancy": target_recomputed["bin_occupancy"],
         "targetBinOccupancyMeta": target_recomputed["bin_occupancy_meta"],
-        "coverageInfo": {key: value for key, value in coverage_info.items() if key not in {"binCounts", "axisBinCounts"}},
+        "coverageInfo": {key: value for key, value in preview_coverage_info.items() if key not in {"binCounts", "axisBinCounts", "referenceBinCounts", "externalBinCounts", "storedPeerBinCounts"}},
     }
 
 

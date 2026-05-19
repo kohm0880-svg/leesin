@@ -101,7 +101,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
 
     def test_empty_peer_density_raises_clear_error(self) -> None:
         analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
-        with self.assertRaisesRegex(ValueError, "at least one peer row-level bin occupancy observation"):
+        with self.assertRaisesRegex(ValueError, "target-included reference row-level bin occupancy observation"):
             analyzer.diagnose({"[0]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
 
     def test_same_aggregated_bin_count_gives_same_density_result(self) -> None:
@@ -197,7 +197,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         ):
             response = app.analyze_request_v2(payload)
         self.assertEqual(response["result"]["engine"], "density_grid")
-        self.assertEqual(response["result"]["peer_observation_count"], 1)
+        self.assertEqual(response["result"]["peer_observation_count"], 3)
+        self.assertEqual(response["result"]["externalPeerObservationCount"], 1)
+        self.assertEqual(response["result"]["referenceObservationCount"], 3)
+        self.assertTrue(response["result"]["targetIncludedInReference"])
         for key in [
             "specificity_score",
             "specificity_method",
@@ -215,8 +218,36 @@ class DensityGridBehaviorTests(unittest.TestCase):
             "masked_bins",
             "feasible_mask_enabled",
             "masked_out_target_rows",
+            "reference_observation_count",
+            "external_peer_observation_count",
+            "target_included_in_reference",
         ]:
             self.assertIn(key, response["result"])
+
+    def test_single_target_without_stored_peer_still_analyzes_internal_density(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        payload = {
+            "goalId": selected_goal["id"],
+            "selectedAxes": ["x"],
+            "axisMapping": {"x": "x"},
+            "rows": [{"x": "1"}, {"x": "1"}, {"x": "2"}],
+        }
+        with (
+            patch("app.load_goal_store", return_value=[selected_goal]),
+            patch("storage.load_cluster_store", return_value=[]),
+            patch("app.load_cluster_store", return_value=[]),
+            patch("storage.save_cluster_store"),
+        ):
+            response = app.analyze_request_v2(payload)
+        self.assertEqual(response["result"]["engine"], "density_grid")
+        self.assertEqual(response["result"]["externalPeerRecordCount"], 0)
+        self.assertEqual(response["result"]["externalPeerObservationCount"], 0)
+        self.assertEqual(response["result"]["referenceObservationCount"], 3)
+        self.assertGreaterEqual(response["result"]["specificity_score"], 0.0)
+        self.assertGreaterEqual(response["result"]["confidence"], 0.0)
+        self.assertTrue(response["result"]["internalDensityMode"])
+        self.assertTrue(response["result"]["selfContainedReferenceWarning"])
+        self.assertTrue(any("업로드된 데이터 내부" in message for message in response["summary"]))
 
     def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
         selected_goal = goal(axes=[axis("x")])
