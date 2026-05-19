@@ -249,6 +249,21 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertTrue(response["result"]["selfContainedReferenceWarning"])
         self.assertTrue(any("업로드된 데이터 내부" in message for message in response["summary"]))
 
+    def test_delete_impact_reference_excludes_saved_target_before_readding_it(self) -> None:
+        selected_goal = goal(axes=[axis("x")])
+        target = record_from_rows(selected_goal, [{"x": "1"}, {"x": "1"}], "target")
+        external = record_from_rows(selected_goal, [{"x": "2"}], "external")
+        with (
+            patch("storage.load_cluster_store", return_value=[target, external]),
+            patch("app.load_cluster_store", return_value=[target, external]),
+        ):
+            response = app.impact_result_payload(selected_goal, selected_goal, target, None)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["externalPeerRecordCount"], 1)
+        self.assertEqual(response["result"]["externalPeerObservationCount"], 1)
+        self.assertEqual(response["result"]["referenceObservationCount"], 3)
+        self.assertEqual(response["result"]["referenceDensityPolicy"], "target_included")
+
     def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
         selected_goal = goal(axes=[axis("x")])
         record_a = record_from_rows(selected_goal, [{"x": str(value)} for value in [2, 4, 6, 8]], "a")
@@ -799,6 +814,8 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("valid_domain_ratio", content)
         self.assertIn("infeasible_target_rows", content)
         self.assertIn("infeasible_peer_rows", content)
+        self.assertIn("reference_density_policy", content)
+        self.assertIn("self_contained_reference_warning", content)
 
 
 if __name__ == "__main__":

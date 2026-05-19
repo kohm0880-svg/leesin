@@ -1282,6 +1282,7 @@ def run_density_analysis(
         "targetIncludedInReference": True,
         "internalDensityMode": internal_density_mode,
         "selfContainedReferenceWarning": self_contained_warning,
+        "rowLevelObservationCount": reference_observation_count,
     }
     return {
         "config": config,
@@ -1540,8 +1541,13 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                             "confidence": result_payload["confidence"],
                             "engine": result_payload["engine"],
                             "peer_group_size": len(analysis["peerGroup"]),
+                            "external_peer_record_count": result_payload.get("externalPeerRecordCount"),
+                            "external_peer_observation_count": result_payload.get("externalPeerObservationCount"),
+                            "reference_observation_count": result_payload.get("referenceObservationCount"),
+                            "target_included_in_reference": result_payload.get("targetIncludedInReference"),
+                            "internal_density_mode": result_payload.get("internalDensityMode"),
                             "coverage_eligible_cluster_count": analysis["coverageInfo"]["coverageEligibleClusterCount"],
-                            "row_level_observation_count": analysis["coverageInfo"]["rowLevelObservationCount"],
+                            "row_level_observation_count": analysis["coverageInfo"]["referenceObservationCount"],
                         },
                         "result": result_payload,
                         "confidenceReasons": confidence_reasons(analysis["result"], analysis["warnings"]),
@@ -1735,20 +1741,24 @@ def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], c
     try:
         target = np.asarray(cluster.get("values", []), dtype=float)
         target_counts, target_meta = record_density_counts_for_goal(cluster, selected_goal)
+        # The target is always added into the reference map by run_density_analysis.
+        # Exclude this saved record from the external peer side to avoid counting it twice.
+        effective_exclude_cluster_id = str(exclude_cluster_id or cluster.get("id") or "").strip() or None
         analysis = run_density_analysis(
             goal,
             selected_goal,
             target_counts,
             target_meta,
             target,
-            exclude_cluster_id=exclude_cluster_id,
+            exclude_cluster_id=effective_exclude_cluster_id,
         )
         return {"ok": True, "result": analysis["resultPayload"], "peerGroupSize": len(analysis["peerGroup"])}
     except ValueError as exc:
+        effective_exclude_cluster_id = str(exclude_cluster_id or cluster.get("id") or "").strip() or None
         return {
             "ok": False,
             "error": str(exc),
-            "peerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], exclude_cluster_id)),
+            "peerGroupSize": len(analysis_peer_rows(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], effective_exclude_cluster_id)),
         }
 
 
@@ -1824,8 +1834,10 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "external_peer_observation_count",
             "reference_observation_count",
             "reference_occupied_bins",
+            "reference_density_policy",
             "target_included_in_reference",
             "internal_density_mode",
+            "self_contained_reference_warning",
             "engine",
             "specificity_method",
             "specificity_score",
@@ -1875,8 +1887,10 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "external_peer_observation_count": result.get("externalPeerObservationCount", result.get("external_peer_observation_count")),
                 "reference_observation_count": result.get("referenceObservationCount", result.get("reference_observation_count")),
                 "reference_occupied_bins": result.get("referenceOccupiedBins", result.get("reference_occupied_bins")),
+                "reference_density_policy": result.get("referenceDensityPolicy", result.get("reference_density_policy")),
                 "target_included_in_reference": result.get("targetIncludedInReference", result.get("target_included_in_reference")),
                 "internal_density_mode": result.get("internalDensityMode", result.get("internal_density_mode")),
+                "self_contained_reference_warning": result.get("selfContainedReferenceWarning", result.get("self_contained_reference_warning")),
                 "engine": result.get("engine"),
                 "specificity_method": result.get("specificity_method"),
                 "specificity_score": result.get("specificity_score"),
