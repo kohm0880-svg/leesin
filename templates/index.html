@@ -782,13 +782,17 @@
     }
     function renderPreviewMetrics(metrics) {
       const item = metrics || {};
+      const validBinsText = item.feasibleMaskEvaluationSkipped && item.validBins == null ? 'skipped' : (item.validBins ?? item.totalBins ?? 0);
+      const maskedBinsText = item.feasibleMaskEvaluationSkipped && item.maskedBins == null ? 'skipped' : (item.maskedBins ?? 0);
+      const validDomainText = item.feasibleMaskEvaluationSkipped && item.validDomainRatio == null ? 'skipped' : formatPercent(item.validDomainRatio, 1);
       return `<div class="preview-metrics" id="grid-preview-metrics">
         <div class="preview-metric"><span class="small">Z / Observation Support</span><strong>${formatPercent(item.observationSupportZ,1)}</strong></div>
         <div class="preview-metric"><span class="small">C / Coverage</span><strong>${formatPercent(item.coverageC,1)}</strong></div>
         <div class="preview-metric"><span class="small">E / Equitability</span><strong>${formatPercent(item.equitabilityE,1)}</strong></div>
         <div class="preview-metric"><span class="small">Confidence</span><strong>${formatPercent(item.confidence,1)}</strong></div>
-        <div class="preview-metric"><span class="small">occupied / valid bins</span><strong>${escapeHtml(item.occupiedBins ?? 0)} / ${escapeHtml(item.validBins ?? item.totalBins ?? 0)}</strong></div>
-        <div class="preview-metric"><span class="small">masked bins</span><strong>${escapeHtml(item.maskedBins ?? 0)}</strong></div>
+        <div class="preview-metric"><span class="small">occupied / valid bins</span><strong>${escapeHtml(item.occupiedBins ?? 0)} / ${escapeHtml(validBinsText)}</strong></div>
+        <div class="preview-metric"><span class="small">masked bins</span><strong>${escapeHtml(maskedBinsText)}</strong></div>
+        <div class="preview-metric"><span class="small">valid domain</span><strong>${escapeHtml(validDomainText)}</strong></div>
         <div class="preview-metric"><span class="small">reference rows</span><strong>${escapeHtml(item.referenceObservationCount ?? item.peerValidRows ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">eligible records</span><strong>${escapeHtml(item.eligibleRecords ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">legacy excluded</span><strong>${escapeHtml(item.legacyExcluded ?? 0)}</strong></div>
@@ -1730,6 +1734,12 @@
       const totalBins = result.total_bins ?? meta.totalBins ?? 0;
       const validBins = result.valid_bins ?? result.validBins ?? meta.validBins ?? totalBins;
       const maskedBins = result.masked_bins ?? result.maskedBins ?? meta.maskedBins ?? 0;
+      const feasibleMaskEvaluationSkipped = Boolean(result.feasibleMaskEvaluationSkipped ?? result.feasible_mask_evaluation_skipped ?? meta.feasibleMaskEvaluationSkipped);
+      const coverageWarning = result.coverageWarning || result.coverage_warning || meta.coverageWarning || '';
+      const feasibleMaskWarning = result.feasibleMaskWarning || result.feasible_mask_warning || meta.feasibleMaskWarning || '';
+      const validBinsText = feasibleMaskEvaluationSkipped ? 'skipped' : validBins;
+      const maskedBinsText = feasibleMaskEvaluationSkipped ? 'skipped' : maskedBins;
+      const validDomainText = feasibleMaskEvaluationSkipped ? 'skipped' : formatPercent(totalBins ? validBins / totalBins : 0,1);
       const feasibleMaskEnabled = Boolean(result.feasible_mask_enabled ?? result.feasibleMaskEnabled ?? meta.feasibleMaskEnabled);
       const feasibleExpressions = result.feasibleExpressions || result.feasible_expressions || meta.feasibleExpressions || [];
       const maskedOutTargetRows = result.masked_out_target_rows ?? result.infeasible_target_rows ?? meta.maskedOutTargetRows ?? 0;
@@ -1763,7 +1773,7 @@
               <span class="metric-pill">external peer records ${escapeHtml(externalPeerRecordCount ?? eligibleClusters)}</span>
               <span class="metric-pill">external peer rows ${escapeHtml(externalPeerObservationCount)}</span>
               <span class="metric-pill">reference rows ${escapeHtml(referenceObservationCount)}</span>
-              <span class="metric-pill">occupied bins ${escapeHtml(occupiedBins)}/${escapeHtml(validBins)} valid</span>
+              <span class="metric-pill">occupied bins ${escapeHtml(occupiedBins)}/${escapeHtml(validBinsText)} valid</span>
               <span class="metric-pill">rectangular bins ${escapeHtml(totalBins)}</span>
               <span class="metric-pill">excluded legacy ${escapeHtml(legacyExcluded)}</span>
               <span class="metric-pill">grid mismatch ${escapeHtml(gridExcluded)}</span>
@@ -1774,16 +1784,18 @@
             </div>
             ${internalDensityMode ? '<div class="tag warn">특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.</div>' : ''}
             ${legacyExcluded ? '<div class="tag warn">Legacy records without row-level vectors are excluded from density scoring.</div>' : ''}
+            ${feasibleMaskEvaluationSkipped ? `<div class="tag warn">${escapeHtml(coverageWarning || '설정된 grid가 너무 커서 Feasible Domain의 전체 valid bin 개수 계산은 생략되었습니다. Row-level feasible filtering은 적용되지만, Coverage 분모는 직사각형 전체 bin 수 기준으로 대체됩니다.')}</div>` : ''}
           </div>
           <div class="notice">
             <strong>Feasible Domain</strong><br>
             ${feasibleMaskEnabled ? 'Masked bins are excluded from Coverage and Specificity calculations because they are outside the user-defined feasible domain.' : 'No Feasible Domain Mask is active; the full Cartesian domain is valid.'}
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">total bins ${escapeHtml(totalBins)}</span>
-              <span class="metric-pill">valid bins ${escapeHtml(validBins)}</span>
-              <span class="metric-pill">masked bins ${escapeHtml(maskedBins)}</span>
-              <span class="metric-pill">valid domain ${formatPercent(totalBins ? validBins / totalBins : 0,1)}</span>
+              <span class="metric-pill">valid bins ${escapeHtml(validBinsText)}</span>
+              <span class="metric-pill">masked bins ${escapeHtml(maskedBinsText)}</span>
+              <span class="metric-pill">valid domain ${escapeHtml(validDomainText)}</span>
             </div>
+            ${feasibleMaskEvaluationSkipped ? `<div class="small" style="margin-top:8px;">${escapeHtml(feasibleMaskWarning || coverageWarning || 'Full feasible mask evaluation skipped because total bin count is too large.')}</div>` : ''}
             ${feasibleExpressions.length ? `<div class="small" style="margin-top:8px;">${feasibleExpressions.map(expression => escapeHtml(expression)).join('<br>')}</div>` : ''}
           </div>
           <div class="small">Max specificity ${maxSpecificity == null ? '-' : formatPercent(maxSpecificity,1)} · Mean Rarity advanced ${formatNumber(result.mean_rarity,3)} · Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>

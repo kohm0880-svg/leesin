@@ -865,6 +865,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn('id="focused-mask-save"', template)
         self.assertIn("data-projection-card", template)
         self.assertIn("setFocusedToolActivePair", template)
+        self.assertIn("projection skipped: too many cells", template)
+        self.assertIn("Request timed out. The grid may be too large; try coarser resolution.", template)
+        self.assertIn("validBinsText", template)
 
     def test_filter_bin_counts_by_feasible_domain_reports_exclusions(self) -> None:
         axes = [axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
@@ -931,6 +934,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("valid_domain_ratio", content)
         self.assertIn("infeasible_target_rows", content)
         self.assertIn("infeasible_peer_rows", content)
+        self.assertIn("feasible_mask_evaluation_skipped", content)
+        self.assertIn("feasible_mask_warning", content)
+        self.assertIn("coverage_warning", content)
         self.assertIn("reference_density_policy", content)
         self.assertIn("self_contained_reference_warning", content)
 
