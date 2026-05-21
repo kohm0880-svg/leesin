@@ -60,7 +60,10 @@ from storage import (
 
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "index.html"
-PROJECTION_ROW_TUPLE_LIMIT = 50000
+PROJECTION_ROW_TUPLE_LIMIT = int(os.environ.get("MAX_TARGET_TUPLES", "5000"))
+MAX_PROJECTION_CELLS = int(os.environ.get("MAX_PROJECTION_CELLS", "50000"))
+MAX_PROJECTION_PAIRS = int(os.environ.get("MAX_PROJECTION_PAIRS", "36"))
+MAX_GRID_PREVIEW_BINS = int(os.environ.get("MAX_GRID_PREVIEW_BINS", "500000"))
 FEASIBLE_MASK_SKIP_WARNING = "Full feasible mask evaluation skipped because total bin count is too large."
 FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING = (
     "Feasible domain full-grid count was skipped because the configured grid is too large. "
@@ -144,12 +147,39 @@ def mask_info_for_display(mask_info: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def api_error_payload(exc: Exception) -> dict[str, Any]:
+    message = str(exc) or "Request failed."
+    error_type = exc.__class__.__name__
+    lower = message.lower()
+    recoverable = any(
+        marker in lower
+        for marker in ("too large", "skipped", "invalid feasible", "unknown axis", "timeout", "requires", "must")
+    )
+    hint = ""
+    if "too large" in lower or "skipped" in lower:
+        hint = "The grid may be too large; try coarser resolution or narrower selected axes."
+    elif "unknown axis" in lower or "invalid feasible" in lower:
+        hint = "Check that expression variables exactly match the current goal axis names."
+    return {
+        "error": message,
+        "errorType": error_type,
+        "hint": hint,
+        "recoverable": bool(recoverable),
+    }
+
+
 def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]:
     expressions = feasible_expressions_for_goal(selected_goal)
     try:
         info = compute_valid_bin_mask_for_axes(canonical_axis_order(selected_goal["axes"]), expressions)
     except FeasibleMaskEvaluationTooLarge as exc:
         return skipped_feasible_mask_info(exc.total_bins, expressions, str(exc))
+    if info.get("feasibleMaskEvaluationSkipped"):
+        return skipped_feasible_mask_info(
+            int(info.get("totalBins") or 0),
+            list(info.get("feasibleExpressions") or expressions),
+            str(info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING),
+        )
     info.setdefault("feasibleMaskEvaluationSkipped", False)
     info.setdefault("feasibleMaskWarning", "")
     info.setdefault("coverageWarning", "")
@@ -405,6 +435,25 @@ def empty_projection_matrix(x_bins: int, y_bins: int) -> list[list[int]]:
     return [[0 for _ in range(max(0, x_bins))] for _ in range(max(0, y_bins))]
 
 
+def projection_cell_count(axis_meta: dict[str, dict[str, Any]], x_axis: str, y_axis: str) -> tuple[int, int, int]:
+    x_bins = int(axis_meta.get(x_axis, {}).get("totalBins") or 0)
+    y_bins = int(axis_meta.get(y_axis, {}).get("totalBins") or 0)
+    return x_bins, y_bins, int(max(0, x_bins) * max(0, y_bins))
+
+
+def skipped_projection_payload(x_axis: str, y_axis: str, x_bins: int, y_bins: int, reason: str) -> dict[str, Any]:
+    return {
+        "xAxis": x_axis,
+        "yAxis": y_axis,
+        "xBins": int(x_bins),
+        "yBins": int(y_bins),
+        "counts": [],
+        "maxCount": 0,
+        "projectionSkipped": True,
+        "reason": reason,
+    }
+
+
 def normalize_row_bin_tuples(row_bin_tuples: list[Any], expected_length: int) -> list[list[int]]:
     normalized: list[list[int]] = []
     for raw_tuple in row_bin_tuples or []:
@@ -427,8 +476,15 @@ def build_pair_projection_from_bin_counts(
     x_axis: str,
     y_axis: str,
 ) -> dict[str, Any]:
-    x_bins = int(axis_meta.get(x_axis, {}).get("totalBins") or 0)
-    y_bins = int(axis_meta.get(y_axis, {}).get("totalBins") or 0)
+    x_bins, y_bins, cell_count = projection_cell_count(axis_meta, x_axis, y_axis)
+    if cell_count > MAX_PROJECTION_CELLS:
+        return skipped_projection_payload(
+            x_axis,
+            y_axis,
+            x_bins,
+            y_bins,
+            "Projection cell count exceeds MAX_PROJECTION_CELLS.",
+        )
     counts = empty_projection_matrix(x_bins, y_bins)
     axis_positions = {axis_name: index for index, axis_name in enumerate(axis_order)}
     if x_axis not in axis_positions or y_axis not in axis_positions:
@@ -463,8 +519,15 @@ def build_pair_projection_from_row_tuples(
     x_axis: str,
     y_axis: str,
 ) -> dict[str, Any]:
-    x_bins = int(axis_meta.get(x_axis, {}).get("totalBins") or 0)
-    y_bins = int(axis_meta.get(y_axis, {}).get("totalBins") or 0)
+    x_bins, y_bins, cell_count = projection_cell_count(axis_meta, x_axis, y_axis)
+    if cell_count > MAX_PROJECTION_CELLS:
+        return skipped_projection_payload(
+            x_axis,
+            y_axis,
+            x_bins,
+            y_bins,
+            "Projection cell count exceeds MAX_PROJECTION_CELLS.",
+        )
     counts = empty_projection_matrix(x_bins, y_bins)
     axis_positions = {axis_name: index for index, axis_name in enumerate(axis_order)}
     if x_axis not in axis_positions or y_axis not in axis_positions:
@@ -536,7 +599,8 @@ def build_projection_explorer(
     axes = canonical_axis_order(goal["axes"])
     axis_order = [str(axis["name"]) for axis in axes]
     axis_meta = projection_axis_meta(axes)
-    axis_pairs = [[x_axis, y_axis] for x_axis, y_axis in itertools.combinations(axis_order, 2)]
+    all_axis_pairs = [[x_axis, y_axis] for x_axis, y_axis in itertools.combinations(axis_order, 2)]
+    axis_pairs = all_axis_pairs[:MAX_PROJECTION_PAIRS]
     target_tuples = normalize_row_bin_tuples(target_row_bin_tuples or [], len(axis_order))
     payload_tuples, tuple_sampled = sample_row_bin_tuples_for_payload(target_tuples)
     peer_bin_counts = coverage_info.get("binCounts", {}) if isinstance(coverage_info, dict) else {}
@@ -552,6 +616,10 @@ def build_projection_explorer(
         "axisOrder": axis_order,
         "axisMeta": axis_meta,
         "axisPairs": axis_pairs,
+        "allAxisPairCount": len(all_axis_pairs),
+        "projectionPairTruncated": len(all_axis_pairs) > len(axis_pairs),
+        "maxProjectionPairs": MAX_PROJECTION_PAIRS,
+        "maxProjectionCells": MAX_PROJECTION_CELLS,
         "peerProjections": peer_projections,
         "targetProjections": target_projections,
         "feasibleMaskEnabled": bool(coverage_info.get("feasibleMaskEnabled")) if isinstance(coverage_info, dict) else False,
@@ -854,6 +922,79 @@ def experiment_config_from_goal(selected_goal: dict[str, Any]) -> ExperimentConf
         resolution=[axis["resolution"] for axis in axes],
         K_m=float(selected_goal.get("K_m", K_M)),
     )
+
+
+def rectangular_total_bins_for_axes(axes: list[dict[str, Any]]) -> int:
+    total = 1
+    for axis in canonical_axis_order(axes):
+        total *= max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
+    return int(total)
+
+
+def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) -> dict[str, Any]:
+    mask_info = mask_info_for_display(feasible_mask_info_for_goal(preview_goal))
+    warning = (
+        "Grid preview recalculation skipped because total bin count exceeds MAX_GRID_PREVIEW_BINS. "
+        "Apply as Goal Default is still available after confirmation."
+    )
+    metrics = {
+        "totalBins": int(total_bins),
+        "validBins": mask_info.get("validBins"),
+        "maskedBins": mask_info.get("maskedBins"),
+        "validDomainRatio": mask_info.get("validDomainRatio"),
+        "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
+        "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
+        "feasibleMaskEvaluationSkipped": True,
+        "feasibleMaskWarning": mask_info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING,
+        "coverageWarning": FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING,
+        "gridPreviewSkipped": True,
+        "previewWarning": warning,
+        "occupiedBins": 0,
+        "peerValidRows": 0,
+        "referenceObservationCount": 0,
+        "targetIncludedInReference": True,
+        "observationSupportZ": 0.0,
+        "coverageC": 0.0,
+        "equitabilityE": 0.0,
+        "confidence": 0.0,
+        "eligibleRecords": 0,
+        "legacyExcluded": 0,
+        "gridSignatureExcluded": 0,
+        "gridSignature": grid_signature_from_axes(canonical_axis_order(preview_goal["axes"])),
+    }
+    projection_explorer = build_projection_explorer(
+        preview_goal,
+        {
+            "binCounts": {},
+            "axisBinCounts": {},
+            "totalBins": int(total_bins),
+            "validBins": int(total_bins),
+            "maskedBins": 0,
+            "validDomainRatio": 1.0 if total_bins else 0.0,
+            "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
+            "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
+            "feasibleMaskEvaluationSkipped": True,
+            "feasibleMaskWarning": mask_info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING,
+            "coverageWarning": FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING,
+        },
+        [],
+    )
+    projection_explorer["gridPreviewMetrics"] = metrics
+    return {
+        "previewGoal": preview_goal,
+        "metrics": metrics,
+        "result": None,
+        "projectionExplorer": projection_explorer,
+        "targetBinOccupancy": {},
+        "targetBinOccupancyMeta": {
+            "validMultidimensionalRowCount": 0,
+            "invalidRowCount": 0,
+            "outOfDomainRowCount": 0,
+            "maskedOutRowCount": 0,
+            "totalRows": 0,
+        },
+        "coverageInfo": {key: value for key, value in metrics.items() if key not in {"feasibleExpressions"}},
+    }
 
 
 def analysis_peer_rows(
@@ -2118,6 +2259,9 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(preview_axes, list):
         raise ValueError("previewAxes must be a list.")
     preview_goal = grid_preview_goal(goal, [str(name) for name in selected_axis_names], preview_axes)
+    preview_total_bins = rectangular_total_bins_for_axes(preview_goal["axes"])
+    if preview_total_bins > MAX_GRID_PREVIEW_BINS:
+        return skipped_grid_preview_payload(preview_goal, preview_total_bins)
     axis_names = [axis["name"] for axis in canonical_axis_order(preview_goal["axes"])]
     peer_clusters = analysis_peer_clusters(goal, axis_names)
     coverage_info = build_global_bin_counts(peer_clusters, preview_goal)
@@ -2467,15 +2611,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"deleted": True, "clusters": list_cluster_summaries(), "peerCounts": bootstrap_peer_counts(), "peerSubsetCounts": bootstrap_peer_subset_counts()})
                 return
         except Exception as exc:
-            self._send_json(
-                {
-                    "error": str(exc),
-                    "clusters": list_cluster_summaries(),
-                    "peerCounts": bootstrap_peer_counts(),
-                    "peerSubsetCounts": bootstrap_peer_subset_counts(),
-                },
-                status=HTTPStatus.BAD_REQUEST,
-            )
+            self._send_json(api_error_payload(exc), status=HTTPStatus.BAD_REQUEST)
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 

@@ -123,6 +123,72 @@ class BinGridTracker:
         return float(entropy / np.log(occupied))
 
 
+def compute_density_confidence(
+    reference_bin_counts: dict[str, int],
+    valid_bins: int,
+    K_density: float,
+) -> tuple[float, float, float, float]:
+    counts = np.array([int(value) for value in reference_bin_counts.values() if int(value) > 0], dtype=float)
+    reference_rows = float(counts.sum())
+    occupied_bins = int(counts.size)
+    if reference_rows <= 0 or valid_bins <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    observation_support = reference_rows / (reference_rows + float(K_density))
+    coverage = occupied_bins / int(valid_bins)
+    if occupied_bins <= 1:
+        equitability = 0.0
+    else:
+        proportions = counts / reference_rows
+        entropy = -np.sum(proportions * np.log(proportions + 1e-12))
+        equitability = float(entropy / np.log(occupied_bins))
+    confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0))
+    return float(observation_support), float(coverage), float(equitability), confidence
+
+
+def compute_ecdf_specificity(
+    reference_bin_counts: dict[str, int],
+    target_bin_counts: dict[str, int],
+) -> dict[str, float | int]:
+    occupied_counts = np.array([count for count in reference_bin_counts.values() if int(count) > 0], dtype=float)
+    occupied_counts.sort()
+    occupied_bin_count = int(occupied_counts.size)
+    if occupied_bin_count <= 0:
+        raise ValueError(
+            "Density grid analysis requires at least one target-included reference row-level bin occupancy observation."
+        )
+    weighted_specificity = 0.0
+    max_specificity = 0.0
+    unseen_target_rows = 0
+    extreme_target_rows = 0
+    target_valid_rows = 0
+    for key, target_count in target_bin_counts.items():
+        count = int(target_count)
+        if count <= 0:
+            continue
+        target_valid_rows += count
+        reference_count = int(reference_bin_counts.get(key, 0))
+        if reference_count <= 0:
+            specificity_i = 1.0
+        else:
+            rank = int(np.searchsorted(occupied_counts, float(reference_count), side="right"))
+            specificity_i = 1.0 - (rank / occupied_bin_count)
+        weighted_specificity += count * specificity_i
+        max_specificity = max(max_specificity, specificity_i)
+        if reference_count == 0:
+            unseen_target_rows += count
+        if specificity_i >= 0.95:
+            extreme_target_rows += count
+    if target_valid_rows <= 0:
+        raise ValueError("Density grid analysis requires at least one valid target row-level observation.")
+    return {
+        "specificity_score": float(weighted_specificity / target_valid_rows),
+        "max_specificity": float(max_specificity),
+        "unseen_target_rows": int(unseen_target_rows),
+        "extreme_target_rows": int(extreme_target_rows),
+        "target_valid_rows": int(target_valid_rows),
+    }
+
+
 class DensityGridAnalyzer:
     def __init__(self, config: ExperimentConfig):
         self.config = canonical_experiment_config(config)
@@ -179,47 +245,29 @@ class DensityGridAnalyzer:
             raise ValueError("Feasible Domain Mask leaves zero valid bins; density analysis cannot run.")
         alpha = 0.5
         denominator = peer_valid_rows + alpha * total_bins
-        occupied_counts = np.array([count for count in peer_bin_counts.values() if int(count) > 0], dtype=float)
-        occupied_counts.sort()
-        occupied_bin_count = int(occupied_counts.size)
-        if occupied_bin_count <= 0:
-            raise ValueError(
-                "Density grid analysis requires at least one target-included reference row-level bin occupancy observation."
-            )
+        specificity_metrics = compute_ecdf_specificity(peer_bin_counts, normalized_target_counts)
         weighted_rarity = 0.0
-        weighted_specificity = 0.0
         max_rarity = 0.0
-        max_specificity = 0.0
-        unseen_target_rows = 0
-        extreme_target_rows = 0
 
         for key, target_count in normalized_target_counts.items():
             peer_count = int(peer_bin_counts.get(key, 0))
             p_hat_g = (peer_count + alpha) / denominator
             rarity_g = -math.log(p_hat_g)
             count = int(target_count)
-            if peer_count <= 0:
-                specificity_i = 1.0
-            else:
-                rank = int(np.searchsorted(occupied_counts, float(peer_count), side="right"))
-                specificity_i = 1.0 - (rank / occupied_bin_count)
-
             weighted_rarity += count * rarity_g
-            weighted_specificity += count * specificity_i
             max_rarity = max(max_rarity, rarity_g)
-            max_specificity = max(max_specificity, specificity_i)
-            if peer_count == 0:
-                unseen_target_rows += count
-            if specificity_i >= 0.95:
-                extreme_target_rows += count
 
         mean_rarity = weighted_rarity / target_valid_rows
-        specificity_score = weighted_specificity / target_valid_rows
+        specificity_score = float(specificity_metrics["specificity_score"])
+        max_specificity = float(specificity_metrics["max_specificity"])
+        unseen_target_rows = int(specificity_metrics["unseen_target_rows"])
+        extreme_target_rows = int(specificity_metrics["extreme_target_rows"])
 
-        observation_support_S = peer_valid_rows / (peer_valid_rows + self.config.K_m)
-        coverage_C = self._peer_density.occupied_bins / valid_bins if valid_bins else 0.0
-        equitability_E = self._peer_density.equitability
-        confidence = float((observation_support_S * coverage_C * equitability_E) ** (1.0 / 3.0))
+        observation_support_S, coverage_C, equitability_E, confidence = compute_density_confidence(
+            peer_bin_counts,
+            valid_bins,
+            self.config.K_m,
+        )
 
         return DensityDiagnosisResult(
             engine="density_grid",

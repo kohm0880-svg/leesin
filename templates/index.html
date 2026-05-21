@@ -287,7 +287,7 @@
         <div>
           <h3>Advanced Expressions</h3>
           <p class="small">한 줄에 expression 하나를 입력하세요. 모든 expression은 AND로 결합됩니다. GUI rule로 역변환하지 않습니다. Expression에서는 현재 Axis name을 그대로 사용하며, 허용 함수는 abs, min, max, sqrt, log, exp입니다.</p>
-          <label>Advanced Expression Rules<textarea id="feasible-expression-input" spellcheck="false" placeholder="pressure <= 0.05 * temperature ** 2&#10;not (temperature > 80 and pressure < 2)"></textarea></label>
+          <label>Advanced Expression Rules<textarea id="feasible-expression-input" spellcheck="false" placeholder="axis_a <= 100&#10;not (axis_b > 50 and axis_c < 10)&#10;Use the exact axis names from this Goal."></textarea></label>
           <div class="row-actions">
             <button class="secondary" id="validate-feasible-expressions" type="button">Validate Expressions</button>
           </div>
@@ -319,10 +319,14 @@
   </dialog>
 
   <script>
+    // State / Utils
     const bootstrap = __BOOTSTRAP__;
     const ADMIN_TOKEN_STORAGE_KEY = 'leesinAdminToken';
     const FOCUSED_MASK_TOOL_STORAGE_KEY = 'leesinFocusedMaskToolSettings';
     const ADMIN_BLOCKED_MESSAGE = '관리자 작업이 차단되었습니다. Render 환경에서는 Admin Token을 입력해야 합니다. Render Environment Variables의 ADMIN_TOKEN 값과 같은 값을 입력하세요.';
+    const REQUEST_TIMEOUT_MESSAGE = 'Request timed out. The grid may be too large; try coarser resolution.';
+
+    // Admin Token
     function readStoredAdminToken() {
       try { return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ''; }
       catch (_error) { return ''; }
@@ -534,7 +538,24 @@
       }
       return new Error(serverMessage || fallbackMessage);
     }
+    async function fetchJson(url, options={}, timeoutMs=60000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { ...options, signal:controller.signal });
+        let data = {};
+        try { data = await response.json(); }
+        catch (_error) { data = {}; }
+        return { response, data };
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new Error(REQUEST_TIMEOUT_MESSAGE);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
 
+    // Report / Navigation
     function showView(viewId) {
       const nextView = $(viewId) ? viewId : 'analysis-view';
       state.activeView = nextView;
@@ -557,6 +578,7 @@
       const firstLine = text.split(/\r?\n/, 1)[0] || '';
       return firstLine.includes('\t') && !firstLine.includes(',') ? '\t' : ',';
     }
+    // File Parsing
     function parseDelimitedText(text, delimiter) {
       const rows=[]; let row=[]; let cell=''; let quoted=false; const clean=text.replace(/^\uFEFF/,'');
       for (let i=0; i<clean.length; i+=1) {
@@ -630,6 +652,7 @@
         Density analysis re-bins saved row-level sanitized axis vectors into the current grid. Legacy records without row-level vectors are excluded from density scoring and grid preview recalculation.
       `;
     }
+    // Analysis Mapping / Batch
     function renderMapping() {
       const goal = goalById(state.selectedGoalId);
       const first = state.files[0];
@@ -673,6 +696,7 @@
         </div>`).join('');
     }
 
+    // Projection Explorer
     const projectionKey = (xAxis, yAxis) => `${xAxis}|${yAxis}`;
     function projectionMatrixMax(matrix) {
       let maxValue = 0;
@@ -705,6 +729,9 @@
       const yIndex = axisOrder.indexOf(yAxis);
       const xBins = Number(axisMeta?.[xAxis]?.totalBins || 0);
       const yBins = Number(axisMeta?.[yAxis]?.totalBins || 0);
+      const pairKey = projectionKey(xAxis, yAxis);
+      const projection = explorer?.targetProjections?.[pairKey] || explorer?.peerProjections?.[pairKey] || {};
+      if (projection.projectionSkipped || (xBins * yBins) > Number(explorer?.maxProjectionCells || 50000)) return [];
       const matrix = emptyProjectionMatrix(xBins, yBins);
       if (xIndex < 0 || yIndex < 0) return matrix;
       (state.projectionSubsetTuples || []).forEach(tuple => {
@@ -765,9 +792,11 @@
         <div class="preview-metric"><span class="small">reference rows</span><strong>${escapeHtml(item.referenceObservationCount ?? item.peerValidRows ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">eligible records</span><strong>${escapeHtml(item.eligibleRecords ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">legacy excluded</span><strong>${escapeHtml(item.legacyExcluded ?? 0)}</strong></div>
+        ${item.gridPreviewSkipped ? `<div class="notice">${escapeHtml(item.previewWarning || 'Grid preview recalculation skipped for this large grid.')}</div>` : ''}
         ${item.feasibleMaskEvaluationSkipped ? `<div class="notice">${escapeHtml(item.coverageWarning || 'Full feasible mask count skipped for this large grid; row-level filtering still applies.')}</div>` : ''}
       </div>`;
     }
+    // Grid Preview
     function renderGridPreviewEditor(explorer) {
       const axes = projectionPreviewAxes(explorer);
       const metrics = state.gridPreviewMetrics || explorer?.gridPreviewMetrics || state.report?.visualizations?.gridPreviewMetrics || {};
@@ -892,6 +921,7 @@
       };
       return { ...rule, expression: compileFocusedMaskRule(rule) };
     }
+    // Focused 2D Mask Tool
     function renderFocusedMaskRuleList() {
       const rules = focusedRuleListForCurrentGoal();
       if (!rules.length) return '<div class="empty">Saved focused mask rules are empty.</div>';
@@ -998,6 +1028,7 @@
         </div>
         ${renderGridPreviewEditor(explorer)}
         ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Projection masked-region overlay is not implemented in this MVP. ${explorer.feasibleMaskEvaluationSkipped ? 'Full-grid valid bin count skipped for this large grid.' : `Valid bins ${escapeHtml(explorer.validBins ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)}`}<div class="small">${escapeHtml(explorer.coverageWarning || '')}</div><div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
+        ${explorer.projectionPairTruncated ? `<div class="notice">Projection pairs truncated to ${escapeHtml(explorer.maxProjectionPairs)} of ${escapeHtml(explorer.allAxisPairCount)} for browser performance.</div>` : ''}
         <div class="notice" id="projection-selection-info">${escapeHtml(projectionSelectionText(explorer))}</div>
         ${explorer.targetRowTupleSampled ? `<div class="tag warn">Target row bin tuples are sampled for linked highlighting: ${escapeHtml(explorer.targetRowTupleLimit)} of ${escapeHtml(explorer.targetRowTupleCount)} rows.</div>` : ''}
         <div class="projection-workspace">
@@ -1008,6 +1039,7 @@
                 const key = projectionKey(xAxis, yAxis);
                 const peer = explorer.peerProjections?.[key] || {};
                 const target = explorer.targetProjections?.[key] || {};
+                const projectionSkipped = peer.projectionSkipped || target.projectionSkipped;
                 const activePair = state.focusedMaskTool?.activePair || [];
                 const activeClass = key === projectionKey(activePair[0], activePair[1]) ? ' active' : '';
                 return `<div class="projection-card${activeClass}" data-projection-card="${escapeHtml(key)}">
@@ -1017,6 +1049,7 @@
                     <span class="metric-pill">peer max ${escapeHtml(peer.maxCount ?? 0)}</span>
                     <span class="metric-pill">target max ${escapeHtml(target.maxCount ?? 0)}</span>
                     <span class="metric-pill">${escapeHtml(peer.xBins ?? 0)}×${escapeHtml(peer.yBins ?? 0)} bins</span>
+                    ${projectionSkipped ? `<span class="tag warn">projection skipped: too many cells</span>` : ''}
                     <button class="ghost" data-projection-reset="${escapeHtml(key)}" type="button">Reset zoom</button>
                   </div>
                 </div>`;
@@ -1058,6 +1091,14 @@
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, width, height);
+      if (peer.projectionSkipped || target.projectionSkipped) {
+        ctx.fillStyle = '#667789';
+        ctx.font = '13px Segoe UI, Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Projection skipped: too many cells', width / 2, height / 2 - 8);
+        ctx.fillText(`${formatNumber(xBins,0)} × ${formatNumber(yBins,0)} bins`, width / 2, height / 2 + 12);
+        return;
+      }
       if (!xBins || !yBins) return;
       const zoomState = projectionZoomState(key);
       const zoom = Math.max(1, Math.min(80, Number(zoomState.zoom) || 1));
@@ -1198,7 +1239,7 @@
       try {
         const meta = state.report.meta || {};
         const visualizations = state.report.visualizations || {};
-        const response = await fetch('/api/grid-preview', {
+        const { response, data } = await fetchJson('/api/grid-preview', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
@@ -1208,8 +1249,7 @@
             targetRowVectors: visualizations.targetRowVectors || [],
             targetRowVectorAxisOrder: visualizations.targetRowVectorAxisOrder || visualizations.projectionExplorer?.axisOrder || [],
           }),
-        });
-        const data = await response.json();
+        }, 60000);
         if (!response.ok) throw new Error(data.error || 'Grid preview failed');
         state.gridPreviewMetrics = data.metrics || null;
         if (data.projectionExplorer) {
@@ -1254,22 +1294,26 @@
     }
     async function applyGridPreviewAsDefault() {
       if (!state.report) return;
-      const confirmed = confirm('이 설정을 해당 Experiment Goal의 기본 Domain Range / Resolution으로 저장하시겠습니까? 기존 saved records는 row-level vectors 기준으로 새 grid에서 재계산됩니다. 이 작업은 이후 density result와 gridSignature를 바꿉니다.');
+      const previewAxes = readPreviewAxesFromEditor();
+      const previewTotalBins = previewAxes.reduce((total, axis) => total * Math.max(1, previewAxisBinCount(axis)), 1);
+      const largeGridNote = previewTotalBins > 500000
+        ? `\n\n주의: preview grid has ${formatNumber(previewTotalBins,0)} rectangular bins. Full preview counts may be skipped, but saved records will still be re-binned from row-level vectors.`
+        : '';
+      const confirmed = confirm(`이 설정을 해당 Experiment Goal의 기본 Domain Range / Resolution으로 저장하시겠습니까? 기존 saved records는 row-level vectors 기준으로 새 grid에서 재계산됩니다. 이 작업은 이후 density result와 gridSignature를 바꿉니다.${largeGridNote}`);
       if (!confirmed) return;
       const button = $('grid-preview-apply');
       setButtonLoading(button, true, '저장 중...');
       try {
         const meta = state.report.meta || {};
-        const response = await fetch('/api/admin/goals/apply-grid', {
+        const { response, data } = await fetchJson('/api/admin/goals/apply-grid', {
           method:'POST',
           headers:adminHeaders(),
           body:JSON.stringify({
             goalId: meta.goal_id || state.selectedGoalId,
             selectedAxes: meta.axis_names || state.projectionExplorer?.axisOrder || [],
-            previewAxes: readPreviewAxesFromEditor(),
+            previewAxes,
           }),
-        });
-        const data = await response.json();
+        }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Goal grid apply failed');
         state.goals = data.goals || state.goals;
         state.clusters = data.clusters || state.clusters;
@@ -1344,8 +1388,7 @@
     async function saveGoalPayloadFromProjection(goalPayload, successMessage, button=null) {
       setButtonLoading(button, true, '저장 중...');
       try {
-        const response = await fetch('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(goalPayload) });
-        const data = await response.json();
+        const { response, data } = await fetchJson('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(goalPayload) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Focused Mask 저장 실패');
         state.goals = data.goals || state.goals;
         state.clusters = data.clusters || state.clusters;
@@ -1658,6 +1701,7 @@
       requestAnimationFrame(redrawProjectionExplorer);
     }
 
+    // Report Rendering
     function renderReport(report=state.report, activate=false) {
       if (!report) {
         state.report = null;
@@ -1778,8 +1822,7 @@
 
     async function loadBootstrapData() {
       try {
-        const response = await fetch('/api/bootstrap', { headers:{'Accept':'application/json'} });
-        const data = await response.json();
+        const { response, data } = await fetchJson('/api/bootstrap', { headers:{'Accept':'application/json'} }, 60000);
         if (!response.ok) throw new Error(data.error || 'Bootstrap load failed');
         applyBootstrapData(data);
         renderAll();
@@ -2061,6 +2104,7 @@
       const ruleExpressions = new Set((goal?.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean));
       return (goal?.feasibleDomainExpressions || []).filter(expression => !ruleExpressions.has(expression));
     }
+    // Feasible Rule Builder
     function renderAdminFocusedMaskBuilder() {
       const goal = state.draftGoal || blankGoal();
       const axes = goal.axes || [];
@@ -2169,6 +2213,7 @@
         </div>`;
       }).join('') : '<div class="empty">IF-THEN GUI rule이 없습니다. Advanced Expression만 사용할 수도 있습니다.</div>';
     }
+    // Goal Admin
     function renderAdmin() {
       state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
       state.draftGoal.feasibleDomainRules = normalizedFeasibleRulesForUi(state.draftGoal);
@@ -2289,6 +2334,7 @@
       }
       return clusters;
     }
+    // Saved Records / Audit
     function renderSavedClusters() {
       renderClusterGoalFilter();
       $('cluster-sort').value = state.clusterSort;
@@ -2332,6 +2378,7 @@
         return { displayName:file.displayName, rows:file.rows, axisMapping:useGlobal ? state.axisMapping : buildSuggestedMapping(goal, file.headers) };
       });
     }
+    // Analysis / Batch
     async function runAnalysis(button=$('run-analysis')) {
       const message = validationMessage(); if (message) { setError(message); return; }
       if (button.dataset.loading === 'true') return;
@@ -2340,12 +2387,12 @@
       setError(''); setClusterMessage('', '');
       try {
         if (state.files.length === 1) {
-          const response = await fetch('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) });
-          const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
+          const { response, data } = await fetchJson('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) }, 60000);
+          if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
           state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderAll(); renderReport(data, true);
         } else {
-          const response = await fetch('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) });
-          const data = await response.json(); if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || 'Batch 분석 실패'); }
+          const { response, data } = await fetchJson('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) }, 60000);
+          if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || 'Batch 분석 실패'); }
           data.items = (data.items || []).map(item => ({ ...item, selected:Boolean(item.saveable) }));
           state.batch = data; state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll();
           const firstOk = data.items.find(item => item.analysisSuccess);
@@ -2362,8 +2409,8 @@
       setButtonLoading(button, true, '저장 중...');
       try {
         const goal = goalById(state.selectedGoalId);
-        const response = await fetch('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxisNames:selectedAxisNames(goal), records }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, 'Batch 저장 실패');
+        const { response, data } = await fetchJson('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxisNames:selectedAxisNames(goal), records }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, 'Batch 저장 실패');
         state.clusters = data.clusters || state.clusters;
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
@@ -2377,8 +2424,8 @@
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '내보내는 중...');
       try {
-        const response = await fetch('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) });
-        const data = await response.json(); if (!response.ok) { setError(data.error || 'Export 실패'); return; }
+        const { response, data } = await fetchJson('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) }, 60000);
+        if (!response.ok) { setError(data.error || 'Export 실패'); return; }
         const blob = new Blob([data.content], { type:data.mime || 'text/plain' });
         const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = data.filename || `leesin_report.${format}`; link.click(); URL.revokeObjectURL(link.href);
       } finally { setButtonLoading(button, false); updateButtons(); }
@@ -2523,8 +2570,8 @@
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '검증 중...');
       try {
-        const response = await fetch('/api/admin/goals/validate-expressions', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, 'Feasible expression 검증 실패');
+        const { response, data } = await fetchJson('/api/admin/goals/validate-expressions', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, 'Feasible expression 검증 실패');
         state.draftGoal = clone(data.goal || state.draftGoal);
         renderAdmin();
         if (data.maskInfo?.feasibleMaskEvaluationSkipped) {
@@ -2541,8 +2588,8 @@
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '저장 중...');
       try {
-        const response = await fetch('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, 'Goal 저장 실패');
+        const { response, data } = await fetchJson('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, 'Goal 저장 실패');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
@@ -2552,8 +2599,8 @@
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
       try {
-        const response = await fetch('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, 'Goal 삭제 실패');
+        const { response, data } = await fetchJson('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, 'Goal 삭제 실패');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
       } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
@@ -2583,8 +2630,8 @@
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '분석 중...');
       try {
-        const response = await fetch('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, '영향 분석 실패');
+        const { response, data } = await fetchJson('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, '영향 분석 실패');
         state.clusterResults[id] = { type:'impact', data };
         renderSavedClusters(); renderClusterList(); renderImpact(data);
       } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); setClusterMessage('error', error.message || '영향 분석 실패'); }
@@ -2596,8 +2643,8 @@
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
       try {
-        const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
+        const { response, data } = await fetchJson('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
         state.clusters = data.clusters || []; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; delete state.clusterResults[state.pendingDeleteId]; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${displayName} 삭제 완료`); setAdminMessage('success', `${displayName} 삭제 완료`);
       } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); setClusterMessage('error', error.message || '삭제 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
@@ -2608,8 +2655,8 @@
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
       try {
-        const response = await fetch('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
+        const { response, data } = await fetchJson('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
         state.clusters = data.clusters || [];
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
@@ -2649,8 +2696,8 @@
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '재평가 중...');
       try {
-        const response = await fetch('/api/admin/clusters/reevaluate', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) });
-        const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, '재평가 실패');
+        const { response, data } = await fetchJson('/api/admin/clusters/reevaluate', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, '재평가 실패');
         const item = (data.items || [])[0];
         state.clusterResults[id] = { type:'reeval', data:item };
         renderSavedClusters(); renderClusterList(); renderReevaluation(item);
@@ -2720,8 +2767,16 @@
         renderGoalPreview();
       });
       $('focused-mask-admin-builder').addEventListener('click', event => {
-        if (event.target.id === 'focused-admin-add') addAdminFocusedMaskRule();
-        if (event.target.id === 'focused-admin-save') saveAdminFocusedMaskRule();
+        if (event.target.id === 'focused-admin-add') {
+          setButtonLoading(event.target, true, '추가 중...');
+          try { addAdminFocusedMaskRule(); }
+          finally { setButtonLoading(event.target, false); updateButtons(); }
+        }
+        if (event.target.id === 'focused-admin-save') {
+          setButtonLoading(event.target, true, '저장 중...');
+          try { saveAdminFocusedMaskRule(); }
+          finally { setButtonLoading(event.target, false); updateButtons(); }
+        }
         if (event.target.id === 'focused-admin-reset') resetAdminFocusedMaskBuilder();
       });
       $('feasible-rule-list').addEventListener('input', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); refreshFeasibleRulePreviews(); renderGoalPreview(); });

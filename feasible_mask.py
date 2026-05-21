@@ -454,7 +454,19 @@ def compute_valid_bin_mask_for_axes(
             "validDomainRatio": 1.0 if total_bins else 0.0,
         }
     if total_bins > max_bins:
-        raise FeasibleMaskEvaluationTooLarge(total_bins, max_bins)
+        return {
+            "totalBins": total_bins,
+            "validBins": None,
+            "maskedBins": None,
+            "feasibleExpressions": normalized,
+            "feasibleMaskEnabled": True,
+            "validDomainRatio": None,
+            "feasibleMaskEvaluationSkipped": True,
+            "feasibleMaskWarning": (
+                "Full feasible mask evaluation skipped because total bin count exceeds MAX_MASK_EVAL_BINS."
+            ),
+            "maxMaskEvalBins": int(max_bins),
+        }
 
     centers = []
     for axis, count in zip(ordered_axes, axis_bin_counts):

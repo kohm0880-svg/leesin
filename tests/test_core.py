@@ -10,7 +10,6 @@ import numpy as np
 import app
 import storage
 from feasible_mask import (
-    FeasibleMaskEvaluationTooLarge,
     compile_focused_2d_mask_rule,
     compile_gui_feasible_rule,
     compute_valid_bin_mask_for_axes,
@@ -339,6 +338,21 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(projection["counts"][1][0], 1)
         self.assertEqual(projection["maxCount"], 2)
 
+    def test_large_projection_matrix_is_skipped(self) -> None:
+        axis_order = ["x", "y"]
+        axis_meta = {"x": {"totalBins": 1000}, "y": {"totalBins": 1000}}
+        projection = app.build_pair_projection_from_bin_counts({"[1,2]": 5}, axis_order, axis_meta, "x", "y")
+        self.assertTrue(projection["projectionSkipped"])
+        self.assertEqual(projection["counts"], [])
+        self.assertIn("MAX_PROJECTION_CELLS", projection["reason"])
+
+    def test_projection_pairs_are_truncated_for_browser_payload(self) -> None:
+        selected_goal = goal(axes=[axis(f"a{i}", domain_max=2, resolution=1) for i in range(10)])
+        explorer = app.build_projection_explorer(selected_goal, {"binCounts": {}}, [])
+        self.assertEqual(explorer["allAxisPairCount"], 45)
+        self.assertTrue(explorer["projectionPairTruncated"])
+        self.assertEqual(len(explorer["axisPairs"]), app.MAX_PROJECTION_PAIRS)
+
     def test_projection_selection_filters_matching_target_tuples(self) -> None:
         selected = app.filter_row_tuples_for_axis_pair(
             [[1, 2, 3], [1, 4, 3], [1, 2, 0], [0, 2, 3]],
@@ -468,7 +482,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
     def test_admin_headers_attach_saved_token_to_admin_requests(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
         self.assertIn("headers['X-Admin-Token'] = token", template)
-        self.assertIn("fetch('/api/admin/goals'", template)
+        self.assertIn("fetchJson('/api/admin/goals'", template)
         self.assertIn("headers:adminHeaders()", template)
 
     def test_admin_token_403_has_friendly_render_message(self) -> None:
@@ -505,10 +519,12 @@ class DensityGridBehaviorTests(unittest.TestCase):
 
     def test_full_feasible_mask_eval_skips_before_large_meshgrid(self) -> None:
         axes = [axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)]
-        with self.assertRaises(FeasibleMaskEvaluationTooLarge) as context:
-            compute_valid_bin_mask_for_axes(axes, ["x >= 0"], max_bins=250000)
-        self.assertEqual(context.exception.total_bins, 1_000_000)
-        self.assertEqual(context.exception.max_bins, 250000)
+        info = compute_valid_bin_mask_for_axes(axes, ["x >= 0"], max_bins=250000)
+        self.assertEqual(info["totalBins"], 1_000_000)
+        self.assertIsNone(info["validBins"])
+        self.assertIsNone(info["maskedBins"])
+        self.assertIsNone(info["validDomainRatio"])
+        self.assertTrue(info["feasibleMaskEvaluationSkipped"])
 
     def test_validate_goal_allows_large_grid_when_expression_is_valid(self) -> None:
         payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
@@ -541,6 +557,24 @@ class DensityGridBehaviorTests(unittest.TestCase):
         analyzer.set_feasible_domain(coverage["validBins"], coverage["maskedBins"], coverage["feasibleMaskEnabled"])
         result = analyzer.diagnose({"[10,10]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
         self.assertAlmostEqual(result.coverage_C, 1 / 1_000_000)
+
+    def test_grid_preview_request_skips_huge_preview_recalculation(self) -> None:
+        selected_goal = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
+        selected_goal["feasibleDomainAdvancedExpressions"] = ["x <= 500"]
+        normalized = storage.validate_goal(selected_goal)
+        payload = {
+            "goalId": normalized["id"],
+            "selectedAxes": ["x", "y"],
+            "previewAxes": normalized["axes"],
+            "targetRowVectors": [[10, 10]],
+            "targetRowVectorAxisOrder": ["x", "y"],
+        }
+        with patch("app.find_goal", return_value=normalized):
+            response = app.grid_preview_request(payload)
+        self.assertTrue(response["metrics"]["gridPreviewSkipped"])
+        self.assertTrue(response["metrics"]["feasibleMaskEvaluationSkipped"])
+        self.assertIsNone(response["metrics"]["validBins"])
+        self.assertIsNone(response["result"])
 
     def test_target_row_inside_domain_but_outside_feasible_mask_is_masked_out(self) -> None:
         selected_goal = goal(
