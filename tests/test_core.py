@@ -10,6 +10,7 @@ import numpy as np
 import app
 import storage
 from feasible_mask import (
+    FeasibleMaskEvaluationTooLarge,
     compile_focused_2d_mask_rule,
     compile_gui_feasible_rule,
     compute_valid_bin_mask_for_axes,
@@ -501,6 +502,45 @@ class DensityGridBehaviorTests(unittest.TestCase):
     def test_feasible_expression_rejects_unknown_axis(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown axis name"):
             validate_feasible_expression("unknown_axis > 3", ["temperature"])
+
+    def test_full_feasible_mask_eval_skips_before_large_meshgrid(self) -> None:
+        axes = [axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)]
+        with self.assertRaises(FeasibleMaskEvaluationTooLarge) as context:
+            compute_valid_bin_mask_for_axes(axes, ["x >= 0"], max_bins=250000)
+        self.assertEqual(context.exception.total_bins, 1_000_000)
+        self.assertEqual(context.exception.max_bins, 250000)
+
+    def test_validate_goal_allows_large_grid_when_expression_is_valid(self) -> None:
+        payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
+        payload["feasibleDomainAdvancedExpressions"] = ["x >= 0"]
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(normalized["feasibleDomainExpressions"], ["x >= 0"])
+
+    def test_validate_expression_mask_info_reports_large_grid_skip(self) -> None:
+        payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
+        payload["feasibleDomainAdvancedExpressions"] = ["x >= 0"]
+        normalized = storage.validate_goal(payload)
+        mask_info = app.mask_info_for_display(app.feasible_mask_info_for_goal(normalized))
+        self.assertTrue(mask_info["feasibleMaskEvaluationSkipped"])
+        self.assertEqual(mask_info["totalBins"], 1_000_000)
+        self.assertIsNone(mask_info["validBins"])
+        self.assertIsNone(mask_info["maskedBins"])
+        self.assertIsNone(mask_info["validDomainRatio"])
+
+    def test_large_grid_analysis_falls_back_to_rectangular_coverage_denominator(self) -> None:
+        selected_goal = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
+        selected_goal["feasibleDomainAdvancedExpressions"] = ["x <= 500"]
+        normalized = storage.validate_goal(selected_goal)
+        peer = record_from_rows(normalized, [{"x": "10", "y": "10"}], "peer")
+        coverage = app.build_global_bin_counts([peer], normalized)
+        self.assertTrue(coverage["feasibleMaskEvaluationSkipped"])
+        self.assertEqual(coverage["validBins"], 1_000_000)
+        self.assertEqual(coverage["maskedBins"], 0)
+        analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(normalized))
+        analyzer.set_peer_bin_counts(coverage["binCounts"])
+        analyzer.set_feasible_domain(coverage["validBins"], coverage["maskedBins"], coverage["feasibleMaskEnabled"])
+        result = analyzer.diagnose({"[10,10]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
+        self.assertAlmostEqual(result.coverage_C, 1 / 1_000_000)
 
     def test_target_row_inside_domain_but_outside_feasible_mask_is_masked_out(self) -> None:
         selected_goal = goal(

@@ -765,6 +765,7 @@
         <div class="preview-metric"><span class="small">reference rows</span><strong>${escapeHtml(item.referenceObservationCount ?? item.peerValidRows ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">eligible records</span><strong>${escapeHtml(item.eligibleRecords ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">legacy excluded</span><strong>${escapeHtml(item.legacyExcluded ?? 0)}</strong></div>
+        ${item.feasibleMaskEvaluationSkipped ? `<div class="notice">${escapeHtml(item.coverageWarning || 'Full feasible mask count skipped for this large grid; row-level filtering still applies.')}</div>` : ''}
       </div>`;
     }
     function renderGridPreviewEditor(explorer) {
@@ -996,7 +997,7 @@
           <button class="ghost" id="projection-clear" type="button">선택 해제</button>
         </div>
         ${renderGridPreviewEditor(explorer)}
-        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Projection masked-region overlay is not implemented in this MVP. Valid bins ${escapeHtml(explorer.validBins ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)}<div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
+        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Projection masked-region overlay is not implemented in this MVP. ${explorer.feasibleMaskEvaluationSkipped ? 'Full-grid valid bin count skipped for this large grid.' : `Valid bins ${escapeHtml(explorer.validBins ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)}`}<div class="small">${escapeHtml(explorer.coverageWarning || '')}</div><div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
         <div class="notice" id="projection-selection-info">${escapeHtml(projectionSelectionText(explorer))}</div>
         ${explorer.targetRowTupleSampled ? `<div class="tag warn">Target row bin tuples are sampled for linked highlighting: ${escapeHtml(explorer.targetRowTupleLimit)} of ${escapeHtml(explorer.targetRowTupleCount)} rows.</div>` : ''}
         <div class="projection-workspace">
@@ -2526,7 +2527,11 @@
         const data = await response.json(); if (!response.ok) throw adminRequestError(response, data, 'Feasible expression 검증 실패');
         state.draftGoal = clone(data.goal || state.draftGoal);
         renderAdmin();
-        setAdminMessage('success', `Feasible expression 검증 완료 · valid bins ${data.maskInfo?.validBins ?? '-'} / ${data.maskInfo?.totalBins ?? '-'}`);
+        if (data.maskInfo?.feasibleMaskEvaluationSkipped) {
+          setAdminMessage('success', `Feasible expression 문법 검증 완료 · full-grid valid bin 계산은 생략됨 · total bins ${formatNumber(data.maskInfo?.totalBins,0)}`);
+        } else {
+          setAdminMessage('success', `Feasible expression 검증 완료 · valid bins ${data.maskInfo?.validBins ?? '-'} / ${data.maskInfo?.totalBins ?? '-'}`);
+        }
       } catch (error) {
         setAdminMessage('error', error.message || 'Feasible expression 검증 실패');
       } finally { setButtonLoading(button, false); updateButtons(); }

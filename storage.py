@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from feasible_mask import (
+    FeasibleMaskEvaluationTooLarge,
     compute_valid_bin_mask_for_axes,
     normalize_feasible_expressions,
     normalize_feasible_rules,
@@ -96,6 +97,9 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "validDomainRatio": None,
     "occupiedBins": None,
     "feasibleMaskEnabled": None,
+    "feasibleMaskEvaluationSkipped": None,
+    "feasibleMaskWarning": None,
+    "coverageWarning": None,
     "feasibleExpressions": [],
     "infeasiblePeerRows": None,
     "infeasiblePeerBins": None,
@@ -244,6 +248,9 @@ def normalize_analysis_snapshot(snapshot: Any) -> dict[str, Any]:
         "valid_domain_ratio": "validDomainRatio",
         "occupied_bins": "occupiedBins",
         "feasible_mask_enabled": "feasibleMaskEnabled",
+        "feasible_mask_evaluation_skipped": "feasibleMaskEvaluationSkipped",
+        "feasible_mask_warning": "feasibleMaskWarning",
+        "coverage_warning": "coverageWarning",
         "feasible_expressions": "feasibleExpressions",
         "infeasible_peer_rows": "infeasiblePeerRows",
         "infeasible_peer_bins": "infeasiblePeerBins",
@@ -462,7 +469,12 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         except ValueError as exc:
             raise ValueError(f"Invalid feasible domain expression '{expression}': {exc}") from exc
     if feasible_expressions:
-        compute_valid_bin_mask_for_axes(normalized_axes, feasible_expressions)
+        try:
+            compute_valid_bin_mask_for_axes(normalized_axes, feasible_expressions)
+        except FeasibleMaskEvaluationTooLarge:
+            # Goal validation must prove expressions are safe and syntactically valid.
+            # Full-grid valid-bin counting is best-effort and may be skipped for large grids.
+            pass
     return {
         "id": str(goal.get("id") or f"goal_{abs(hash(name))}"),
         "name": name,

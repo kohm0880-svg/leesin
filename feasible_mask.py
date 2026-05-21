@@ -4,12 +4,23 @@ import ast
 import hashlib
 import json
 import math
+import os
 from typing import Any
 
 import numpy as np
 
 
-MAX_MASK_EVAL_BINS = 2_000_000
+MAX_MASK_EVAL_BINS = int(os.environ.get("MAX_MASK_EVAL_BINS", "250000"))
+
+
+class FeasibleMaskEvaluationTooLarge(ValueError):
+    def __init__(self, total_bins: int, max_bins: int):
+        self.total_bins = int(total_bins)
+        self.max_bins = int(max_bins)
+        super().__init__(
+            "Feasible mask full-grid evaluation skipped: "
+            f"total bin count {self.total_bins} exceeds MAX_MASK_EVAL_BINS {self.max_bins}."
+        )
 
 
 def _safe_min(*args: Any) -> Any:
@@ -443,9 +454,7 @@ def compute_valid_bin_mask_for_axes(
             "validDomainRatio": 1.0 if total_bins else 0.0,
         }
     if total_bins > max_bins:
-        raise ValueError(
-            f"Feasible domain mask evaluation too large: {total_bins} bins exceeds limit {max_bins}."
-        )
+        raise FeasibleMaskEvaluationTooLarge(total_bins, max_bins)
 
     centers = []
     for axis, count in zip(ordered_axes, axis_bin_counts):
