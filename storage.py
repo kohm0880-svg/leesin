@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from feasible_box_counter import compute_a_valid_for_rules
+from feasible_box_counter import compile_rules_to_mask_boxes, compute_rectangular_total_bins, mask_signature
 from feasible_mask import normalize_feasible_expressions, normalize_feasible_rules
 from models import K_M, ExperimentConfig
 
@@ -461,7 +461,28 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
             legacy_advanced_expressions.append(expression)
             seen_legacy.add(expression)
     feasible_expressions = rule_expressions
-    mask_info = compute_a_valid_for_rules(normalized_axes, feasible_rules)
+    mask_boxes = compile_rules_to_mask_boxes(feasible_rules, normalized_axes)
+    rectangular_total_bins = compute_rectangular_total_bins(normalized_axes)
+    current_mask_signature = mask_signature(normalized_axes, mask_boxes)
+    cache = goal.get("aValidCache") if isinstance(goal.get("aValidCache"), dict) else {}
+    cache_ready = (
+        cache.get("maskSignature") == current_mask_signature
+        and cache.get("aValid") is not None
+        and cache.get("maskedBins") is not None
+        and cache.get("rectangularTotalBins") == rectangular_total_bins
+    )
+    if not mask_boxes:
+        cache_ready = True
+        cache = {
+            "maskSignature": current_mask_signature,
+            "rectangularTotalBins": rectangular_total_bins,
+            "maskedBins": 0,
+            "aValid": rectangular_total_bins,
+            "aValidMode": "exact_box_union",
+            "computedAt": goal.get("aValidComputedAt"),
+            "durationMs": 0,
+        }
+    a_valid_status = "ready" if cache_ready else "stale"
     return {
         "id": str(goal.get("id") or f"goal_{abs(hash(name))}"),
         "name": name,
@@ -472,15 +493,17 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         "feasibleDomainAdvancedExpressions": [],
         "feasibleDomainExpressions": feasible_expressions,
         "generatedFeasibleExpressions": feasible_expressions,
-        "feasibleMaskBoxes": mask_info.get("maskBoxes", []),
-        "maskBoxCount": mask_info.get("maskBoxCount", 0),
-        "rectangularTotalBins": mask_info.get("rectangularTotalBins", mask_info.get("totalBins")),
-        "aValid": mask_info.get("aValid"),
-        "maskedBins": mask_info.get("maskedBins"),
-        "aValidStatus": "ready",
-        "aValidProgressPercent": 100,
+        "feasibleMaskBoxes": mask_boxes,
+        "maskBoxCount": len(mask_boxes),
+        "rectangularTotalBins": rectangular_total_bins,
+        "aValid": cache.get("aValid") if cache_ready else None,
+        "maskedBins": cache.get("maskedBins") if cache_ready else None,
+        "aValidStatus": a_valid_status,
+        "aValidProgressPercent": 100 if cache_ready else 0,
         "aValidMode": "exact_box_union",
-        "maskSignature": mask_info.get("maskSignature"),
+        "maskSignature": current_mask_signature,
+        "aValidComputedAt": cache.get("computedAt") if cache_ready else None,
+        "aValidCache": dict(cache) if cache else {},
     }
 
 

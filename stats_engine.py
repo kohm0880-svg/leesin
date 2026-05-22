@@ -125,22 +125,24 @@ class BinGridTracker:
 
 def compute_density_confidence(
     reference_bin_counts: dict[str, int],
-    valid_bins: int,
+    valid_bins: int | None,
     K_density: float,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float | None, float, float | None]:
     counts = np.array([int(value) for value in reference_bin_counts.values() if int(value) > 0], dtype=float)
     reference_rows = float(counts.sum())
     occupied_bins = int(counts.size)
-    if reference_rows <= 0 or valid_bins <= 0:
-        return 0.0, 0.0, 0.0, 0.0
+    if reference_rows <= 0:
+        return 0.0, None, 0.0, None
     observation_support = reference_rows / (reference_rows + float(K_density))
-    coverage = occupied_bins / int(valid_bins)
     if occupied_bins <= 1:
         equitability = 0.0
     else:
         proportions = counts / reference_rows
         entropy = -np.sum(proportions * np.log(proportions + 1e-12))
         equitability = float(entropy / np.log(occupied_bins))
+    if valid_bins is None or int(valid_bins) <= 0:
+        return float(observation_support), None, float(equitability), None
+    coverage = occupied_bins / int(valid_bins)
     confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0))
     return float(observation_support), float(coverage), float(equitability), confidence
 
@@ -240,8 +242,8 @@ class DensityGridAnalyzer:
             raise ValueError("Density grid analysis requires at least one valid target row-level observation.")
 
         total_bins = self._peer_density.total_bins
-        valid_bins = int(self._valid_bins_override if self._valid_bins_override is not None else total_bins)
-        if valid_bins <= 0:
+        valid_bins = int(self._valid_bins_override) if self._valid_bins_override is not None else None
+        if valid_bins is not None and valid_bins <= 0:
             raise ValueError("Feasible Domain Mask leaves zero valid bins; density analysis cannot run.")
         alpha = 0.5
         denominator = peer_valid_rows + alpha * total_bins
@@ -281,7 +283,7 @@ class DensityGridAnalyzer:
             rare_bin_rate=float(extreme_target_rows / target_valid_rows),
             out_of_domain_rate=float(out_of_domain_rows / target_total_rows) if target_total_rows > 0 else 0.0,
             observation_support_S=float(observation_support_S),
-            coverage_C=float(coverage_C),
+            coverage_C=None if coverage_C is None else float(coverage_C),
             equitability_E=float(equitability_E),
             confidence=confidence,
             peer_observation_count=int(peer_valid_rows),
@@ -291,7 +293,7 @@ class DensityGridAnalyzer:
             masked_out_target_rows=int(masked_out_target_rows),
             target_total_rows=int(target_total_rows),
             total_bins=int(total_bins),
-            valid_bins=int(valid_bins),
+            valid_bins=valid_bins,
             masked_bins=int(self._masked_bins),
             occupied_bins=int(self._peer_density.occupied_bins),
             feasible_mask_enabled=bool(self._feasible_mask_enabled),

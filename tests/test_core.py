@@ -38,6 +38,21 @@ def record_from_rows(goal_payload: dict, rows: list[dict[str, str]], record_id: 
     return record
 
 
+def goal_with_ready_a_valid(goal_payload: dict) -> dict:
+    normalized = storage.validate_goal(goal_payload)
+    info = compute_a_valid_for_rules(normalized["axes"], normalized.get("feasibleDomainRules") or [])
+    normalized["aValidCache"] = {
+        "maskSignature": info["maskSignature"],
+        "rectangularTotalBins": info["rectangularTotalBins"],
+        "maskedBins": info["maskedBins"],
+        "aValid": info["aValid"],
+        "aValidMode": "exact_box_union",
+        "computedAt": "test",
+        "durationMs": 0,
+    }
+    return storage.validate_goal(normalized)
+
+
 class DensityGridBehaviorTests(unittest.TestCase):
     def test_csv_rows_become_cluster_vector_and_bin_occupancy(self) -> None:
         goal_payload = goal(axes=[axis("x"), axis("y", domain_max=20.0)])
@@ -534,6 +549,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(normalized["legacyAdvancedExpressions"], ["x >= 0"])
         self.assertEqual(normalized["feasibleDomainExpressions"], [])
         self.assertEqual(normalized["aValid"], 1_000_000)
+        self.assertEqual(normalized["aValidStatus"], "ready")
 
     def test_validate_mask_info_uses_exact_box_union_without_full_grid_skip(self) -> None:
         payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
@@ -549,8 +565,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         mask_info = app.mask_info_for_display(app.feasible_mask_info_for_goal(normalized))
         self.assertEqual(mask_info["totalBins"], 1_000_000)
         self.assertFalse(mask_info["feasibleMaskEvaluationSkipped"])
-        self.assertEqual(mask_info["maskedBins"], 500_000)
-        self.assertEqual(mask_info["validBins"], 500_000)
+        self.assertIsNone(mask_info["maskedBins"])
+        self.assertIsNone(mask_info["validBins"])
+        self.assertEqual(mask_info["aValidStatus"], "stale")
         self.assertEqual(mask_info["aValidMode"], "exact_box_union")
 
     def test_box_union_counts_overlapping_masks_once(self) -> None:
@@ -585,7 +602,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
                 "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 500, "xMax": 1000, "yMin": 0, "yMax": 1000, "scope": {}},
             }
         ]
-        normalized = storage.validate_goal(selected_goal)
+        normalized = goal_with_ready_a_valid(selected_goal)
         peer = record_from_rows(normalized, [{"x": "10", "y": "10"}], "peer")
         coverage = app.build_global_bin_counts([peer], normalized)
         self.assertFalse(coverage["feasibleMaskEvaluationSkipped"])
@@ -607,7 +624,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
                 "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 500, "xMax": 1000, "yMin": 0, "yMax": 1000, "scope": {}},
             }
         ]
-        normalized = storage.validate_goal(selected_goal)
+        normalized = goal_with_ready_a_valid(selected_goal)
         payload = {
             "goalId": normalized["id"],
             "selectedAxes": ["x", "y"],
@@ -634,7 +651,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
                 "guiSpec": {"type": "focused_2d_mask", "xAxis": "temperature", "yAxis": "pressure", "xMin": 50, "xMax": 100, "yMin": 0, "yMax": 10, "scope": {}},
             }
         ]
-        selected_goal = storage.validate_goal(selected_goal)
+        selected_goal = goal_with_ready_a_valid(selected_goal)
         recomputed = app.recompute_bin_occupancy_from_row_vectors(
             [[60.0, 5.0], [40.0, 5.0]],
             ["temperature", "pressure"],
@@ -657,7 +674,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
                 "guiSpec": {"type": "focused_2d_mask", "xAxis": "temperature", "yAxis": "pressure", "xMin": 50, "xMax": 100, "yMin": 0, "yMax": 10, "scope": {}},
             }
         ]
-        selected_goal = storage.validate_goal(selected_goal)
+        selected_goal = goal_with_ready_a_valid(selected_goal)
         peer = record_from_rows(selected_goal, [{"temperature": "40", "pressure": "5"}], "peer")
         coverage = app.build_global_bin_counts([peer], selected_goal)
         analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(selected_goal))
@@ -781,8 +798,8 @@ class DensityGridBehaviorTests(unittest.TestCase):
                 },
             }
         ]
-        normalized = storage.validate_goal(selected_goal)
-        mask_info = compute_valid_bin_mask_for_axes(normalized["axes"], normalized["feasibleDomainExpressions"])
+        normalized = goal_with_ready_a_valid(selected_goal)
+        mask_info = app.feasible_mask_info_for_goal(normalized)
         self.assertEqual(mask_info["totalBins"], 1000)
         self.assertEqual(mask_info["maskedBins"], 40)
         self.assertEqual(mask_info["validBins"], 960)

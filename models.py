@@ -41,9 +41,9 @@ class DensityDiagnosisResult:
     rare_bin_rate: float
     out_of_domain_rate: float
     observation_support_S: float
-    coverage_C: float
+    coverage_C: float | None
     equitability_E: float
-    confidence: float
+    confidence: float | None
     peer_observation_count: int
     valid_target_rows: int
     invalid_target_rows: int
@@ -51,8 +51,8 @@ class DensityDiagnosisResult:
     masked_out_target_rows: int
     target_total_rows: int
     total_bins: int
-    valid_bins: int
-    masked_bins: int
+    valid_bins: int | None
+    masked_bins: int | None
     occupied_bins: int
     feasible_mask_enabled: bool
 
@@ -72,9 +72,9 @@ class DensityDiagnosisResult:
             "rare_bin_rate": round(float(self.rare_bin_rate), 6),
             "out_of_domain_rate": round(float(self.out_of_domain_rate), 6),
             "observation_support_S": round(float(self.observation_support_S), 6),
-            "coverage_C": round(float(self.coverage_C), 6),
+            "coverage_C": None if self.coverage_C is None else round(float(self.coverage_C), 6),
             "equitability_E": round(float(self.equitability_E), 6),
-            "confidence": round(float(self.confidence), 6),
+            "confidence": None if self.confidence is None else round(float(self.confidence), 6),
             "peer_observation_count": int(self.peer_observation_count),
             "reference_observation_count": int(self.peer_observation_count),
             "valid_target_rows": int(self.valid_target_rows),
@@ -86,9 +86,16 @@ class DensityDiagnosisResult:
             "total_bins": self.total_bins,
             "valid_bins": self.valid_bins,
             "masked_bins": self.masked_bins,
-            "valid_domain_ratio": round(float(self.valid_bins / self.total_bins), 6) if self.total_bins else 0.0,
+            "valid_domain_ratio": (
+                round(float(self.valid_bins / self.total_bins), 6)
+                if self.total_bins and self.valid_bins is not None
+                else None
+            ),
             "occupied_bins": self.occupied_bins,
             "feasible_mask_enabled": bool(self.feasible_mask_enabled),
+            "coverage_pending": self.coverage_C is None,
+            "confidence_pending": self.confidence is None,
+            "confidence_exact": self.confidence is not None,
         }
 
 

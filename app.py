@@ -11,11 +11,12 @@ import math
 import os
 import uuid
 from dataclasses import asdict
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import numpy as np
 
@@ -24,6 +25,8 @@ from feasible_box_counter import (
     bin_tuple_masked_by_boxes,
     compile_rules_to_mask_boxes,
     compute_a_valid_for_rules,
+    compute_rectangular_total_bins,
+    mask_signature,
 )
 from feasible_mask import normalize_feasible_expressions
 from models import K_M, DensityDiagnosisResult, ExperimentConfig
@@ -68,6 +71,7 @@ CERTIFIED_FEASIBLE_DOMAIN_MESSAGE = (
     "Feasible Domain is defined by exact 2D Projection Mask boxes. "
     "Leesin does not materialize the full multidimensional grid."
 )
+A_VALID_JOBS: dict[str, dict[str, Any]] = {}
 
 
 def canonical_axis_order(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -103,6 +107,15 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
         "feasibleDomainAdvancedExpressions": [],
         "generatedFeasibleExpressions": feasible_expressions,
         "feasibleDomainExpressions": feasible_expressions,
+        "aValidCache": dict(goal.get("aValidCache") or {}) if isinstance(goal.get("aValidCache"), dict) else {},
+        "aValid": goal.get("aValid"),
+        "maskedBins": goal.get("maskedBins"),
+        "rectangularTotalBins": goal.get("rectangularTotalBins"),
+        "aValidStatus": goal.get("aValidStatus"),
+        "aValidProgressPercent": goal.get("aValidProgressPercent"),
+        "aValidMode": goal.get("aValidMode"),
+        "maskSignature": goal.get("maskSignature"),
+        "aValidComputedAt": goal.get("aValidComputedAt"),
     }
 
 
@@ -177,10 +190,60 @@ def api_error_payload(exc: Exception) -> dict[str, Any]:
     }
 
 
+def nullable_numeric_delta(current: Any, previous: Any) -> float | None:
+    if current is None or previous is None:
+        return None
+    try:
+        return round(float(current) - float(previous), 6)
+    except (TypeError, ValueError):
+        return None
+
+
 def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]:
     axes = canonical_axis_order(selected_goal["axes"])
     rules = selected_goal.get("feasibleDomainRules") or []
-    info = compute_a_valid_for_rules(axes, rules)
+    boxes = compile_rules_to_mask_boxes(rules, axes)
+    total_bins = compute_rectangular_total_bins(axes)
+    current_signature = mask_signature(axes, boxes)
+    cache = selected_goal.get("aValidCache") if isinstance(selected_goal.get("aValidCache"), dict) else {}
+    cache_ready = (
+        cache.get("maskSignature") == current_signature
+        and cache.get("aValid") is not None
+        and cache.get("maskedBins") is not None
+        and cache.get("rectangularTotalBins") == total_bins
+    )
+    if not boxes:
+        cache_ready = True
+        cache = {
+            "maskSignature": current_signature,
+            "rectangularTotalBins": total_bins,
+            "maskedBins": 0,
+            "aValid": total_bins,
+            "aValidMode": "exact_box_union",
+            "computedAt": selected_goal.get("aValidComputedAt"),
+            "durationMs": 0,
+        }
+    info = {
+        "totalBins": int(total_bins),
+        "rectangularTotalBins": int(total_bins),
+        "validBins": int(cache["aValid"]) if cache_ready else None,
+        "aValid": int(cache["aValid"]) if cache_ready else None,
+        "maskedBins": int(cache["maskedBins"]) if cache_ready else None,
+        "maskBoxes": boxes,
+        "maskBoxCount": len(boxes),
+        "feasibleMaskEnabled": bool(boxes),
+        "validDomainRatio": float(cache["aValid"] / total_bins) if cache_ready and total_bins else None,
+        "aValidStatus": "ready" if cache_ready else str(selected_goal.get("aValidStatus") or "stale"),
+        "aValidProgressPercent": 100 if cache_ready else int(selected_goal.get("aValidProgressPercent") if selected_goal.get("aValidProgressPercent") is not None else 0),
+        "aValidMode": "exact_box_union",
+        "coverageDenominator": int(cache["aValid"]) if cache_ready else None,
+        "maskSignature": current_signature,
+        "aValidComputedAt": cache.get("computedAt") if cache_ready else None,
+        "aValidCache": dict(cache) if cache else {},
+        "feasibleMaskEvaluationSkipped": False,
+        "feasibleMaskWarning": "",
+        "coverageWarning": "",
+    }
     expressions = feasible_expressions_for_goal(selected_goal)
     info["feasibleExpressions"] = expressions
     info["generatedFeasibleExpressions"] = expressions
@@ -648,12 +711,12 @@ def build_projection_explorer(
         "peerProjections": peer_projections,
         "targetProjections": target_projections,
         "feasibleMaskEnabled": bool(coverage_info.get("feasibleMaskEnabled")) if isinstance(coverage_info, dict) else False,
-        "validBins": int(coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
-        "aValid": int(coverage_info.get("aValid") or coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "validBins": int(coverage_info.get("validBins")) if isinstance(coverage_info, dict) and coverage_info.get("validBins") is not None else None,
+        "aValid": int(coverage_info.get("aValid")) if isinstance(coverage_info, dict) and coverage_info.get("aValid") is not None else None,
         "rectangularTotalBins": int(coverage_info.get("rectangularTotalBins") or coverage_info.get("totalBins") or 0) if isinstance(coverage_info, dict) else 0,
-        "maskedBins": int(coverage_info.get("maskedBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "maskedBins": int(coverage_info.get("maskedBins")) if isinstance(coverage_info, dict) and coverage_info.get("maskedBins") is not None else None,
         "maskBoxCount": int(coverage_info.get("maskBoxCount") or 0) if isinstance(coverage_info, dict) else 0,
-        "validDomainRatio": float(coverage_info.get("validDomainRatio") or 0.0) if isinstance(coverage_info, dict) else 0.0,
+        "validDomainRatio": float(coverage_info.get("validDomainRatio")) if isinstance(coverage_info, dict) and coverage_info.get("validDomainRatio") is not None else None,
         "feasibleExpressions": list(coverage_info.get("feasibleExpressions") or []) if isinstance(coverage_info, dict) else [],
         "feasibleMaskEvaluationSkipped": bool(coverage_info.get("feasibleMaskEvaluationSkipped")) if isinstance(coverage_info, dict) else False,
         "feasibleMaskWarning": str(coverage_info.get("feasibleMaskWarning") or "") if isinstance(coverage_info, dict) else "",
@@ -677,32 +740,34 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
     peer_valid_rows = int(sum(counts))
     mask_info = feasible_mask_info_for_goal(selected_goal)
     total_bins = int(coverage_info.get("totalBins") or mask_info["totalBins"])
-    valid_bins = int(coverage_info.get("validBins") or mask_info["validBins"])
-    masked_bins = int(coverage_info.get("maskedBins") or mask_info["maskedBins"])
+    valid_bins = coverage_info.get("validBins", mask_info.get("validBins"))
+    valid_bins = int(valid_bins) if valid_bins is not None else None
+    masked_bins = coverage_info.get("maskedBins", mask_info.get("maskedBins"))
+    masked_bins = int(masked_bins) if masked_bins is not None else None
     occupied_bins = len(counts)
     observation_support = peer_valid_rows / (peer_valid_rows + float(selected_goal.get("K_m", K_M))) if peer_valid_rows > 0 else 0.0
-    coverage = occupied_bins / valid_bins if valid_bins else 0.0
+    coverage = occupied_bins / valid_bins if valid_bins else None
     if occupied_bins <= 1 or peer_valid_rows <= 0:
         equitability = 0.0
     else:
         proportions = [count / peer_valid_rows for count in counts]
         equitability = -sum(p * math.log(p) for p in proportions if p > 0) / math.log(occupied_bins)
-    confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0)) if observation_support and coverage and equitability else 0.0
+    confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0)) if observation_support and coverage and equitability else None
     return {
         "totalBins": int(total_bins),
-        "validBins": int(valid_bins),
-        "maskedBins": int(masked_bins),
-        "validDomainRatio": round(float(valid_bins / total_bins), 6) if total_bins else 0.0,
+        "validBins": valid_bins,
+        "maskedBins": masked_bins,
+        "validDomainRatio": round(float(valid_bins / total_bins), 6) if total_bins and valid_bins is not None else None,
         "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
         "feasibleMaskEvaluationSkipped": False,
         "feasibleMaskWarning": "",
         "coverageWarning": "",
-        "aValid": int(mask_info.get("aValid") or valid_bins),
+        "aValid": mask_info.get("aValid") if mask_info.get("aValid") is not None else valid_bins,
         "rectangularTotalBins": int(mask_info.get("rectangularTotalBins") or total_bins),
         "maskBoxCount": int(mask_info.get("maskBoxCount") or 0),
-        "aValidStatus": str(mask_info.get("aValidStatus") or "ready"),
-        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") or 100),
+        "aValidStatus": str(mask_info.get("aValidStatus") or "stale"),
+        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") if mask_info.get("aValidProgressPercent") is not None else 0),
         "aValidMode": str(mask_info.get("aValidMode") or "exact_box_union"),
         "feasibleMaskMessage": str(mask_info.get("feasibleMaskMessage") or CERTIFIED_FEASIBLE_DOMAIN_MESSAGE),
         "occupiedBins": int(occupied_bins),
@@ -710,9 +775,12 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
         "referenceObservationCount": int(peer_valid_rows),
         "targetIncludedInReference": True,
         "observationSupportZ": round(float(observation_support), 6),
-        "coverageC": round(float(coverage), 6),
+        "coverageC": None if coverage is None else round(float(coverage), 6),
         "equitabilityE": round(float(equitability), 6),
-        "confidence": round(float(confidence), 6),
+        "confidence": None if confidence is None else round(float(confidence), 6),
+        "coveragePending": coverage is None,
+        "confidencePending": confidence is None,
+        "confidenceExact": confidence is not None,
         "eligibleRecords": int(coverage_info.get("coverageEligibleClusterCount") or 0),
         "legacyExcluded": int(coverage_info.get("coverageLegacyExcludedClusterCount") or 0),
         "gridSignatureExcluded": int(coverage_info.get("coverageGridSignatureExcludedClusterCount") or 0),
@@ -779,7 +847,12 @@ def build_report_visualizations(
             "peerObservationCount": int(result.peer_observation_count),
             "score": round(float(result.observation_support_S), 6),
         },
-        "coverage": {"score": round(float(result.coverage_C), 6), "basis": visualization_basis, "axes": coverage_axes},
+        "coverage": {
+            "score": None if result.coverage_C is None else round(float(result.coverage_C), 6),
+            "pending": result.coverage_C is None,
+            "basis": visualization_basis,
+            "axes": coverage_axes,
+        },
         "equitability": {
             "score": round(float(result.equitability_E), 6),
             "basis": visualization_basis,
@@ -806,6 +879,19 @@ def build_report_visualizations(
 
 
 def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    coverage_reason = {
+        "label": "Coverage",
+        "score": None,
+        "impact": "pending",
+        "message": "a_valid exact calculation is not ready. Coverage and Confidence will be available after Compute a_valid finishes.",
+    }
+    if result.coverage_C is not None:
+        coverage_reason = {
+            "label": "Coverage",
+            "score": round(float(result.coverage_C), 4),
+            "impact": "down" if result.coverage_C < 0.3 else "stable",
+            "message": "Coverage measures how much of the feasible density grid is occupied by target-included reference row-level observations.",
+        }
     reasons = [
         {
             "label": "Observation Support",
@@ -813,12 +899,7 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
             "impact": "down" if result.observation_support_S < 0.6 else "stable",
             "message": "Observation Support uses target-included reference row-level observations: S = reference rows / (reference rows + K_density). K_density currently reuses the goal K_m value.",
         },
-        {
-            "label": "Coverage",
-            "score": round(float(result.coverage_C), 4),
-            "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage measures how much of the feasible density grid is occupied by target-included reference row-level observations.",
-        },
+        coverage_reason,
         {
             "label": "Equitability",
             "score": round(float(result.equitability_E), 4),
@@ -840,9 +921,11 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
 
 def build_summary(result: DensityDiagnosisResult) -> list[str]:
     messages: list[str] = []
-    if result.specificity_score > 0.75 and result.confidence > 0.7:
+    if result.confidence is None:
+        messages.append("a_valid exact calculation is not ready. Specificity, Observation Support, and Equitability are available now; Coverage and Confidence will be available after Compute a_valid finishes.")
+    if result.specificity_score > 0.75 and result.confidence is not None and result.confidence > 0.7:
         messages.append("Specificity Score and confidence are both high. Target rows fall in low-density bins relative to the target-included reference count distribution.")
-    elif result.specificity_score > 0.75 and result.confidence <= 0.4:
+    elif result.specificity_score > 0.75 and (result.confidence is None or result.confidence <= 0.4):
         messages.append("Target rows are rare against the current target-included reference density map, but the map itself has limited support. Interpret the outlier signal cautiously.")
     elif result.specificity_score <= 0.5:
         messages.append("Target rows mostly fall in dense or ordinary occupied reference bins.")
@@ -851,7 +934,7 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
 
     if result.observation_support_S < 0.5:
         messages.append("Observation Support is low. Add more row-level observations or saved external records with row-level sanitized axis vectors.")
-    if result.coverage_C < 0.3:
+    if result.coverage_C is not None and result.coverage_C < 0.3:
         messages.append("Coverage is low. The target-included reference density map occupies only a small portion of the feasible domain-resolution grid.")
     if result.equitability_E < 0.5:
         messages.append("Equitability is low. Reference observations are concentrated in a small number of occupied bins.")
@@ -983,7 +1066,7 @@ def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) 
         "aValid": mask_info.get("aValid", mask_info.get("validBins")),
         "rectangularTotalBins": mask_info.get("rectangularTotalBins", total_bins),
         "maskBoxCount": mask_info.get("maskBoxCount", 0),
-        "aValidStatus": mask_info.get("aValidStatus", "ready"),
+        "aValidStatus": mask_info.get("aValidStatus", "stale"),
         "gridPreviewSkipped": True,
         "previewWarning": warning,
         "occupiedBins": 0,
@@ -991,9 +1074,12 @@ def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) 
         "referenceObservationCount": 0,
         "targetIncludedInReference": True,
         "observationSupportZ": 0.0,
-        "coverageC": 0.0,
+        "coverageC": None,
         "equitabilityE": 0.0,
-        "confidence": 0.0,
+        "confidence": None,
+        "coveragePending": True,
+        "confidencePending": True,
+        "confidenceExact": False,
         "eligibleRecords": 0,
         "legacyExcluded": 0,
         "gridSignatureExcluded": 0,
@@ -1005,9 +1091,9 @@ def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) 
             "binCounts": {},
             "axisBinCounts": {},
             "totalBins": int(total_bins),
-            "validBins": int(total_bins),
-            "maskedBins": 0,
-            "validDomainRatio": 1.0 if total_bins else 0.0,
+            "validBins": mask_info.get("validBins"),
+            "maskedBins": mask_info.get("maskedBins"),
+            "validDomainRatio": mask_info.get("validDomainRatio"),
             "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
             "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
             "feasibleMaskEvaluationSkipped": False,
@@ -1271,13 +1357,13 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         "rowLevelObservationCount": row_level_observation_count,
         "occupiedBins": len(bin_counts),
         "totalBins": int(mask_info.get("totalBins") or 0),
-        "validBins": int(mask_info.get("validBins") or mask_info.get("totalBins") or 0),
-        "aValid": int(mask_info.get("aValid") or mask_info.get("validBins") or mask_info.get("totalBins") or 0),
+        "validBins": int(mask_info["validBins"]) if mask_info.get("validBins") is not None else None,
+        "aValid": int(mask_info["aValid"]) if mask_info.get("aValid") is not None else None,
         "rectangularTotalBins": int(mask_info.get("rectangularTotalBins") or mask_info.get("totalBins") or 0),
-        "maskedBins": int(mask_info.get("maskedBins") or 0),
+        "maskedBins": int(mask_info["maskedBins"]) if mask_info.get("maskedBins") is not None else None,
         "maskBoxes": list(mask_info.get("maskBoxes") or []),
         "maskBoxCount": int(mask_info.get("maskBoxCount") or 0),
-        "validDomainRatio": float(mask_info.get("validDomainRatio") or 0.0),
+        "validDomainRatio": None if mask_info.get("validDomainRatio") is None else float(mask_info.get("validDomainRatio") or 0.0),
         "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
         "generatedFeasibleExpressions": list(mask_info.get("generatedFeasibleExpressions") or mask_info.get("feasibleExpressions") or []),
@@ -1286,8 +1372,8 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         "feasibleMaskEvaluationSkipped": bool(mask_info.get("feasibleMaskEvaluationSkipped")),
         "feasibleMaskWarning": str(mask_info.get("feasibleMaskWarning") or ""),
         "coverageWarning": str(mask_info.get("coverageWarning") or ""),
-        "aValidStatus": str(mask_info.get("aValidStatus") or "ready"),
-        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") or 100),
+        "aValidStatus": str(mask_info.get("aValidStatus") or "stale"),
+        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") if mask_info.get("aValidProgressPercent") is not None else 0),
         "aValidMode": str(mask_info.get("aValidMode") or "exact_box_union"),
         "maskSignature": str(mask_info.get("maskSignature") or ""),
         "infeasiblePeerRows": int(infeasible_peer_rows),
@@ -1472,8 +1558,8 @@ def run_density_analysis(
     analyzer = DensityGridAnalyzer(config)
     analyzer.set_peer_bin_counts(reference_bin_counts)
     analyzer.set_feasible_domain(
-        valid_bins=int(coverage_info.get("validBins") or coverage_info.get("totalBins") or 0),
-        masked_bins=int(coverage_info.get("maskedBins") or 0),
+        valid_bins=coverage_info.get("validBins"),
+        masked_bins=int(coverage_info.get("maskedBins") or 0) if coverage_info.get("maskedBins") is not None else 0,
         feasible_mask_enabled=bool(coverage_info.get("feasibleMaskEnabled")),
     )
     result = analyzer.diagnose(target_bin_counts, target_meta)
@@ -1497,15 +1583,15 @@ def run_density_analysis(
     result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
     result_payload["aValid"] = coverage_info.get("aValid", coverage_info.get("validBins", result.valid_bins))
     result_payload["rectangularTotalBins"] = coverage_info.get("rectangularTotalBins", result.total_bins)
-    result_payload["aValidStatus"] = coverage_info.get("aValidStatus", "ready")
-    result_payload["aValidProgressPercent"] = coverage_info.get("aValidProgressPercent", 100)
+    result_payload["aValidStatus"] = coverage_info.get("aValidStatus", "stale")
+    result_payload["aValidProgressPercent"] = coverage_info.get("aValidProgressPercent", 0)
     result_payload["aValidMode"] = coverage_info.get("aValidMode", "exact_box_union")
     result_payload["maskBoxCount"] = coverage_info.get("maskBoxCount", 0)
-    result_payload["coveragePending"] = False
-    result_payload["confidencePending"] = False
-    result_payload["confidenceExact"] = True
-    result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio", 1.0)
-    result_payload["valid_domain_ratio"] = coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio", 1.0))
+    result_payload["coveragePending"] = result_payload.get("coverage_C") is None
+    result_payload["confidencePending"] = result_payload.get("confidence") is None
+    result_payload["confidenceExact"] = result_payload.get("confidence") is not None
+    result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio")
+    result_payload["valid_domain_ratio"] = coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio"))
     result_payload["feasibleMaskEnabled"] = coverage_info.get("feasibleMaskEnabled", False)
     result_payload["feasibleExpressions"] = coverage_info.get("feasibleExpressions", [])
     result_payload["feasibleMaskEvaluationSkipped"] = coverage_info.get("feasibleMaskEvaluationSkipped", False)
@@ -1558,8 +1644,8 @@ def run_density_analysis(
             "maskedBins": result.masked_bins,
             "aValid": coverage_info.get("aValid", result.valid_bins),
             "rectangularTotalBins": coverage_info.get("rectangularTotalBins", result.total_bins),
-            "aValidStatus": coverage_info.get("aValidStatus", "ready"),
-            "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 100),
+            "aValidStatus": coverage_info.get("aValidStatus", "stale"),
+            "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 0),
             "aValidMode": coverage_info.get("aValidMode", "exact_box_union"),
             "maskBoxCount": coverage_info.get("maskBoxCount", 0),
             "occupiedBins": result.occupied_bins,
@@ -1970,8 +2056,8 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
         )
         current = analysis["resultPayload"]
         current_peer_group_size = len(analysis["peerGroup"])
-        confidence_delta = None if uploaded.get("confidence") is None else round(float(current["confidence"]) - float(uploaded["confidence"]), 6)
-        specificity_delta = None if uploaded.get("specificityScore") is None else round(float(current["specificity_score"]) - float(uploaded["specificityScore"]), 6)
+        confidence_delta = nullable_numeric_delta(current.get("confidence"), uploaded.get("confidence"))
+        specificity_delta = nullable_numeric_delta(current.get("specificity_score"), uploaded.get("specificityScore"))
         interpretation = reevaluation_interpretation(uploaded, current)
         return {
             "clusterId": cluster["id"],
@@ -2050,11 +2136,11 @@ def delete_impact_request(payload: dict[str, Any]) -> dict[str, Any]:
         without_result = without_payload["result"]
         deltas = {
             "peerGroupN": [all_payload["peerGroupSize"], without_payload["peerGroupSize"]],
-            "deltaConfidence": round(float(without_result["confidence"] - all_result["confidence"]), 6),
-            "deltaCoverage": round(float(without_result["coverage_C"] - all_result["coverage_C"]), 6),
-            "deltaEquitability": round(float(without_result["equitability_E"] - all_result["equitability_E"]), 6),
-            "deltaSpecificity": round(float(without_result["specificity_score"] - all_result["specificity_score"]), 6),
-            "deltaMeanRarity": round(float(without_result["mean_rarity"] - all_result["mean_rarity"]), 6),
+            "deltaConfidence": nullable_numeric_delta(without_result.get("confidence"), all_result.get("confidence")),
+            "deltaCoverage": nullable_numeric_delta(without_result.get("coverage_C"), all_result.get("coverage_C")),
+            "deltaEquitability": nullable_numeric_delta(without_result.get("equitability_E"), all_result.get("equitability_E")),
+            "deltaSpecificity": nullable_numeric_delta(without_result.get("specificity_score"), all_result.get("specificity_score")),
+            "deltaMeanRarity": nullable_numeric_delta(without_result.get("mean_rarity"), all_result.get("mean_rarity")),
         }
     without_peer_clusters = analysis_peer_clusters(goal, [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])], str(cluster["id"]))
     without_density = build_global_bin_counts(without_peer_clusters, selected_goal)
@@ -2272,8 +2358,8 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
             }
         )
     occupied_bins = len(coverage_info["binCounts"])
-    valid_bins = int(coverage_info.get("validBins") or total_bins)
-    masked_bins = int(coverage_info.get("maskedBins") or 0)
+    valid_bins = int(coverage_info.get("validBins")) if coverage_info.get("validBins") is not None else None
+    masked_bins = int(coverage_info.get("maskedBins")) if coverage_info.get("maskedBins") is not None else None
     warnings = []
     if total_bins > 100000:
         warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
@@ -2288,21 +2374,23 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         "axisBins": axis_previews,
         "totalBins": total_bins,
         "validBins": valid_bins,
-        "aValid": coverage_info.get("aValid", valid_bins),
+        "aValid": coverage_info.get("aValid") if coverage_info.get("aValid") is not None else valid_bins,
         "rectangularTotalBins": coverage_info.get("rectangularTotalBins", total_bins),
         "maskedBins": masked_bins,
         "maskBoxCount": coverage_info.get("maskBoxCount", 0),
-        "validDomainRatio": coverage_info.get("validDomainRatio", valid_bins / total_bins if total_bins else 0.0),
+        "validDomainRatio": coverage_info.get("validDomainRatio"),
         "feasibleMaskEnabled": coverage_info.get("feasibleMaskEnabled", False),
         "feasibleExpressions": coverage_info.get("feasibleExpressions", []),
         "feasibleMaskEvaluationSkipped": False,
         "feasibleMaskWarning": coverage_info.get("feasibleMaskWarning", ""),
         "coverageWarning": coverage_info.get("coverageWarning", ""),
-        "aValidStatus": coverage_info.get("aValidStatus", "ready"),
-        "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 100),
+        "aValidStatus": coverage_info.get("aValidStatus", "stale"),
+        "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 0),
         "aValidMode": coverage_info.get("aValidMode", "exact_box_union"),
         "occupiedBins": occupied_bins,
-        "estimatedCoverage": occupied_bins / valid_bins if valid_bins else 0.0,
+        "estimatedCoverage": occupied_bins / valid_bins if valid_bins else None,
+        "coveragePending": valid_bins is None,
+        "confidencePending": valid_bins is None,
         "coverageEligibleClusterCount": coverage_info["coverageEligibleClusterCount"],
         "coverageLegacyExcludedClusterCount": coverage_info["coverageLegacyExcludedClusterCount"],
         "coverageGridSignatureExcludedClusterCount": coverage_info["coverageGridSignatureExcludedClusterCount"],
@@ -2337,6 +2425,10 @@ def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], prev
         "legacyAdvancedExpressions": normalize_feasible_expressions(selected_goal.get("legacyAdvancedExpressions")),
         "generatedFeasibleExpressions": feasible_expressions_for_goal(selected_goal),
         "feasibleDomainExpressions": feasible_expressions_for_goal(selected_goal),
+        "aValidCache": dict(selected_goal.get("aValidCache") or {}) if isinstance(selected_goal.get("aValidCache"), dict) else {},
+        "aValidStatus": selected_goal.get("aValidStatus"),
+        "aValidProgressPercent": selected_goal.get("aValidProgressPercent"),
+        "aValidMode": selected_goal.get("aValidMode"),
     }
     experiment_config_from_goal(preview_goal)
     return preview_goal
@@ -2525,6 +2617,108 @@ def apply_goal_grid_defaults_request(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def a_valid_status_for_goal(goal: dict[str, Any]) -> dict[str, Any]:
+    goal_id = str(goal.get("id") or "")
+    if goal_id in A_VALID_JOBS:
+        job = dict(A_VALID_JOBS[goal_id])
+        job.setdefault("goalId", goal_id)
+        return job
+    mask_info = feasible_mask_info_for_goal(goal)
+    return {
+        "goalId": goal_id,
+        "aValidStatus": mask_info.get("aValidStatus", "stale"),
+        "aValidProgressPercent": mask_info.get("aValidProgressPercent", 0),
+        "message": "a_valid ready." if mask_info.get("aValidStatus") == "ready" else "Mask or axis settings changed. Recompute a_valid.",
+        "aValid": mask_info.get("aValid"),
+        "maskedBins": mask_info.get("maskedBins"),
+        "rectangularTotalBins": mask_info.get("rectangularTotalBins"),
+        "aValidMode": mask_info.get("aValidMode", "exact_box_union"),
+        "maskSignature": mask_info.get("maskSignature"),
+        "computedAt": mask_info.get("aValidComputedAt"),
+    }
+
+
+def compute_a_valid_for_goal_request(goal_id: str) -> dict[str, Any]:
+    goals = normalize_goals_for_display(load_goal_store())
+    goal = next((item for item in goals if str(item.get("id")) == goal_id), None)
+    if goal is None:
+        raise ValueError("Selected Experiment Goal does not exist.")
+
+    started = datetime.now(timezone.utc)
+    A_VALID_JOBS[goal_id] = {
+        "goalId": goal_id,
+        "aValidStatus": "calculating",
+        "status": "calculating",
+        "aValidProgressPercent": 0,
+        "percent": 0,
+        "message": "a_valid calculation started.",
+        "rectangularTotalBins": compute_rectangular_total_bins(goal["axes"]),
+    }
+
+    def progress(percent: int, message: str) -> None:
+        bounded = max(0, min(100, int(percent)))
+        A_VALID_JOBS[goal_id].update(
+            {
+                "aValidStatus": "calculating",
+                "status": "calculating",
+                "aValidProgressPercent": bounded,
+                "percent": bounded,
+                "message": message,
+            }
+        )
+
+    try:
+        result = compute_a_valid_for_rules(goal["axes"], goal.get("feasibleDomainRules") or [], progress_callback=progress)
+        computed_at = datetime.now(timezone.utc)
+        duration_ms = int((computed_at - started).total_seconds() * 1000)
+        cache = {
+            "maskSignature": result["maskSignature"],
+            "rectangularTotalBins": result["rectangularTotalBins"],
+            "maskedBins": result["maskedBins"],
+            "aValid": result["aValid"],
+            "aValidMode": "exact_box_union",
+            "computedAt": computed_at.isoformat(),
+            "durationMs": duration_ms,
+        }
+        updated_goal = dict(goal)
+        updated_goal["aValidCache"] = cache
+        updated_goal = validate_goal(updated_goal)
+        updated_goals = [updated_goal if str(item.get("id")) == goal_id else item for item in goals]
+        save_goal_store(updated_goals)
+        normalized_goals = normalize_goals_for_display(updated_goals)
+        payload = {
+            "ok": True,
+            "goalId": goal_id,
+            "aValidStatus": "ready",
+            "status": "ready",
+            "aValidProgressPercent": 100,
+            "percent": 100,
+            "rectangularTotalBins": cache["rectangularTotalBins"],
+            "maskedBins": cache["maskedBins"],
+            "aValid": cache["aValid"],
+            "validBins": cache["aValid"],
+            "aValidMode": cache["aValidMode"],
+            "maskSignature": cache["maskSignature"],
+            "computedAt": cache["computedAt"],
+            "durationMs": duration_ms,
+            "savedGoal": updated_goal,
+            "goals": normalized_goals,
+            "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalized_goals},
+        }
+        A_VALID_JOBS[goal_id] = {**payload, "message": "a_valid ready."}
+        return payload
+    except Exception as exc:
+        A_VALID_JOBS[goal_id] = {
+            "goalId": goal_id,
+            "aValidStatus": "failed",
+            "status": "failed",
+            "aValidProgressPercent": 100,
+            "percent": 100,
+            "message": str(exc),
+        }
+        raise
+
+
 def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
     peer_counts = bootstrap_peer_counts()
@@ -2615,6 +2809,15 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self._send_json({"status": "ok"})
             return
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 5 and parts[:3] == ["api", "admin", "goals"] and parts[4] == "a-valid-status":
+            if not self._admin_allowed():
+                self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
+                return
+            goal_id = unquote(parts[3])
+            goal = find_goal(goal_id)
+            self._send_json(a_valid_status_for_goal(goal))
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
@@ -2653,13 +2856,24 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(reevaluate_request(payload))
                 return
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[:3] == ["api", "admin", "goals"] and parts[4] == "compute-a-valid":
+                if not self._admin_allowed():
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
+                    return
+                self._send_json(compute_a_valid_for_goal_request(unquote(parts[3])))
+                return
             if parsed.path == "/api/admin/goals/compute-a-valid":
                 if not self._admin_allowed():
                     self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
                     return
-                validated_goal = validate_goal(payload)
-                mask_info = feasible_mask_info_for_goal(validated_goal)
-                self._send_json({"ok": True, "goal": validated_goal, "maskInfo": mask_info})
+                goal_id = str(payload.get("id") or payload.get("goalId") or "").strip()
+                if not goal_id:
+                    validated_goal = validate_goal(payload)
+                    mask_info = feasible_mask_info_for_goal(validated_goal)
+                    self._send_json({"ok": True, "goal": validated_goal, "maskInfo": mask_info})
+                    return
+                self._send_json(compute_a_valid_for_goal_request(goal_id))
                 return
             if parsed.path == "/api/admin/goals":
                 if not self._admin_allowed():
