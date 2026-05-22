@@ -19,13 +19,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from feasible_mask import (
-    FeasibleMaskEvaluationTooLarge,
-    compute_valid_bin_mask_for_axes,
-    expression_axis_names,
-    is_bin_key_feasible,
-    normalize_feasible_expressions,
+from feasible_box_counter import (
+    axis_bin_counts,
+    bin_tuple_masked_by_boxes,
+    compile_rules_to_mask_boxes,
+    compute_a_valid_for_rules,
 )
+from feasible_mask import normalize_feasible_expressions
 from models import K_M, DensityDiagnosisResult, ExperimentConfig
 from stats_engine import BinGridTracker, DensityGridAnalyzer
 from storage import (
@@ -64,10 +64,9 @@ PROJECTION_ROW_TUPLE_LIMIT = int(os.environ.get("MAX_TARGET_TUPLES", "5000"))
 MAX_PROJECTION_CELLS = int(os.environ.get("MAX_PROJECTION_CELLS", "50000"))
 MAX_PROJECTION_PAIRS = int(os.environ.get("MAX_PROJECTION_PAIRS", "36"))
 MAX_GRID_PREVIEW_BINS = int(os.environ.get("MAX_GRID_PREVIEW_BINS", "500000"))
-FEASIBLE_MASK_SKIP_WARNING = "Full feasible mask evaluation skipped because total bin count is too large."
-FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING = (
-    "Feasible domain full-grid count was skipped because the configured grid is too large. "
-    "Row-level feasibility filtering was applied, but Coverage denominator falls back to rectangular total bins."
+CERTIFIED_FEASIBLE_DOMAIN_MESSAGE = (
+    "Feasible Domain is defined by exact 2D Projection Mask boxes. "
+    "Leesin does not materialize the full multidimensional grid."
 )
 
 
@@ -84,22 +83,48 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
     if not axes:
         raise ValueError("분석에 포함할 Axis를 하나 이상 선택하세요.")
     axis_name_set = {str(axis["name"]) for axis in axes}
-    feasible_expressions = []
-    for expression in normalize_feasible_expressions(goal.get("feasibleDomainExpressions")):
-        try:
-            if expression_axis_names(expression).issubset(axis_name_set):
-                feasible_expressions.append(expression)
-        except ValueError:
-            continue
+    feasible_rules = [
+        dict(rule)
+        for rule in goal.get("feasibleDomainRules") or []
+        if rule_axes(rule).issubset(axis_name_set)
+    ]
+    feasible_expressions = [
+        str(rule.get("expression") or "").strip()
+        for rule in feasible_rules
+        if rule.get("enabled", True) and str(rule.get("expression") or "").strip()
+    ]
     return {
         "id": goal["id"],
         "name": goal["name"],
         "K_m": float(goal.get("K_m", K_M)),
         "axes": axes,
-        "feasibleDomainRules": list(goal.get("feasibleDomainRules") or []),
-        "feasibleDomainAdvancedExpressions": normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions")),
+        "feasibleDomainRules": feasible_rules,
+        "legacyAdvancedExpressions": normalize_feasible_expressions(goal.get("legacyAdvancedExpressions")),
+        "feasibleDomainAdvancedExpressions": [],
+        "generatedFeasibleExpressions": feasible_expressions,
         "feasibleDomainExpressions": feasible_expressions,
     }
+
+
+def rule_axes(rule: dict[str, Any]) -> set[str]:
+    gui_spec = rule.get("guiSpec") if isinstance(rule.get("guiSpec"), dict) else {}
+    rule_type = str(gui_spec.get("type") or rule.get("sourceType") or "")
+    axes: set[str] = set()
+    if rule_type == "focused_2d_mask" or rule.get("sourceType") == "focused_2d_mask":
+        axes.update(
+            axis
+            for axis in (str(gui_spec.get("xAxis") or "").strip(), str(gui_spec.get("yAxis") or "").strip())
+            if axis
+        )
+        scope = gui_spec.get("scope") if isinstance(gui_spec.get("scope"), dict) else {}
+        for axis, scope_spec in scope.items():
+            if isinstance(scope_spec, dict) and str(scope_spec.get("mode") or "all").lower() == "range":
+                axes.add(str(axis))
+        return axes
+    if_spec = gui_spec.get("if") if isinstance(gui_spec.get("if"), dict) else {}
+    then_spec = gui_spec.get("then") if isinstance(gui_spec.get("then"), dict) else {}
+    axes.update(axis for axis in (str(if_spec.get("axis") or "").strip(), str(then_spec.get("axis") or "").strip()) if axis)
+    return axes
 
 
 def bin_index_for_value(value: Any, domain_min: float, domain_max: float, resolution: float) -> tuple[int | None, str]:
@@ -120,22 +145,6 @@ def bin_index_for_value(value: Any, domain_min: float, domain_max: float, resolu
 
 def feasible_expressions_for_goal(selected_goal: dict[str, Any]) -> list[str]:
     return normalize_feasible_expressions(selected_goal.get("feasibleDomainExpressions"))
-
-
-def skipped_feasible_mask_info(total_bins: int, expressions: list[str], warning: str | None = None) -> dict[str, Any]:
-    total = int(total_bins or 0)
-    message = warning or FEASIBLE_MASK_SKIP_WARNING
-    return {
-        "totalBins": total,
-        "validBins": total,
-        "maskedBins": 0,
-        "feasibleExpressions": expressions,
-        "feasibleMaskEnabled": bool(expressions),
-        "validDomainRatio": 1.0 if total else 0.0,
-        "feasibleMaskEvaluationSkipped": True,
-        "feasibleMaskWarning": message,
-        "coverageWarning": FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING,
-    }
 
 
 def mask_info_for_display(mask_info: dict[str, Any]) -> dict[str, Any]:
@@ -169,17 +178,14 @@ def api_error_payload(exc: Exception) -> dict[str, Any]:
 
 
 def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]:
+    axes = canonical_axis_order(selected_goal["axes"])
+    rules = selected_goal.get("feasibleDomainRules") or []
+    info = compute_a_valid_for_rules(axes, rules)
     expressions = feasible_expressions_for_goal(selected_goal)
-    try:
-        info = compute_valid_bin_mask_for_axes(canonical_axis_order(selected_goal["axes"]), expressions)
-    except FeasibleMaskEvaluationTooLarge as exc:
-        return skipped_feasible_mask_info(exc.total_bins, expressions, str(exc))
-    if info.get("feasibleMaskEvaluationSkipped"):
-        return skipped_feasible_mask_info(
-            int(info.get("totalBins") or 0),
-            list(info.get("feasibleExpressions") or expressions),
-            str(info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING),
-        )
+    info["feasibleExpressions"] = expressions
+    info["generatedFeasibleExpressions"] = expressions
+    info["certifiedFeasibleDomain"] = True
+    info["feasibleMaskMessage"] = CERTIFIED_FEASIBLE_DOMAIN_MESSAGE
     info.setdefault("feasibleMaskEvaluationSkipped", False)
     info.setdefault("feasibleMaskWarning", "")
     info.setdefault("coverageWarning", "")
@@ -187,12 +193,31 @@ def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]
 
 
 def is_bin_key_feasible_for_goal(bin_key: str, selected_goal: dict[str, Any], cache: dict[str, bool] | None = None) -> bool:
-    return is_bin_key_feasible(
-        bin_key,
-        canonical_axis_order(selected_goal["axes"]),
-        feasible_expressions_for_goal(selected_goal),
-        cache,
-    )
+    cache_key = str(bin_key)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    axes = canonical_axis_order(selected_goal["axes"])
+    axis_order = [str(axis["name"]) for axis in axes]
+    try:
+        indices = json.loads(cache_key)
+    except json.JSONDecodeError:
+        result = False
+    else:
+        boxes_key = "__maskBoxes"
+        counts_key = "__axisCounts"
+        if cache is not None and boxes_key in cache:  # type: ignore[operator]
+            boxes = cache[boxes_key]  # type: ignore[index]
+            counts = cache[counts_key]  # type: ignore[index]
+        else:
+            boxes = compile_rules_to_mask_boxes(selected_goal.get("feasibleDomainRules") or [], axes)
+            counts = axis_bin_counts(axes)
+            if cache is not None:
+                cache[boxes_key] = boxes  # type: ignore[index]
+                cache[counts_key] = counts  # type: ignore[index]
+        result = not bin_tuple_masked_by_boxes(indices, axis_order, boxes, counts)
+    if cache is not None:
+        cache[cache_key] = bool(result)
+    return bool(result)
 
 
 def compute_row_level_bin_occupancy(
@@ -624,12 +649,16 @@ def build_projection_explorer(
         "targetProjections": target_projections,
         "feasibleMaskEnabled": bool(coverage_info.get("feasibleMaskEnabled")) if isinstance(coverage_info, dict) else False,
         "validBins": int(coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "aValid": int(coverage_info.get("aValid") or coverage_info.get("validBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "rectangularTotalBins": int(coverage_info.get("rectangularTotalBins") or coverage_info.get("totalBins") or 0) if isinstance(coverage_info, dict) else 0,
         "maskedBins": int(coverage_info.get("maskedBins") or 0) if isinstance(coverage_info, dict) else 0,
+        "maskBoxCount": int(coverage_info.get("maskBoxCount") or 0) if isinstance(coverage_info, dict) else 0,
         "validDomainRatio": float(coverage_info.get("validDomainRatio") or 0.0) if isinstance(coverage_info, dict) else 0.0,
         "feasibleExpressions": list(coverage_info.get("feasibleExpressions") or []) if isinstance(coverage_info, dict) else [],
         "feasibleMaskEvaluationSkipped": bool(coverage_info.get("feasibleMaskEvaluationSkipped")) if isinstance(coverage_info, dict) else False,
         "feasibleMaskWarning": str(coverage_info.get("feasibleMaskWarning") or "") if isinstance(coverage_info, dict) else "",
         "coverageWarning": str(coverage_info.get("coverageWarning") or "") if isinstance(coverage_info, dict) else "",
+        "feasibleMaskMessage": str(coverage_info.get("feasibleMaskMessage") or CERTIFIED_FEASIBLE_DOMAIN_MESSAGE) if isinstance(coverage_info, dict) else CERTIFIED_FEASIBLE_DOMAIN_MESSAGE,
         "targetIncludedInReference": bool(coverage_info.get("targetIncludedInReference", True)) if isinstance(coverage_info, dict) else True,
         "internalDensityMode": bool(coverage_info.get("internalDensityMode")) if isinstance(coverage_info, dict) else False,
         "externalPeerObservationCount": int(coverage_info.get("externalPeerObservationCount") or 0) if isinstance(coverage_info, dict) else 0,
@@ -650,9 +679,6 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
     total_bins = int(coverage_info.get("totalBins") or mask_info["totalBins"])
     valid_bins = int(coverage_info.get("validBins") or mask_info["validBins"])
     masked_bins = int(coverage_info.get("maskedBins") or mask_info["maskedBins"])
-    skipped = bool(coverage_info.get("feasibleMaskEvaluationSkipped") or mask_info.get("feasibleMaskEvaluationSkipped"))
-    feasible_warning = str(coverage_info.get("feasibleMaskWarning") or mask_info.get("feasibleMaskWarning") or "")
-    coverage_warning = str(coverage_info.get("coverageWarning") or mask_info.get("coverageWarning") or "")
     occupied_bins = len(counts)
     observation_support = peer_valid_rows / (peer_valid_rows + float(selected_goal.get("K_m", K_M))) if peer_valid_rows > 0 else 0.0
     coverage = occupied_bins / valid_bins if valid_bins else 0.0
@@ -669,9 +695,16 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
         "validDomainRatio": round(float(valid_bins / total_bins), 6) if total_bins else 0.0,
         "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
-        "feasibleMaskEvaluationSkipped": skipped,
-        "feasibleMaskWarning": feasible_warning,
-        "coverageWarning": coverage_warning,
+        "feasibleMaskEvaluationSkipped": False,
+        "feasibleMaskWarning": "",
+        "coverageWarning": "",
+        "aValid": int(mask_info.get("aValid") or valid_bins),
+        "rectangularTotalBins": int(mask_info.get("rectangularTotalBins") or total_bins),
+        "maskBoxCount": int(mask_info.get("maskBoxCount") or 0),
+        "aValidStatus": str(mask_info.get("aValidStatus") or "ready"),
+        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") or 100),
+        "aValidMode": str(mask_info.get("aValidMode") or "exact_box_union"),
+        "feasibleMaskMessage": str(mask_info.get("feasibleMaskMessage") or CERTIFIED_FEASIBLE_DOMAIN_MESSAGE),
         "occupiedBins": int(occupied_bins),
         "peerValidRows": int(peer_valid_rows),
         "referenceObservationCount": int(peer_valid_rows),
@@ -934,7 +967,7 @@ def rectangular_total_bins_for_axes(axes: list[dict[str, Any]]) -> int:
 def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) -> dict[str, Any]:
     mask_info = mask_info_for_display(feasible_mask_info_for_goal(preview_goal))
     warning = (
-        "Grid preview recalculation skipped because total bin count exceeds MAX_GRID_PREVIEW_BINS. "
+        "Projection preview recalculation was limited because total bin count exceeds MAX_GRID_PREVIEW_BINS. "
         "Apply as Goal Default is still available after confirmation."
     )
     metrics = {
@@ -944,9 +977,13 @@ def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) 
         "validDomainRatio": mask_info.get("validDomainRatio"),
         "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
-        "feasibleMaskEvaluationSkipped": True,
-        "feasibleMaskWarning": mask_info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING,
-        "coverageWarning": FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING,
+        "feasibleMaskEvaluationSkipped": False,
+        "feasibleMaskWarning": "",
+        "coverageWarning": "",
+        "aValid": mask_info.get("aValid", mask_info.get("validBins")),
+        "rectangularTotalBins": mask_info.get("rectangularTotalBins", total_bins),
+        "maskBoxCount": mask_info.get("maskBoxCount", 0),
+        "aValidStatus": mask_info.get("aValidStatus", "ready"),
         "gridPreviewSkipped": True,
         "previewWarning": warning,
         "occupiedBins": 0,
@@ -973,9 +1010,12 @@ def skipped_grid_preview_payload(preview_goal: dict[str, Any], total_bins: int) 
             "validDomainRatio": 1.0 if total_bins else 0.0,
             "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
             "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
-            "feasibleMaskEvaluationSkipped": True,
-            "feasibleMaskWarning": mask_info.get("feasibleMaskWarning") or FEASIBLE_MASK_SKIP_WARNING,
-            "coverageWarning": FEASIBLE_MASK_COVERAGE_FALLBACK_WARNING,
+            "feasibleMaskEvaluationSkipped": False,
+            "feasibleMaskWarning": "",
+            "coverageWarning": "",
+            "aValid": mask_info.get("aValid", mask_info.get("validBins")),
+            "rectangularTotalBins": mask_info.get("rectangularTotalBins", total_bins),
+            "maskBoxCount": mask_info.get("maskBoxCount", 0),
         },
         [],
     )
@@ -1154,14 +1194,21 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         current_grid_signature = ""
         mask_info = {
             "totalBins": 0,
+            "rectangularTotalBins": 0,
             "validBins": 0,
+            "aValid": 0,
             "maskedBins": 0,
+            "maskBoxes": [],
+            "maskBoxCount": 0,
             "feasibleExpressions": [],
             "feasibleMaskEnabled": False,
             "validDomainRatio": 0.0,
             "feasibleMaskEvaluationSkipped": False,
             "feasibleMaskWarning": "",
             "coverageWarning": "",
+            "aValidStatus": "ready",
+            "aValidProgressPercent": 100,
+            "aValidMode": "exact_box_union",
         }
     selected_signature = axis_subset_key(selected_axis_names)
     bin_counts: dict[str, int] = {}
@@ -1225,13 +1272,24 @@ def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: 
         "occupiedBins": len(bin_counts),
         "totalBins": int(mask_info.get("totalBins") or 0),
         "validBins": int(mask_info.get("validBins") or mask_info.get("totalBins") or 0),
+        "aValid": int(mask_info.get("aValid") or mask_info.get("validBins") or mask_info.get("totalBins") or 0),
+        "rectangularTotalBins": int(mask_info.get("rectangularTotalBins") or mask_info.get("totalBins") or 0),
         "maskedBins": int(mask_info.get("maskedBins") or 0),
+        "maskBoxes": list(mask_info.get("maskBoxes") or []),
+        "maskBoxCount": int(mask_info.get("maskBoxCount") or 0),
         "validDomainRatio": float(mask_info.get("validDomainRatio") or 0.0),
         "feasibleMaskEnabled": bool(mask_info.get("feasibleMaskEnabled")),
         "feasibleExpressions": list(mask_info.get("feasibleExpressions") or []),
+        "generatedFeasibleExpressions": list(mask_info.get("generatedFeasibleExpressions") or mask_info.get("feasibleExpressions") or []),
+        "certifiedFeasibleDomain": bool(mask_info.get("certifiedFeasibleDomain", True)),
+        "feasibleMaskMessage": str(mask_info.get("feasibleMaskMessage") or CERTIFIED_FEASIBLE_DOMAIN_MESSAGE),
         "feasibleMaskEvaluationSkipped": bool(mask_info.get("feasibleMaskEvaluationSkipped")),
         "feasibleMaskWarning": str(mask_info.get("feasibleMaskWarning") or ""),
         "coverageWarning": str(mask_info.get("coverageWarning") or ""),
+        "aValidStatus": str(mask_info.get("aValidStatus") or "ready"),
+        "aValidProgressPercent": int(mask_info.get("aValidProgressPercent") or 100),
+        "aValidMode": str(mask_info.get("aValidMode") or "exact_box_union"),
+        "maskSignature": str(mask_info.get("maskSignature") or ""),
         "infeasiblePeerRows": int(infeasible_peer_rows),
         "infeasiblePeerBins": int(len(infeasible_peer_bin_keys)),
         "gridSignature": current_grid_signature,
@@ -1437,6 +1495,15 @@ def run_density_analysis(
     result_payload["gridSignature"] = coverage_info["gridSignature"]
     result_payload["validBins"] = coverage_info.get("validBins", result.valid_bins)
     result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
+    result_payload["aValid"] = coverage_info.get("aValid", coverage_info.get("validBins", result.valid_bins))
+    result_payload["rectangularTotalBins"] = coverage_info.get("rectangularTotalBins", result.total_bins)
+    result_payload["aValidStatus"] = coverage_info.get("aValidStatus", "ready")
+    result_payload["aValidProgressPercent"] = coverage_info.get("aValidProgressPercent", 100)
+    result_payload["aValidMode"] = coverage_info.get("aValidMode", "exact_box_union")
+    result_payload["maskBoxCount"] = coverage_info.get("maskBoxCount", 0)
+    result_payload["coveragePending"] = False
+    result_payload["confidencePending"] = False
+    result_payload["confidenceExact"] = True
     result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio", 1.0)
     result_payload["valid_domain_ratio"] = coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio", 1.0))
     result_payload["feasibleMaskEnabled"] = coverage_info.get("feasibleMaskEnabled", False)
@@ -1489,6 +1556,12 @@ def run_density_analysis(
             "totalBins": result.total_bins,
             "validBins": result.valid_bins,
             "maskedBins": result.masked_bins,
+            "aValid": coverage_info.get("aValid", result.valid_bins),
+            "rectangularTotalBins": coverage_info.get("rectangularTotalBins", result.total_bins),
+            "aValidStatus": coverage_info.get("aValidStatus", "ready"),
+            "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 100),
+            "aValidMode": coverage_info.get("aValidMode", "exact_box_union"),
+            "maskBoxCount": coverage_info.get("maskBoxCount", 0),
             "occupiedBins": result.occupied_bins,
         },
         "warnings": warnings,
@@ -2201,7 +2274,6 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     occupied_bins = len(coverage_info["binCounts"])
     valid_bins = int(coverage_info.get("validBins") or total_bins)
     masked_bins = int(coverage_info.get("maskedBins") or 0)
-    mask_count_skipped = bool(coverage_info.get("feasibleMaskEvaluationSkipped"))
     warnings = []
     if total_bins > 100000:
         warnings.append("Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.")
@@ -2210,21 +2282,25 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     if coverage_info["coverageGridSignatureExcludedClusterCount"]:
         warnings.append("Axis 구성이 맞지 않는 record는 density 계산에서 제외됩니다.")
     if coverage_info.get("feasibleMaskEnabled"):
-        warnings.append("Feasible Domain Mask가 활성화되어 coverage는 occupied bins / valid bins 기준입니다.")
-    if mask_count_skipped:
-        warnings.append("설정된 grid가 너무 커서 Feasible Domain의 전체 valid bin 개수 계산은 생략되었습니다. Row-level feasible filtering은 적용되지만, Coverage 분모는 직사각형 전체 bin 수 기준으로 대체됩니다.")
+        warnings.append("Feasible Domain은 2D Projection Mask box들의 조합으로 정의되며, a_valid는 mask box 합집합으로 exact 계산됩니다.")
     return {
         "basis": coverage_info["coverageBasis"],
         "axisBins": axis_previews,
         "totalBins": total_bins,
-        "validBins": None if mask_count_skipped else valid_bins,
-        "maskedBins": None if mask_count_skipped else masked_bins,
-        "validDomainRatio": None if mask_count_skipped else coverage_info.get("validDomainRatio", valid_bins / total_bins if total_bins else 0.0),
+        "validBins": valid_bins,
+        "aValid": coverage_info.get("aValid", valid_bins),
+        "rectangularTotalBins": coverage_info.get("rectangularTotalBins", total_bins),
+        "maskedBins": masked_bins,
+        "maskBoxCount": coverage_info.get("maskBoxCount", 0),
+        "validDomainRatio": coverage_info.get("validDomainRatio", valid_bins / total_bins if total_bins else 0.0),
         "feasibleMaskEnabled": coverage_info.get("feasibleMaskEnabled", False),
         "feasibleExpressions": coverage_info.get("feasibleExpressions", []),
-        "feasibleMaskEvaluationSkipped": mask_count_skipped,
+        "feasibleMaskEvaluationSkipped": False,
         "feasibleMaskWarning": coverage_info.get("feasibleMaskWarning", ""),
         "coverageWarning": coverage_info.get("coverageWarning", ""),
+        "aValidStatus": coverage_info.get("aValidStatus", "ready"),
+        "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 100),
+        "aValidMode": coverage_info.get("aValidMode", "exact_box_union"),
         "occupiedBins": occupied_bins,
         "estimatedCoverage": occupied_bins / valid_bins if valid_bins else 0.0,
         "coverageEligibleClusterCount": coverage_info["coverageEligibleClusterCount"],
@@ -2257,6 +2333,9 @@ def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], prev
         "name": selected_goal["name"],
         "K_m": float(selected_goal.get("K_m", K_M)),
         "axes": axes,
+        "feasibleDomainRules": list(selected_goal.get("feasibleDomainRules") or []),
+        "legacyAdvancedExpressions": normalize_feasible_expressions(selected_goal.get("legacyAdvancedExpressions")),
+        "generatedFeasibleExpressions": feasible_expressions_for_goal(selected_goal),
         "feasibleDomainExpressions": feasible_expressions_for_goal(selected_goal),
     }
     experiment_config_from_goal(preview_goal)
@@ -2573,6 +2652,14 @@ class AppHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "Admin Token is required."}, status=HTTPStatus.FORBIDDEN)
                     return
                 self._send_json(reevaluate_request(payload))
+                return
+            if parsed.path == "/api/admin/goals/compute-a-valid":
+                if not self._admin_allowed():
+                    self._send_json({"error": "Admin Token이 필요합니다."}, status=HTTPStatus.FORBIDDEN)
+                    return
+                validated_goal = validate_goal(payload)
+                mask_info = feasible_mask_info_for_goal(validated_goal)
+                self._send_json({"ok": True, "goal": validated_goal, "maskInfo": mask_info})
                 return
             if parsed.path == "/api/admin/goals":
                 if not self._admin_allowed():

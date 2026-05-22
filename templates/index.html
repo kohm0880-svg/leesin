@@ -42,6 +42,11 @@
     .error,.success { display:none; padding:10px 12px; margin-top:10px; border-radius:10px; line-height:1.5; }
     .error { color:var(--red); background:#fff1ee; border:1px solid #f4c7bd; }
     .success { color:var(--green); background:#edf8f3; border:1px solid #bfe3d4; }
+    .task-progress { display:none; gap:8px; margin:12px 0; border:1px solid var(--line); border-radius:8px; background:#fff; padding:10px 12px; box-shadow:var(--shadow); }
+    .task-progress.active { display:grid; }
+    .task-progress-head { display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:800; }
+    .task-progress-track { height:9px; border-radius:999px; background:#dce5ea; overflow:hidden; }
+    .task-progress-fill { height:100%; width:0%; border-radius:inherit; background:var(--teal); transition:width .18s ease; }
     .mapper-head,.mapping-row { display:grid; grid-template-columns:minmax(160px,1fr) minmax(180px,1fr); gap:10px; align-items:center; }
     .mapper-head { margin:10px 0 8px; color:var(--muted); font-size:12px; font-weight:800; }
     .mapping-row { padding:10px; border:1px solid var(--line); border-radius:10px; background:#fff; margin-bottom:8px; }
@@ -187,6 +192,15 @@
       <button class="quick-nav-item" type="button" data-view="goal-admin-view">실험 목적 / 관리<span>Goal / Axis / Audit</span></button>
     </nav>
 
+    <section id="task-progress-wrap" class="task-progress" aria-live="polite">
+      <div class="task-progress-head">
+        <span id="task-progress-title">작업 준비 중</span>
+        <span id="task-progress-percent">0%</span>
+      </div>
+      <div class="task-progress-track"><div id="task-progress-fill" class="task-progress-fill"></div></div>
+      <div id="task-progress-message" class="small"></div>
+    </section>
+
     <section id="analysis-view" class="view-section active">
       <section class="toolbar section-card">
         <label>Experiment Goal<select id="goal-select"></select></label>
@@ -277,7 +291,8 @@
         </div>
         <div>
           <h3>Feasible Rule Builder</h3>
-          <p class="small">GUI rule은 expression을 생성하는 보조 UI입니다. 내부 저장/계산은 enabled GUI rule expression과 Advanced Expression을 합친 feasibleDomainExpressions만 사용합니다.</p>
+          <p class="small">Feasible Domain은 2D Projection Mask box / Focused 2D Mask / Conditional Rule에서 생성된 exact rectangular exclusion box 조합으로 정의됩니다. Leesin은 전체 고차원 grid를 실제로 생성하지 않고, a_valid는 mask box 합집합으로 exact 계산합니다.</p>
+          <div id="goal-mask-editor"></div>
           <div id="focused-mask-admin-builder"></div>
           <div id="feasible-rule-list" class="rule-builder-list"></div>
           <div class="row-actions">
@@ -285,9 +300,9 @@
           </div>
         </div>
         <div>
-          <h3>Advanced Expressions</h3>
-          <p class="small">한 줄에 expression 하나를 입력하세요. 모든 expression은 AND로 결합됩니다. GUI rule로 역변환하지 않습니다. Expression에서는 현재 Axis name을 그대로 사용하며, 허용 함수는 abs, min, max, sqrt, log, exp입니다.</p>
-          <label>Advanced Expression Rules<textarea id="feasible-expression-input" spellcheck="false" placeholder="axis_a <= 100&#10;not (axis_b > 50 and axis_c < 10)&#10;Use the exact axis names from this Goal."></textarea></label>
+          <h3>Legacy Advanced Expressions</h3>
+          <p class="small">Advanced Expressions are no longer certified for exact a_valid. They are preserved for migration only and are not used in Coverage, Confidence, or row filtering. Convert them to Conditional or Focused 2D Projection Mask rules.</p>
+          <label>Legacy Advanced Expressions<textarea id="feasible-expression-input" spellcheck="false" disabled placeholder="Legacy expressions appear here for migration only."></textarea></label>
           <div class="row-actions">
             <button class="secondary" id="validate-feasible-expressions" type="button">Validate Expressions</button>
           </div>
@@ -387,10 +402,12 @@
       focusedMaskTool: readStoredFocusedMaskToolSettings(),
       focusedMaskEditingRuleId: null,
       adminFocusedMaskBuilder: null,
+      goalMaskDrag: null,
       gridPreviewMetrics: null,
       gridPreviewTimer: null,
       gridPreviewBusy: false,
       activeView: 'analysis-view',
+      currentTask: null,
     };
 
     const $ = id => document.getElementById(id);
@@ -398,7 +415,7 @@
     const clone = value => JSON.parse(JSON.stringify(value));
     const goalById = id => state.goals.find(goal => goal.id === id) || null;
     const blankAxis = () => ({ name:'', unit:'', domainMin:0, domainMax:100, resolution:1 });
-    const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()], feasibleDomainRules:[], feasibleDomainAdvancedExpressions:[], feasibleDomainExpressions:[] });
+    const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()], feasibleDomainRules:[], legacyAdvancedExpressions:[], feasibleDomainAdvancedExpressions:[], feasibleDomainExpressions:[], generatedFeasibleExpressions:[] });
     const formatNumber = (value, decimals=2) => { const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
     const formatPercent = (value, decimals=0) => `${formatNumber(Number(value)*100, decimals)}%`;
     const coverageBasisLabel = value => value === 'row_level_bin_occupancy' ? 'row-level bin occupancy' : (value === 'cluster_vector_fallback' ? 'legacy fallback' : String(value || '-'));
@@ -459,6 +476,47 @@
       delete button.dataset.loading;
       button.classList.remove('is-loading');
       button.disabled = false;
+    }
+    function setTaskProgress(task) {
+      state.currentTask = task ? { ...task } : null;
+      renderTaskProgress();
+    }
+    function startTaskProgress(name, message='준비 중입니다.') {
+      setTaskProgress({ name, phase:'start', percent:0, message });
+    }
+    function updateTaskProgress(percent, phase='', message='') {
+      if (!state.currentTask) return;
+      setTaskProgress({
+        ...state.currentTask,
+        phase: phase || state.currentTask.phase,
+        percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+        message: message || state.currentTask.message,
+      });
+    }
+    function endTaskProgress(message='완료') {
+      if (state.currentTask) {
+        setTaskProgress({ ...state.currentTask, percent:100, phase:'done', message });
+      }
+      setTimeout(() => {
+        if (state.currentTask?.phase === 'done') setTaskProgress(null);
+      }, 650);
+    }
+    function failTaskProgress(message='작업이 중단되었습니다.') {
+      if (!state.currentTask) return;
+      setTaskProgress({ ...state.currentTask, phase:'failed', message });
+      setTimeout(() => setTaskProgress(null), 1400);
+    }
+    function renderTaskProgress() {
+      const wrap = $('task-progress-wrap');
+      if (!wrap) return;
+      const task = state.currentTask;
+      wrap.classList.toggle('active', Boolean(task));
+      if (!task) return;
+      const percent = Math.max(0, Math.min(100, Number(task.percent) || 0));
+      $('task-progress-title').textContent = `${task.name}${task.phase ? ` · ${task.phase}` : ''}`;
+      $('task-progress-percent').textContent = `${Math.round(percent)}%`;
+      $('task-progress-fill').style.width = `${percent}%`;
+      $('task-progress-message').textContent = task.message || '';
     }
 
     function setError(message) { $('user-error-box').textContent = message || ''; $('user-error-box').style.display = message ? 'block' : 'none'; }
@@ -782,9 +840,9 @@
     }
     function renderPreviewMetrics(metrics) {
       const item = metrics || {};
-      const validBinsText = item.feasibleMaskEvaluationSkipped && item.validBins == null ? 'skipped' : (item.validBins ?? item.totalBins ?? 0);
-      const maskedBinsText = item.feasibleMaskEvaluationSkipped && item.maskedBins == null ? 'skipped' : (item.maskedBins ?? 0);
-      const validDomainText = item.feasibleMaskEvaluationSkipped && item.validDomainRatio == null ? 'skipped' : formatPercent(item.validDomainRatio, 1);
+      const validBinsText = item.validBins ?? item.aValid ?? item.totalBins ?? 0;
+      const maskedBinsText = item.maskedBins ?? 0;
+      const validDomainText = formatPercent(item.validDomainRatio, 1);
       return `<div class="preview-metrics" id="grid-preview-metrics">
         <div class="preview-metric"><span class="small">Z / Observation Support</span><strong>${formatPercent(item.observationSupportZ,1)}</strong></div>
         <div class="preview-metric"><span class="small">C / Coverage</span><strong>${formatPercent(item.coverageC,1)}</strong></div>
@@ -797,7 +855,7 @@
         <div class="preview-metric"><span class="small">eligible records</span><strong>${escapeHtml(item.eligibleRecords ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">legacy excluded</span><strong>${escapeHtml(item.legacyExcluded ?? 0)}</strong></div>
         ${item.gridPreviewSkipped ? `<div class="notice">${escapeHtml(item.previewWarning || 'Grid preview recalculation skipped for this large grid.')}</div>` : ''}
-        ${item.feasibleMaskEvaluationSkipped ? `<div class="notice">${escapeHtml(item.coverageWarning || 'Full feasible mask count skipped for this large grid; row-level filtering still applies.')}</div>` : ''}
+        ${item.feasibleMaskEnabled ? `<div class="notice">${escapeHtml(item.feasibleMaskMessage || 'a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.')}</div>` : ''}
       </div>`;
     }
     // Grid Preview
@@ -939,7 +997,7 @@
           <div class="focused-expression">${escapeHtml(expression || 'incomplete rule')}</div>
           <div class="row-actions">
             <button class="secondary" type="button" data-focused-edit="${escapeHtml(rule.id)}">Edit</button>
-            <button class="ghost" type="button" data-focused-convert="${escapeHtml(rule.id)}">Convert to Advanced Expression</button>
+            <button class="ghost" type="button" data-focused-convert="${escapeHtml(rule.id)}">Convert to Legacy Expression</button>
             <button class="danger" type="button" data-focused-delete="${escapeHtml(rule.id)}">Delete</button>
           </div>
         </div>`;
@@ -1031,7 +1089,7 @@
           <button class="ghost" id="projection-clear" type="button">선택 해제</button>
         </div>
         ${renderGridPreviewEditor(explorer)}
-        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Projection masked-region overlay is not implemented in this MVP. ${explorer.feasibleMaskEvaluationSkipped ? 'Full-grid valid bin count skipped for this large grid.' : `Valid bins ${escapeHtml(explorer.validBins ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)}`}<div class="small">${escapeHtml(explorer.coverageWarning || '')}</div><div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
+        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Analysis Projection Explorer는 분석 결과를 해석하는 시각화 도구입니다. 공식 feasible domain 설정은 Goal Configuration Projection Mask Editor에서 수행합니다. Valid bins ${escapeHtml(explorer.validBins ?? explorer.aValid ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)} · mask boxes ${escapeHtml(explorer.maskBoxCount ?? 0)}<div class="small">${escapeHtml(explorer.feasibleMaskMessage || 'a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.')}</div><div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
         ${explorer.projectionPairTruncated ? `<div class="notice">Projection pairs truncated to ${escapeHtml(explorer.maxProjectionPairs)} of ${escapeHtml(explorer.allAxisPairCount)} for browser performance.</div>` : ''}
         <div class="notice" id="projection-selection-info">${escapeHtml(projectionSelectionText(explorer))}</div>
         ${explorer.targetRowTupleSampled ? `<div class="tag warn">Target row bin tuples are sampled for linked highlighting: ${escapeHtml(explorer.targetRowTupleLimit)} of ${escapeHtml(explorer.targetRowTupleCount)} rows.</div>` : ''}
@@ -1240,7 +1298,9 @@
       state.gridPreviewBusy = true;
       const button = $('grid-preview-recalc');
       setButtonLoading(button, true, 'Preview 중...');
+      startTaskProgress('Projection preview rebuild', 'Preview grid metrics를 다시 계산합니다.');
       try {
+        updateTaskProgress(18, 'read settings', 'Domain Range / Resolution preview 값을 읽습니다.');
         const meta = state.report.meta || {};
         const visualizations = state.report.visualizations || {};
         const { response, data } = await fetchJson('/api/grid-preview', {
@@ -1255,6 +1315,7 @@
           }),
         }, 60000);
         if (!response.ok) throw new Error(data.error || 'Grid preview failed');
+        updateTaskProgress(75, 'projection rebuild', '2D projection payload를 갱신합니다.');
         state.gridPreviewMetrics = data.metrics || null;
         if (data.projectionExplorer) {
           data.projectionExplorer.gridPreviewMetrics = data.metrics || {};
@@ -1264,8 +1325,10 @@
           state.report.visualizations.targetBinOccupancyMeta = data.targetBinOccupancyMeta || state.report.visualizations.targetBinOccupancyMeta;
           renderReport(state.report);
         }
+        endTaskProgress('Projection preview 완료');
       } catch (error) {
         setError(error.message || 'Grid preview failed');
+        failTaskProgress(error.message || 'Grid preview failed');
       } finally {
         state.gridPreviewBusy = false;
         setButtonLoading(button, false);
@@ -1301,14 +1364,16 @@
       const previewAxes = readPreviewAxesFromEditor();
       const previewTotalBins = previewAxes.reduce((total, axis) => total * Math.max(1, previewAxisBinCount(axis)), 1);
       const largeGridNote = previewTotalBins > 500000
-        ? `\n\n주의: preview grid has ${formatNumber(previewTotalBins,0)} rectangular bins. Full preview counts may be skipped, but saved records will still be re-binned from row-level vectors.`
+        ? `\n\n주의: preview grid has ${formatNumber(previewTotalBins,0)} rectangular bins. Projection preview may be limited, but saved records will still be re-binned from row-level vectors.`
         : '';
       const confirmed = confirm(`이 설정을 해당 Experiment Goal의 기본 Domain Range / Resolution으로 저장하시겠습니까? 기존 saved records는 row-level vectors 기준으로 새 grid에서 재계산됩니다. 이 작업은 이후 density result와 gridSignature를 바꿉니다.${largeGridNote}`);
       if (!confirmed) return;
       const button = $('grid-preview-apply');
       setButtonLoading(button, true, '저장 중...');
+      startTaskProgress('Apply as Goal Default', 'Grid 기본값 적용을 시작합니다.');
       try {
         const meta = state.report.meta || {};
+        updateTaskProgress(20, 'validate preview grid', '새 grid 설정을 검증합니다.');
         const { response, data } = await fetchJson('/api/admin/goals/apply-grid', {
           method:'POST',
           headers:adminHeaders(),
@@ -1319,6 +1384,7 @@
           }),
         }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Goal grid apply failed');
+        updateTaskProgress(80, 'rebuild records', '저장 record를 row-level vectors 기준으로 재계산했습니다.');
         state.goals = data.goals || state.goals;
         state.clusters = data.clusters || state.clusters;
         state.peerCounts = data.peerCounts || state.peerCounts;
@@ -1331,8 +1397,10 @@
         $('report-content').className = 'notice';
         $('report-content').textContent = `Goal 기본값 저장 완료 · records updated ${data.updatedRecordCount ?? 0} · legacy excluded ${data.legacyExcludedRecordCount ?? 0}. 새 grid 기준으로 다시 분석을 실행하세요.`;
         setError('');
+        endTaskProgress('Grid 기본값 적용 완료');
       } catch (error) {
         setError(error.message || 'Goal grid apply failed');
+        failTaskProgress(error.message || 'Goal grid apply failed');
       } finally {
         setButtonLoading(button, false);
         updateButtons();
@@ -1429,11 +1497,12 @@
       const index = goal.feasibleDomainRules.findIndex(item => item.id === rule.id);
       if (index >= 0) goal.feasibleDomainRules[index] = rule;
       else goal.feasibleDomainRules.push(rule);
-      goal.feasibleDomainAdvancedExpressions = advancedExpressionsForGoal(goal);
+      goal.legacyAdvancedExpressions = advancedExpressionsForGoal(goal);
+      goal.feasibleDomainAdvancedExpressions = [];
       goal.feasibleDomainExpressions = [
         ...goal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
-        ...goal.feasibleDomainAdvancedExpressions,
       ];
+      goal.generatedFeasibleExpressions = [...goal.feasibleDomainExpressions];
       state.focusedMaskEditingRuleId = null;
       await saveGoalPayloadFromProjection(goal, forceNew ? 'Focused Mask rule이 Goal에 추가되었습니다. 새 mask를 반영하려면 다시 분석하세요.' : 'Focused Mask rule 변경사항이 저장되었습니다. 새 mask를 반영하려면 다시 분석하세요.', button);
     }
@@ -1441,11 +1510,12 @@
       const goal = clone(currentReportGoal());
       if (!goal) return;
       goal.feasibleDomainRules = normalizedFeasibleRulesForUi(goal).map(rule => rule.id === ruleId ? updater(rule) : rule).filter(Boolean);
-      goal.feasibleDomainAdvancedExpressions = advancedExpressionsForGoal(goal);
+      goal.legacyAdvancedExpressions = advancedExpressionsForGoal(goal);
+      goal.feasibleDomainAdvancedExpressions = [];
       goal.feasibleDomainExpressions = [
         ...goal.feasibleDomainRules.filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean),
-        ...goal.feasibleDomainAdvancedExpressions,
       ];
+      goal.generatedFeasibleExpressions = [...goal.feasibleDomainExpressions];
       await saveGoalPayloadFromProjection(goal, successMessage, button);
     }
     function loadFocusedRuleIntoTool(ruleId) {
@@ -1549,15 +1619,16 @@
         const rule = focusedRuleListForCurrentGoal().find(item => item.id === ruleId);
         const expression = rule?.expression || compileFocusedMaskRule(rule);
         if (!expression) return;
-        if (!confirm('이 규칙을 Advanced Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없습니다. 계속하시겠습니까?')) return;
+        if (!confirm('이 규칙을 Legacy Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?')) return;
         const goal = clone(currentReportGoal());
         goal.feasibleDomainRules = normalizedFeasibleRulesForUi(goal).filter(item => item.id !== ruleId);
-        goal.feasibleDomainAdvancedExpressions = [...advancedExpressionsForGoal(goal), expression];
+        goal.legacyAdvancedExpressions = [...advancedExpressionsForGoal(goal), expression];
+        goal.feasibleDomainAdvancedExpressions = [];
         goal.feasibleDomainExpressions = [
           ...goal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
-          ...goal.feasibleDomainAdvancedExpressions,
         ];
-        saveGoalPayloadFromProjection(goal, 'Focused Mask rule이 Advanced Expression으로 전환되었습니다.', button);
+        goal.generatedFeasibleExpressions = [...goal.feasibleDomainExpressions];
+        saveGoalPayloadFromProjection(goal, 'Focused Mask rule이 Legacy Expression으로 전환되었습니다.', button);
       }));
       refreshFocusedMaskExpressionPreview(explorer);
     }
@@ -1732,16 +1803,14 @@
       const gridExcluded = result.coverageGridSignatureExcludedClusterCount ?? meta.coverageGridSignatureExcludedClusterCount ?? result.coverageAxisSignatureExcludedClusterCount ?? meta.coverageAxisSignatureExcludedClusterCount ?? 0;
       const occupiedBins = result.occupied_bins ?? meta.occupiedBins ?? 0;
       const totalBins = result.total_bins ?? meta.totalBins ?? 0;
-      const validBins = result.valid_bins ?? result.validBins ?? meta.validBins ?? totalBins;
+      const validBins = result.valid_bins ?? result.validBins ?? result.aValid ?? meta.validBins ?? meta.aValid ?? totalBins;
       const maskedBins = result.masked_bins ?? result.maskedBins ?? meta.maskedBins ?? 0;
-      const feasibleMaskEvaluationSkipped = Boolean(result.feasibleMaskEvaluationSkipped ?? result.feasible_mask_evaluation_skipped ?? meta.feasibleMaskEvaluationSkipped);
-      const coverageWarning = result.coverageWarning || result.coverage_warning || meta.coverageWarning || '';
-      const feasibleMaskWarning = result.feasibleMaskWarning || result.feasible_mask_warning || meta.feasibleMaskWarning || '';
-      const validBinsText = feasibleMaskEvaluationSkipped ? 'skipped' : validBins;
-      const maskedBinsText = feasibleMaskEvaluationSkipped ? 'skipped' : maskedBins;
-      const validDomainText = feasibleMaskEvaluationSkipped ? 'skipped' : formatPercent(totalBins ? validBins / totalBins : 0,1);
+      const validBinsText = validBins;
+      const maskedBinsText = maskedBins;
+      const validDomainText = formatPercent(totalBins ? validBins / totalBins : 0,1);
       const feasibleMaskEnabled = Boolean(result.feasible_mask_enabled ?? result.feasibleMaskEnabled ?? meta.feasibleMaskEnabled);
       const feasibleExpressions = result.feasibleExpressions || result.feasible_expressions || meta.feasibleExpressions || [];
+      const maskBoxCount = result.maskBoxCount ?? meta.maskBoxCount ?? 0;
       const maskedOutTargetRows = result.masked_out_target_rows ?? result.infeasible_target_rows ?? meta.maskedOutTargetRows ?? 0;
       const extremeRate = result.extreme_specificity_rate ?? result.rare_bin_rate ?? 0;
       const maxSpecificity = result.max_specificity ?? null;
@@ -1784,18 +1853,18 @@
             </div>
             ${internalDensityMode ? '<div class="tag warn">특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.</div>' : ''}
             ${legacyExcluded ? '<div class="tag warn">Legacy records without row-level vectors are excluded from density scoring.</div>' : ''}
-            ${feasibleMaskEvaluationSkipped ? `<div class="tag warn">${escapeHtml(coverageWarning || '설정된 grid가 너무 커서 Feasible Domain의 전체 valid bin 개수 계산은 생략되었습니다. Row-level feasible filtering은 적용되지만, Coverage 분모는 직사각형 전체 bin 수 기준으로 대체됩니다.')}</div>` : ''}
           </div>
           <div class="notice">
             <strong>Feasible Domain</strong><br>
-            ${feasibleMaskEnabled ? 'Masked bins are excluded from Coverage and Specificity calculations because they are outside the user-defined feasible domain.' : 'No Feasible Domain Mask is active; the full Cartesian domain is valid.'}
+            ${feasibleMaskEnabled ? 'Feasible Domain is defined by exact 2D Projection Mask boxes. Masked bins are excluded from Coverage and Specificity calculations.' : 'No Feasible Domain Mask is active; the full Cartesian domain is valid.'}
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">total bins ${escapeHtml(totalBins)}</span>
               <span class="metric-pill">valid bins ${escapeHtml(validBinsText)}</span>
               <span class="metric-pill">masked bins ${escapeHtml(maskedBinsText)}</span>
+              <span class="metric-pill">mask boxes ${escapeHtml(maskBoxCount)}</span>
               <span class="metric-pill">valid domain ${escapeHtml(validDomainText)}</span>
             </div>
-            ${feasibleMaskEvaluationSkipped ? `<div class="small" style="margin-top:8px;">${escapeHtml(feasibleMaskWarning || coverageWarning || 'Full feasible mask evaluation skipped because total bin count is too large.')}</div>` : ''}
+            <div class="small" style="margin-top:8px;">a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.</div>
             ${feasibleExpressions.length ? `<div class="small" style="margin-top:8px;">${feasibleExpressions.map(expression => escapeHtml(expression)).join('<br>')}</div>` : ''}
           </div>
           <div class="small">Max specificity ${maxSpecificity == null ? '-' : formatPercent(maxSpecificity,1)} · Mean Rarity advanced ${formatNumber(result.mean_rarity,3)} · Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
@@ -1886,17 +1955,21 @@
       const totalBins = axisBins.reduce((product, item) => product * item.totalBins, 1);
       const occupiedBins = Object.keys(binCounts).length;
       const expressionCount = (goal.feasibleDomainExpressions || []).filter(Boolean).length;
+      const aValid = Number(goal.aValid ?? goal.validBins ?? totalBins);
+      const maskedBins = Number(goal.maskedBins ?? 0);
       const warnings = [];
       if (totalBins > 100000) warnings.push('Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.');
       if (legacyExcluded) warnings.push('일부 기존 record는 row-level vectors가 없어 density 계산에서 제외됩니다.');
       if (gridSignatureExcluded) warnings.push('Axis 구성이 맞지 않는 record는 density 계산에서 제외됩니다.');
-      if (expressionCount) warnings.push('Feasible Domain Mask expression은 저장/검증 시 서버에서 bin center 기준으로 평가됩니다.');
+      if (expressionCount) warnings.push('Feasible Domain은 mask box 합집합으로 exact 계산됩니다. Advanced Expression은 certified rule로 사용되지 않습니다.');
       return {
         basis:'row_level_bin_occupancy',
         axisBins,
         totalBins,
+        aValid,
+        maskedBins,
         occupiedBins,
-        estimatedCoverage: totalBins ? occupiedBins / totalBins : 0,
+        estimatedCoverage: aValid ? occupiedBins / aValid : 0,
         coverageEligibleClusterCount: eligible.length,
         coverageLegacyExcludedClusterCount: legacyExcluded,
         coverageGridSignatureExcludedClusterCount: gridSignatureExcluded,
@@ -1911,16 +1984,19 @@
       const preview = computeGoalPreview(state.draftGoal);
       if (!preview) { $('goal-bin-preview').innerHTML = ''; return; }
       $('goal-bin-preview').innerHTML = `
-        <strong>Bin Preview</strong><br>
+        <strong>a_valid / Bin Preview</strong><br>
         기준: row-level bin occupancy<br>
-        전체: ${preview.occupiedBins}/${preview.totalBins} bins · row-level coverage ${formatPercent(preview.estimatedCoverage,2)}
+        전체: ${preview.occupiedBins}/${preview.totalBins} rectangular bins · a_valid ${escapeHtml(preview.aValid ?? preview.totalBins)} · masked ${escapeHtml(preview.maskedBins ?? 0)} · Coverage preview ${formatPercent(preview.estimatedCoverage,2)}
         <div class="inline-metrics" style="margin-top:8px;">
           <span class="metric-pill">eligible records ${escapeHtml(preview.coverageEligibleClusterCount ?? 0)}</span>
           <span class="metric-pill">row-level observations ${escapeHtml(preview.rowLevelObservationCount ?? 0)}</span>
           <span class="metric-pill">excluded legacy ${escapeHtml(preview.coverageLegacyExcludedClusterCount ?? 0)}</span>
           <span class="metric-pill">grid mismatch ${escapeHtml(preview.coverageGridSignatureExcludedClusterCount ?? preview.coverageAxisSignatureExcludedClusterCount ?? 0)}</span>
           <span class="metric-pill">feasible rules ${escapeHtml(preview.feasibleExpressionCount ?? 0)}</span>
+          <span class="metric-pill">a_valid status ${escapeHtml(state.draftGoal?.aValidStatus || 'ready')}</span>
         </div>
+        <div class="small">Coverage와 Confidence는 a_valid 계산 완료 후 exact denominator를 사용합니다. Leesin은 전체 고차원 grid를 실제로 생성하지 않습니다.</div>
+        <div class="row-actions" style="margin-top:8px;"><button class="secondary" id="compute-a-valid" type="button">Compute a_valid</button></div>
         ${(preview.warnings || (preview.warning ? [preview.warning] : [])).map(message => `<div class="tag warn">${escapeHtml(message)}</div>`).join('')}
         ${(preview.axisBins || []).map(item => `<div class="small">${escapeHtml(item.axis)}: ${item.occupiedBins}/${item.totalBins} bins · ${formatPercent(item.coverage,1)}</div>`).join('')}
       `;
@@ -2112,11 +2188,61 @@
       });
     }
     function advancedExpressionsForGoal(goal) {
+      if (Array.isArray(goal?.legacyAdvancedExpressions)) return goal.legacyAdvancedExpressions;
       if (Array.isArray(goal?.feasibleDomainAdvancedExpressions)) return goal.feasibleDomainAdvancedExpressions;
       const ruleExpressions = new Set((goal?.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean));
       return (goal?.feasibleDomainExpressions || []).filter(expression => !ruleExpressions.has(expression));
     }
     // Feasible Rule Builder
+    function renderGoalMaskEditor() {
+      const node = $('goal-mask-editor');
+      if (!node) return;
+      const goal = state.draftGoal || blankGoal();
+      const axes = goal.axes || [];
+      if (axes.length < 2) {
+        node.innerHTML = `<div class="rule-builder-card"><h4>Goal Configuration Projection Mask Editor</h4><div class="empty">2D Projection Mask requires at least 2 axes.</div></div>`;
+        return;
+      }
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      const axisOptions = selected => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === selected ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
+      node.innerHTML = `<div class="rule-builder-card">
+        <div>
+          <h4>Goal Configuration Projection Mask Editor</h4>
+          <div class="small">Goal Configuration Projection Mask Editor는 실험 가능 영역을 정의하는 설정 도구입니다. Analysis Projection Explorer는 분석 결과를 해석하는 시각화 도구입니다.</div>
+          <div class="small">현재 2D plane은 Domain Range / Resolution만으로 표시됩니다. 전체 고차원 grid는 materialize하지 않습니다.</div>
+        </div>
+        <div class="focused-mask-fields">
+          <label>X Axis<select data-goal-mask-axis="xAxis">${axisOptions(builder.xAxis)}</select></label>
+          <label>Y Axis<select data-goal-mask-axis="yAxis">${axisOptions(builder.yAxis)}</select></label>
+        </div>
+        <canvas id="goal-mask-editor-canvas" class="projection-canvas" width="320" height="260" aria-label="Goal Configuration Projection Mask Editor"></canvas>
+        <div class="small">캔버스를 드래그하면 아래 Focused 2D Mask Builder의 X/Y min/max가 채워집니다. Add Focused 2D Mask Rule을 눌러야 실제 rule로 저장됩니다.</div>
+      </div>`;
+      requestAnimationFrame(drawGoalMaskEditorCanvas);
+    }
+    function drawGoalMaskEditorCanvas() {
+      const canvas = $('goal-mask-editor-canvas');
+      const goal = state.draftGoal || blankGoal();
+      if (!canvas || !goal.axes?.length) return;
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = 'rgba(23,33,43,.12)';
+      ctx.lineWidth = 1;
+      for (let i=0; i<=10; i+=1) {
+        const x = (width * i) / 10;
+        const y = (height * i) / 10;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      }
+      ctx.fillStyle = '#667789';
+      ctx.font = '12px Segoe UI';
+      ctx.fillText('Goal Configuration Projection Mask Editor', 12, 20);
+      ctx.fillText('Drag selection fills Focused Mask Builder ranges.', 12, 40);
+    }
     function renderAdminFocusedMaskBuilder() {
       const goal = state.draftGoal || blankGoal();
       const axes = goal.axes || [];
@@ -2180,6 +2306,7 @@
       const axes = goal.axes || [];
       const axisOptions = axisName => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === axisName ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
       const rules = normalizedFeasibleRulesForUi(goal);
+      renderGoalMaskEditor();
       renderAdminFocusedMaskBuilder();
       $('feasible-rule-list').innerHTML = rules.length ? rules.map(rule => {
         const expression = compileFeasibleRule(rule);
@@ -2197,7 +2324,7 @@
             <div class="rule-expression-preview" data-rule-expression="${escapeHtml(rule.id)}">Generated expression: ${escapeHtml(expression || 'incomplete rule')}</div>
             <div class="row-actions">
               <button class="secondary" type="button" data-rule-edit="${escapeHtml(rule.id)}">Edit</button>
-              <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Advanced Expression</button>
+              <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Legacy Expression</button>
               <button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button>
             </div>
           </div>`;
@@ -2219,19 +2346,20 @@
           <div class="rule-expression-preview" data-rule-expression="${escapeHtml(rule.id)}">Generated expression: ${escapeHtml(expression || 'incomplete rule')}</div>
           <div class="row-actions">
             ${sameAxisWarning}
-            <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Advanced Expression</button>
+            <button class="ghost" type="button" data-rule-convert="${escapeHtml(rule.id)}">Convert to Legacy Expression</button>
             <button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button>
           </div>
         </div>`;
-      }).join('') : '<div class="empty">IF-THEN GUI rule이 없습니다. Advanced Expression만 사용할 수도 있습니다.</div>';
+      }).join('') : '<div class="empty">아직 certified feasible mask rule이 없습니다. Conditional Rule 또는 Focused 2D Mask를 추가하세요.</div>';
     }
     // Goal Admin
     function renderAdmin() {
       state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
       state.draftGoal.feasibleDomainRules = normalizedFeasibleRulesForUi(state.draftGoal);
-      state.draftGoal.feasibleDomainAdvancedExpressions = advancedExpressionsForGoal(state.draftGoal);
+      state.draftGoal.legacyAdvancedExpressions = advancedExpressionsForGoal(state.draftGoal);
+      state.draftGoal.feasibleDomainAdvancedExpressions = [];
       $('admin-goal-name').value = state.draftGoal.name || '';
-      $('feasible-expression-input').value = (state.draftGoal.feasibleDomainAdvancedExpressions || []).join('\n');
+      $('feasible-expression-input').value = (state.draftGoal.legacyAdvancedExpressions || []).join('\n');
       $('axis-editor').innerHTML = (state.draftGoal.axes || []).map((axis, index) => {
         const res = Math.max(Math.abs(Number(axis.resolution) || 1), 0.000001);
         const min = Number(axis.domainMin ?? 0); const max = Number(axis.domainMax ?? 100);
@@ -2396,22 +2524,29 @@
       if (button.dataset.loading === 'true') return;
       const goal = goalById(state.selectedGoalId);
       setButtonLoading(button, true, state.files.length === 1 ? '분석 중...' : 'Batch preview 중...');
+      startTaskProgress(state.files.length === 1 ? '분석 실행' : 'Batch upload preview', 'row-level density grid 계산을 시작합니다.');
       setError(''); setClusterMessage('', '');
       try {
         if (state.files.length === 1) {
+          updateTaskProgress(15, 'parse/mapping', 'CSV column mapping을 적용합니다.');
           const { response, data } = await fetchJson('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) }, 60000);
           if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
+          updateTaskProgress(75, 'specificity/Z/E', 'target-included reference density 기준으로 점수를 계산합니다.');
           state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderAll(); renderReport(data, true);
+          endTaskProgress('분석 완료');
         } else {
+          updateTaskProgress(15, 'batch parse', `${state.files.length}개 파일을 preview합니다.`);
           const { response, data } = await fetchJson('/api/analyze-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxes:selectedAxisNames(goal), files:filePayloads(goal) }) }, 60000);
           if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || 'Batch 분석 실패'); }
+          updateTaskProgress(85, 'report render', 'Batch preview 결과를 렌더링합니다.');
           data.items = (data.items || []).map(item => ({ ...item, selected:Boolean(item.saveable) }));
           state.batch = data; state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll();
           const firstOk = data.items.find(item => item.analysisSuccess);
           if (firstOk) renderReport({ meta:data.meta, result:firstOk.result, summary:firstOk.summary || [], confidenceReasons:firstOk.confidenceReasons || [], visualizations:{ targetVector:firstOk.clusterVector || [] } });
           showView('batch-view');
+          endTaskProgress('Batch preview 완료');
         }
-      } catch (error) { setError(error.message || '분석 중 오류가 발생했습니다.'); renderIssue(error.message || '분석 실패'); }
+      } catch (error) { setError(error.message || '분석 중 오류가 발생했습니다.'); renderIssue(error.message || '분석 실패'); failTaskProgress(error.message || '분석 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     async function saveSelectedBatch(button=$('save-selected')) {
@@ -2419,28 +2554,36 @@
       if (!records.length) return;
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '저장 중...');
+      startTaskProgress('Batch save', `${records.length}개 record를 저장합니다.`);
       try {
         const goal = goalById(state.selectedGoalId);
+        updateTaskProgress(30, 'prepare records', 'row-level vector record를 준비합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/batch-save', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ goalId:state.selectedGoalId, selectedAxisNames:selectedAxisNames(goal), records }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Batch 저장 실패');
+        updateTaskProgress(85, 'refresh UI', '저장된 record timeline을 갱신합니다.');
         state.clusters = data.clusters || state.clusters;
         state.peerCounts = data.peerCounts || state.peerCounts;
         state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts;
         state.batch.items = state.batch.items.map(item => item.selected ? { ...item, saveable:false, selected:false, duplicate:true } : item);
-        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 record 저장 완료`); setAdminMessage('success', `${data.saved.length}개 record 저장 완료 · eligible density records ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`); showView('clusters-view');
-      } catch (error) { setError(error.message || 'Batch 저장 실패'); setClusterMessage('error', error.message || 'Batch 저장 실패'); }
+        renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${data.saved.length}개 record 저장 완료`); setAdminMessage('success', `${data.saved.length}개 record 저장 완료 · eligible density records ${data.compatiblePeerCountForSelectedAxes ?? currentPeerCount(goal)}`); showView('clusters-view'); endTaskProgress('Batch save 완료');
+      } catch (error) { setError(error.message || 'Batch 저장 실패'); setClusterMessage('error', error.message || 'Batch 저장 실패'); failTaskProgress(error.message || 'Batch 저장 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     async function exportReport(format, button=null) {
       if (!state.report) return;
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '내보내는 중...');
+      startTaskProgress('Export', `${format.toUpperCase()} 리포트를 생성합니다.`);
       try {
+        updateTaskProgress(40, 'serialize report', '리포트 섹션을 직렬화합니다.');
         const { response, data } = await fetchJson('/api/export/report', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ format, report:state.report }) }, 60000);
         if (!response.ok) { setError(data.error || 'Export 실패'); return; }
+        updateTaskProgress(90, 'download', '다운로드를 시작합니다.');
         const blob = new Blob([data.content], { type:data.mime || 'text/plain' });
         const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = data.filename || `leesin_report.${format}`; link.click(); URL.revokeObjectURL(link.href);
-      } finally { setButtonLoading(button, false); updateButtons(); }
+        endTaskProgress('Export 완료');
+      } catch (error) { setError(error.message || 'Export 실패'); failTaskProgress(error.message || 'Export 실패'); }
+      finally { setButtonLoading(button, false); updateButtons(); }
     }
 
     const feasibleExpressionsFromText = value => String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
@@ -2493,8 +2636,9 @@
       state.draftGoal.feasibleDomainRules = [...(state.draftGoal.feasibleDomainRules || []), rule];
       state.draftGoal.feasibleDomainExpressions = [
         ...state.draftGoal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
-        ...advancedExpressionsForGoal(state.draftGoal),
       ];
+      state.draftGoal.generatedFeasibleExpressions = [...state.draftGoal.feasibleDomainExpressions];
+      state.draftGoal.feasibleDomainAdvancedExpressions = [];
       state.adminFocusedMaskBuilder = { ...ensureAdminFocusedMaskBuilder(state.draftGoal), editingRuleId:null };
       renderAdmin();
     }
@@ -2513,8 +2657,9 @@
       state.draftGoal.feasibleDomainRules = (state.draftGoal.feasibleDomainRules || []).map(item => item.id === builder.editingRuleId ? rule : item);
       state.draftGoal.feasibleDomainExpressions = [
         ...state.draftGoal.feasibleDomainRules.filter(item => item.enabled !== false).map(item => item.expression || compileFeasibleRule(item)).filter(Boolean),
-        ...advancedExpressionsForGoal(state.draftGoal),
       ];
+      state.draftGoal.generatedFeasibleExpressions = [...state.draftGoal.feasibleDomainExpressions];
+      state.draftGoal.feasibleDomainAdvancedExpressions = [];
       state.adminFocusedMaskBuilder = { ...ensureAdminFocusedMaskBuilder(state.draftGoal), editingRuleId:null };
       renderAdmin();
     }
@@ -2571,50 +2716,89 @@
       state.draftGoal.name = $('admin-goal-name').value.trim();
       state.draftGoal.K_m = Number(state.draftGoal.K_m || 10);
       state.draftGoal.feasibleDomainRules = readFeasibleRulesFromBuilder();
-      state.draftGoal.feasibleDomainAdvancedExpressions = feasibleExpressionsFromText($('feasible-expression-input')?.value || '');
+      state.draftGoal.legacyAdvancedExpressions = feasibleExpressionsFromText($('feasible-expression-input')?.value || '');
+      state.draftGoal.feasibleDomainAdvancedExpressions = [];
       state.draftGoal.feasibleDomainExpressions = [
         ...state.draftGoal.feasibleDomainRules.filter(rule => rule.enabled !== false).map(rule => rule.expression).filter(Boolean),
-        ...state.draftGoal.feasibleDomainAdvancedExpressions,
       ];
+      state.draftGoal.generatedFeasibleExpressions = [...state.draftGoal.feasibleDomainExpressions];
     }
     async function validateFeasibleExpressions(button=$('validate-feasible-expressions')) {
       syncDraftFromAdminForm();
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '검증 중...');
+      startTaskProgress('Goal validation', 'mask rule과 axis 설정을 검증 중입니다.');
       try {
+        updateTaskProgress(20, 'validate axes', 'Axis와 rule 구조를 확인합니다.');
         const { response, data } = await fetchJson('/api/admin/goals/validate-expressions', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Feasible expression 검증 실패');
+        updateTaskProgress(80, 'a_valid exact', 'mask box union 결과를 반영합니다.');
         state.draftGoal = clone(data.goal || state.draftGoal);
         renderAdmin();
-        if (data.maskInfo?.feasibleMaskEvaluationSkipped) {
-          setAdminMessage('success', `Feasible expression 문법 검증 완료 · full-grid valid bin 계산은 생략됨 · total bins ${formatNumber(data.maskInfo?.totalBins,0)}`);
-        } else {
-          setAdminMessage('success', `Feasible expression 검증 완료 · valid bins ${data.maskInfo?.validBins ?? '-'} / ${data.maskInfo?.totalBins ?? '-'}`);
-        }
+        setAdminMessage('success', `Feasible mask rule 검증 완료 · a_valid ${data.maskInfo?.validBins ?? data.maskInfo?.aValid ?? '-'} / ${data.maskInfo?.totalBins ?? '-'}`);
+        endTaskProgress('Goal validation 완료');
       } catch (error) {
         setAdminMessage('error', error.message || 'Feasible expression 검증 실패');
+        failTaskProgress(error.message || 'Goal validation 실패');
       } finally { setButtonLoading(button, false); updateButtons(); }
     }
     async function saveGoal(button=$('admin-save-goal')) {
       syncDraftFromAdminForm();
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '저장 중...');
+      startTaskProgress('Goal 저장', 'Goal 설정을 저장할 준비 중입니다.');
       try {
+        updateTaskProgress(20, 'validate axes', 'Axis와 mask rule을 정규화합니다.');
         const { response, data } = await fetchJson('/api/admin/goals', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Goal 저장 실패');
+        updateTaskProgress(80, 'refresh UI', '저장된 Goal과 record summary를 새로고침합니다.');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.goalBinPreview=data.goalBinPreview || state.goalBinPreview; state.selectedGoalId=data.savedGoal.id; state.draftGoal=clone(data.savedGoal); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 저장되었습니다.');
-      } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); }
+        endTaskProgress('Goal 저장 완료');
+      } catch (error) { setAdminMessage('error', error.message || 'Goal 저장 실패'); failTaskProgress(error.message || 'Goal 저장 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
+    }
+    async function computeAValid(button=$('compute-a-valid')) {
+      syncDraftFromAdminForm();
+      if (button?.dataset.loading === 'true') return;
+      setButtonLoading(button, true, '계산 중...');
+      startTaskProgress('a_valid 계산', 'mask box union을 계산 중입니다.');
+      try {
+        updateTaskProgress(10, 'rules normalize', 'rule을 box exclusion 구조로 정규화합니다.');
+        const { response, data } = await fetchJson('/api/admin/goals/compute-a-valid', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
+        if (!response.ok) throw adminRequestError(response, data, 'a_valid 계산 실패');
+        updateTaskProgress(95, 'save cache', '계산 결과를 Goal draft에 반영합니다.');
+        state.draftGoal = clone(data.goal || state.draftGoal);
+        if (data.maskInfo) {
+          state.draftGoal.aValid = data.maskInfo.aValid ?? data.maskInfo.validBins;
+          state.draftGoal.maskedBins = data.maskInfo.maskedBins;
+          state.draftGoal.rectangularTotalBins = data.maskInfo.rectangularTotalBins ?? data.maskInfo.totalBins;
+          state.draftGoal.maskBoxCount = data.maskInfo.maskBoxCount;
+          state.draftGoal.aValidStatus = data.maskInfo.aValidStatus || 'ready';
+          state.draftGoal.aValidProgressPercent = data.maskInfo.aValidProgressPercent ?? 100;
+        }
+        renderAdmin();
+        setAdminMessage('success', `a_valid ready · ${data.maskInfo?.aValid ?? data.maskInfo?.validBins ?? '-'} valid bins · masked ${data.maskInfo?.maskedBins ?? 0}`);
+        endTaskProgress('a_valid 계산 완료');
+      } catch (error) {
+        setAdminMessage('error', error.message || 'a_valid 계산 실패');
+        failTaskProgress(error.message || 'a_valid 계산 실패');
+      } finally {
+        setButtonLoading(button, false);
+        updateButtons();
+      }
     }
     async function deleteGoal(button=$('admin-delete-goal')) {
       if (!state.draftGoal?.id || !confirm('이 Goal을 삭제할까요? 저장된 record는 자동 삭제되지 않습니다.')) return;
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
+      startTaskProgress('Goal 삭제', 'Goal 목록을 업데이트합니다.');
       try {
+        updateTaskProgress(40, 'delete goal', 'Goal 저장소를 수정합니다.');
         const { response, data } = await fetchJson('/api/admin/goals/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.draftGoal.id }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Goal 삭제 실패');
         state.goals=data.goals; state.clusters=data.clusters || state.clusters; state.peerCounts=data.peerCounts || state.peerCounts; state.peerSubsetCounts=data.peerSubsetCounts || state.peerSubsetCounts; state.selectedGoalId=state.goals[0]?.id || ''; state.draftGoal=clone(goalById(state.selectedGoalId) || blankGoal()); resetSelection(goalById(state.selectedGoalId), true); renderAdmin(); setAdminMessage('success','Goal이 삭제되었습니다.');
-      } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); }
+        endTaskProgress('Goal 삭제 완료');
+      } catch (error) { setAdminMessage('error', error.message || 'Goal 삭제 실패'); failTaskProgress(error.message || 'Goal 삭제 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     function renderImpact(data) {
@@ -2641,12 +2825,16 @@
     async function showImpact(id, button=null) {
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '분석 중...');
+      startTaskProgress('삭제 영향 분석', 'record 제거 전후 density 변화를 계산합니다.');
       try {
+        updateTaskProgress(35, 'rebuild reference', 'target-included reference density를 재구성합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, '영향 분석 실패');
+        updateTaskProgress(90, 'render audit', '영향 분석 결과를 표시합니다.');
         state.clusterResults[id] = { type:'impact', data };
         renderSavedClusters(); renderClusterList(); renderImpact(data);
-      } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); setClusterMessage('error', error.message || '영향 분석 실패'); }
+        endTaskProgress('삭제 영향 분석 완료');
+      } catch (error) { setAdminMessage('error', error.message || '영향 분석 실패'); setClusterMessage('error', error.message || '영향 분석 실패'); failTaskProgress(error.message || '영향 분석 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     async function confirmDeleteCluster(button=$('confirm-delete-cluster')) {
@@ -2654,11 +2842,14 @@
       if (!state.pendingDeleteId || !confirm(`${displayName}을 삭제할까요?`)) return;
       if (button.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
+      startTaskProgress('저장 record 삭제', `${displayName} 삭제 요청을 처리합니다.`);
       try {
+        updateTaskProgress(45, 'delete record', 'record 저장소를 갱신합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id:state.pendingDeleteId }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
         state.clusters = data.clusters || []; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; delete state.clusterResults[state.pendingDeleteId]; state.pendingDeleteId=''; $('confirm-delete-cluster').style.display='none'; $('audit-modal').close(); renderAll(); renderClusterList(); renderGoalPreview(); setClusterMessage('success', `${displayName} 삭제 완료`); setAdminMessage('success', `${displayName} 삭제 완료`);
-      } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); setClusterMessage('error', error.message || '삭제 실패'); }
+        endTaskProgress('저장 record 삭제 완료');
+      } catch (error) { setAdminMessage('error', error.message || '삭제 실패'); setClusterMessage('error', error.message || '삭제 실패'); failTaskProgress(error.message || '삭제 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     async function deleteCluster(id, button=null) {
@@ -2666,7 +2857,9 @@
       if (!id || !confirm(`${displayName}을 삭제할까요?`)) return;
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '삭제 중...');
+      startTaskProgress('저장 record 삭제', `${displayName} 삭제 요청을 처리합니다.`);
       try {
+        updateTaskProgress(45, 'delete record', 'record 저장소를 갱신합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/delete', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, '삭제 실패');
         state.clusters = data.clusters || [];
@@ -2676,9 +2869,11 @@
         renderAll(); renderClusterList(); renderGoalPreview();
         setClusterMessage('success', `${displayName} 삭제 완료`);
         setAdminMessage('success', `${displayName} 삭제 완료`);
+        endTaskProgress('저장 record 삭제 완료');
       } catch (error) {
         setClusterMessage('error', error.message || '삭제 실패');
         setAdminMessage('error', error.message || '삭제 실패');
+        failTaskProgress(error.message || '삭제 실패');
       } finally { setButtonLoading(button, false); updateButtons(); }
     }
     function renderReevaluation(item) {
@@ -2707,13 +2902,17 @@
     async function showReevaluation(id, button=null) {
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '재평가 중...');
+      startTaskProgress('저장 record 재분석', 'record를 현재 Goal grid 기준으로 재분석합니다.');
       try {
+        updateTaskProgress(35, 'row-level rebinning', 'row-level vectors를 현재 grid로 다시 binning합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/reevaluate', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, '재평가 실패');
+        updateTaskProgress(90, 'render audit', '재평가 결과를 표시합니다.');
         const item = (data.items || [])[0];
         state.clusterResults[id] = { type:'reeval', data:item };
         renderSavedClusters(); renderClusterList(); renderReevaluation(item);
-      } catch (error) { setAdminMessage('error', error.message || '재평가 실패'); setClusterMessage('error', error.message || '재평가 실패'); }
+        endTaskProgress('저장 record 재분석 완료');
+      } catch (error) { setAdminMessage('error', error.message || '재평가 실패'); setClusterMessage('error', error.message || '재평가 실패'); failTaskProgress(error.message || '재평가 실패'); }
       finally { setButtonLoading(button, false); updateButtons(); }
     }
     function handleClusterAction(event) {
@@ -2756,11 +2955,12 @@
       $('admin-goal-name').addEventListener('input', event => { state.draftGoal=state.draftGoal || blankGoal(); state.draftGoal.name=event.target.value; });
       $('feasible-expression-input').addEventListener('input', event => {
         state.draftGoal=state.draftGoal || blankGoal();
-        state.draftGoal.feasibleDomainAdvancedExpressions=feasibleExpressionsFromText(event.target.value);
+        state.draftGoal.legacyAdvancedExpressions=feasibleExpressionsFromText(event.target.value);
+        state.draftGoal.feasibleDomainAdvancedExpressions=[];
         state.draftGoal.feasibleDomainExpressions=[
           ...(state.draftGoal.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean),
-          ...state.draftGoal.feasibleDomainAdvancedExpressions,
         ];
+        state.draftGoal.generatedFeasibleExpressions=[...state.draftGoal.feasibleDomainExpressions];
         renderGoalPreview();
       });
       $('feasible-rule-add').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.feasibleDomainRules.push(defaultFeasibleRule(state.draftGoal)); renderAdmin(); });
@@ -2781,15 +2981,68 @@
       $('focused-mask-admin-builder').addEventListener('click', event => {
         if (event.target.id === 'focused-admin-add') {
           setButtonLoading(event.target, true, '추가 중...');
-          try { addAdminFocusedMaskRule(); }
+          startTaskProgress('Feasible mask rule 저장', 'Focused 2D Mask rule을 생성합니다.');
+          try { updateTaskProgress(50, 'compile rule', '선택 범위를 mask box rule로 변환합니다.'); addAdminFocusedMaskRule(); endTaskProgress('Focused 2D Mask rule 추가 완료'); }
+          catch (error) { setAdminMessage('error', error.message || 'Focused 2D Mask rule 추가 실패'); failTaskProgress(error.message || 'Focused 2D Mask rule 추가 실패'); }
           finally { setButtonLoading(event.target, false); updateButtons(); }
         }
         if (event.target.id === 'focused-admin-save') {
           setButtonLoading(event.target, true, '저장 중...');
-          try { saveAdminFocusedMaskRule(); }
+          startTaskProgress('Feasible mask rule 수정', 'Focused 2D Mask rule 변경사항을 저장합니다.');
+          try { updateTaskProgress(50, 'compile rule', '수정된 범위를 mask box rule로 변환합니다.'); saveAdminFocusedMaskRule(); endTaskProgress('Focused 2D Mask rule 수정 완료'); }
+          catch (error) { setAdminMessage('error', error.message || 'Focused 2D Mask rule 수정 실패'); failTaskProgress(error.message || 'Focused 2D Mask rule 수정 실패'); }
           finally { setButtonLoading(event.target, false); updateButtons(); }
         }
         if (event.target.id === 'focused-admin-reset') resetAdminFocusedMaskBuilder();
+      });
+      $('goal-mask-editor').addEventListener('change', event => {
+        const field = event.target.dataset.goalMaskAxis;
+        if (!field) return;
+        const builder = ensureAdminFocusedMaskBuilder(state.draftGoal || blankGoal());
+        builder[field] = event.target.value;
+        if (builder.xAxis === builder.yAxis) {
+          const axes = state.draftGoal?.axes || [];
+          const alternate = axes.find(axis => axis.name !== builder.xAxis);
+          if (alternate) builder[field === 'xAxis' ? 'yAxis' : 'xAxis'] = alternate.name;
+        }
+        renderFeasibleRuleBuilder();
+      });
+      $('goal-mask-editor').addEventListener('pointerdown', event => {
+        const canvas = event.target.closest?.('#goal-mask-editor-canvas');
+        if (!canvas) return;
+        canvas.setPointerCapture?.(event.pointerId);
+        state.goalMaskDrag = { startX:event.offsetX, startY:event.offsetY, endX:event.offsetX, endY:event.offsetY };
+      });
+      $('goal-mask-editor').addEventListener('pointermove', event => {
+        if (!state.goalMaskDrag || event.target.id !== 'goal-mask-editor-canvas') return;
+        state.goalMaskDrag.endX = event.offsetX;
+        state.goalMaskDrag.endY = event.offsetY;
+      });
+      $('goal-mask-editor').addEventListener('pointerup', event => {
+        if (!state.goalMaskDrag || event.target.id !== 'goal-mask-editor-canvas') return;
+        const goal = state.draftGoal || blankGoal();
+        const builder = ensureAdminFocusedMaskBuilder(goal);
+        const xAxis = goal.axes.find(axis => axis.name === builder.xAxis) || goal.axes[0];
+        const yAxis = goal.axes.find(axis => axis.name === builder.yAxis) || goal.axes[1] || goal.axes[0];
+        const canvas = event.target;
+        const width = canvas.width || canvas.clientWidth || 320;
+        const height = canvas.height || canvas.clientHeight || 260;
+        const x0 = Math.max(0, Math.min(width, state.goalMaskDrag.startX));
+        const x1 = Math.max(0, Math.min(width, event.offsetX));
+        const y0 = Math.max(0, Math.min(height, state.goalMaskDrag.startY));
+        const y1 = Math.max(0, Math.min(height, event.offsetY));
+        const xLo = Math.min(x0, x1) / width;
+        const xHi = Math.max(x0, x1) / width;
+        const yLo = 1 - (Math.max(y0, y1) / height);
+        const yHi = 1 - (Math.min(y0, y1) / height);
+        const xMin = Number(xAxis.domainMin), xMax = Number(xAxis.domainMax);
+        const yMin = Number(yAxis.domainMin), yMax = Number(yAxis.domainMax);
+        builder.xMin = xMin + (xMax - xMin) * xLo;
+        builder.xMax = xMin + (xMax - xMin) * xHi;
+        builder.yMin = yMin + (yMax - yMin) * yLo;
+        builder.yMax = yMin + (yMax - yMin) * yHi;
+        state.goalMaskDrag = null;
+        renderFeasibleRuleBuilder();
       });
       $('feasible-rule-list').addEventListener('input', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); refreshFeasibleRulePreviews(); renderGoalPreview(); });
       $('feasible-rule-list').addEventListener('change', event => { if (!event.target.dataset.ruleField) return; syncDraftFromAdminForm(); renderFeasibleRuleBuilder(); renderGoalPreview(); });
@@ -2808,15 +3061,16 @@
           const expression = rule?.expression || compileFeasibleRule(rule);
           const type = rule?.sourceType || rule?.guiSpec?.type || 'gui_conditional';
           const message = type === 'focused_2d_mask'
-            ? '이 규칙을 Advanced Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없습니다. 계속하시겠습니까?'
-            : '이 규칙을 Advanced Expression으로 전환하면 더 이상 IF-THEN Rule Builder로 편집할 수 없습니다. 계속하시겠습니까?';
+            ? '이 규칙을 Legacy Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?'
+            : '이 규칙을 Legacy Expression으로 전환하면 더 이상 IF-THEN Rule Builder로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?';
           if (expression && confirm(message)) {
             state.draftGoal.feasibleDomainRules = state.draftGoal.feasibleDomainRules.filter(item => item.id !== convertId);
-            state.draftGoal.feasibleDomainAdvancedExpressions = [...(state.draftGoal.feasibleDomainAdvancedExpressions || []), expression];
+            state.draftGoal.legacyAdvancedExpressions = [...advancedExpressionsForGoal(state.draftGoal), expression];
+            state.draftGoal.feasibleDomainAdvancedExpressions = [];
             state.draftGoal.feasibleDomainExpressions = [
               ...state.draftGoal.feasibleDomainRules.filter(rule => rule.enabled !== false).map(rule => rule.expression).filter(Boolean),
-              ...state.draftGoal.feasibleDomainAdvancedExpressions,
             ];
+            state.draftGoal.generatedFeasibleExpressions = [...state.draftGoal.feasibleDomainExpressions];
             renderAdmin();
           }
         }
@@ -2826,6 +3080,9 @@
         }
       });
       $('validate-feasible-expressions').addEventListener('click', event => validateFeasibleExpressions(event.currentTarget));
+      $('goal-bin-preview').addEventListener('click', event => {
+        if (event.target.id === 'compute-a-valid') computeAValid(event.target);
+      });
       $('axis-add-button').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
       $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); renderGoalPreview(); });
       $('axis-editor').addEventListener('change', () => renderAdmin());

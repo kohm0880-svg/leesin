@@ -10,13 +10,8 @@ from typing import Any
 
 import numpy as np
 
-from feasible_mask import (
-    FeasibleMaskEvaluationTooLarge,
-    compute_valid_bin_mask_for_axes,
-    normalize_feasible_expressions,
-    normalize_feasible_rules,
-    validate_feasible_expression,
-)
+from feasible_box_counter import compute_a_valid_for_rules
+from feasible_mask import normalize_feasible_expressions, normalize_feasible_rules
 from models import K_M, ExperimentConfig
 
 try:
@@ -453,36 +448,39 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
     allowed_axes = [axis["name"] for axis in normalized_axes]
     feasible_rules = normalize_feasible_rules(goal.get("feasibleDomainRules"), allowed_axes)
     rule_expressions = [rule["expression"] for rule in feasible_rules if rule.get("enabled", True)]
-    if "feasibleDomainAdvancedExpressions" in goal:
-        advanced_expressions = normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions"))
-    else:
-        source_expressions = normalize_feasible_expressions(goal.get("feasibleDomainExpressions"))
-        if feasible_rules:
-            rule_expression_set = set(rule_expressions)
-            advanced_expressions = [expression for expression in source_expressions if expression not in rule_expression_set]
-        else:
-            advanced_expressions = source_expressions
-    feasible_expressions = rule_expressions + advanced_expressions
-    for expression in feasible_expressions:
-        try:
-            validate_feasible_expression(expression, allowed_axes)
-        except ValueError as exc:
-            raise ValueError(f"Invalid feasible domain expression '{expression}': {exc}") from exc
-    if feasible_expressions:
-        try:
-            compute_valid_bin_mask_for_axes(normalized_axes, feasible_expressions)
-        except FeasibleMaskEvaluationTooLarge:
-            # Goal validation must prove expressions are safe and syntactically valid.
-            # Full-grid valid-bin counting is best-effort and may be skipped for large grids.
-            pass
+    source_advanced = []
+    source_advanced.extend(normalize_feasible_expressions(goal.get("legacyAdvancedExpressions")))
+    source_advanced.extend(normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions")))
+    source_expressions = normalize_feasible_expressions(goal.get("feasibleDomainExpressions"))
+    rule_expression_set = set(rule_expressions)
+    source_advanced.extend(expression for expression in source_expressions if expression not in rule_expression_set)
+    legacy_advanced_expressions = []
+    seen_legacy: set[str] = set()
+    for expression in source_advanced:
+        if expression and expression not in seen_legacy:
+            legacy_advanced_expressions.append(expression)
+            seen_legacy.add(expression)
+    feasible_expressions = rule_expressions
+    mask_info = compute_a_valid_for_rules(normalized_axes, feasible_rules)
     return {
         "id": str(goal.get("id") or f"goal_{abs(hash(name))}"),
         "name": name,
         "K_m": k_m,
         "axes": normalized_axes,
         "feasibleDomainRules": feasible_rules,
-        "feasibleDomainAdvancedExpressions": advanced_expressions,
+        "legacyAdvancedExpressions": legacy_advanced_expressions,
+        "feasibleDomainAdvancedExpressions": [],
         "feasibleDomainExpressions": feasible_expressions,
+        "generatedFeasibleExpressions": feasible_expressions,
+        "feasibleMaskBoxes": mask_info.get("maskBoxes", []),
+        "maskBoxCount": mask_info.get("maskBoxCount", 0),
+        "rectangularTotalBins": mask_info.get("rectangularTotalBins", mask_info.get("totalBins")),
+        "aValid": mask_info.get("aValid"),
+        "maskedBins": mask_info.get("maskedBins"),
+        "aValidStatus": "ready",
+        "aValidProgressPercent": 100,
+        "aValidMode": "exact_box_union",
+        "maskSignature": mask_info.get("maskSignature"),
     }
 
 

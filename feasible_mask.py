@@ -439,6 +439,12 @@ def compute_valid_bin_mask_for_axes(
     expressions: list[str] | None = None,
     max_bins: int = MAX_MASK_EVAL_BINS,
 ) -> dict[str, Any]:
+    """Legacy expression-grid evaluator.
+
+    Certified Leesin_V2 feasible domains use feasible_box_counter.py and exact
+    mask-box union counting. Keep this helper only for legacy expression tests
+    and migration tooling; do not use it for Coverage/Confidence.
+    """
     ordered_axes = canonical_axes(axes)
     axis_names = [str(axis["name"]) for axis in ordered_axes]
     normalized = normalize_feasible_expressions(expressions)

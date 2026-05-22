@@ -72,21 +72,25 @@ The analysis payload reports:
 
 ## Feasible Domain Mask
 
-Experiment Goals can include `feasibleDomainExpressions`, a list of advanced expression rules evaluated at bin centers. All rules are combined with AND. When the list is empty, Leesin uses the full Cartesian Domain Range exactly as before.
+Certified Feasible Domain rules are now defined by exact rectangular exclusion boxes generated from GUI rules: Conditional IF-THEN rules and Focused 2D Projection Mask rules. Leesin does not materialize the full multidimensional grid.
 
-Expressions are parsed with a Python AST whitelist rather than `eval` or `exec`. Allowed syntax includes numeric constants, axis names, arithmetic operators, comparisons, boolean `and`/`or`/`not`, parentheses, and safe functions such as `abs`, `min`, `max`, `sqrt`, `log`, and `exp`. Attribute access, imports, subscripts, comprehensions, lambdas, assignments, and unknown axis names are rejected.
+Each enabled `feasibleDomainRules` item is converted to one or more high-dimensional mask boxes. `maskedBins` is the exact union size of those boxes, computed without `np.meshgrid`, `np.indices`, or full-grid boolean arrays. `a_valid = totalBins - maskedBins`, and Coverage is `occupied_bins / a_valid`.
 
-The Goal Admin UI also includes a first-step IF-THEN Rule Builder. A GUI rule such as `IF temperature > 80 THEN pressure must be between 2 and 5` is compiled into `not (temperature > 80 and (pressure < 2 or pressure > 5))`. The builder is only a helper: Leesin still stores and executes the canonical `feasibleDomainExpressions` list. GUI rules are kept separately in `feasibleDomainRules` for editing, while direct manual rules are stored as `feasibleDomainAdvancedExpressions`. Expression-to-GUI reverse parsing, 2D drag masks, focused mask editors, priority rules, and OR combine modes are not implemented in this MVP.
+The Goal Admin UI separates configuration from analysis:
 
-With a mask enabled:
+- **Goal Configuration Projection Mask Editor** defines the feasible experiment domain before analysis.
+- **Analysis Projection Explorer** visualizes the resulting target/reference density after analysis.
 
-- `valid_bins` is the number of bins whose centers satisfy every expression.
-- `masked_bins = total_bins - valid_bins`.
-- Coverage is `occupied_bins / valid_bins`, not `occupied_bins / total_bins`.
-- Peer bins outside the feasible domain are excluded from the density map.
-- Target rows inside the axis Domain Range but outside the feasible mask are reported as `masked_out_target_rows` and excluded from specificity scoring.
+Advanced arbitrary expressions are no longer certified feasible-domain input. Existing expression strings are preserved as `legacyAdvancedExpressions` for migration, but they are not used for exact `a_valid`, Coverage, Confidence, or row filtering. Convert legacy expressions to Conditional or Focused 2D Projection Mask rules.
 
-MVP note: GUI rule builders, 2D drag masks, focused mask editors, expression reverse parsing, and audit-log grid revisions are intentionally not implemented yet.
+With a certified mask enabled:
+
+- `total_bins` is the rectangular Cartesian bin count.
+- `masked_bins` is the exact union size of mask boxes.
+- `valid_bins` / `aValid` is `total_bins - masked_bins`.
+- Coverage is `occupied_bins / aValid`.
+- Peer and target rows whose bin tuple falls inside a mask box are excluded from specificity scoring and reported separately.
+- Long-running actions show progress text/percentage in the UI.
 
 ## Projection Explorer
 

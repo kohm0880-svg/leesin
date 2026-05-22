@@ -17,6 +17,7 @@ from feasible_mask import (
     filter_bin_counts_by_feasible_domain,
     validate_feasible_expression,
 )
+from feasible_box_counter import compute_a_valid_for_rules
 from models import ExperimentConfig
 from stats_engine import DensityGridAnalyzer
 
@@ -526,41 +527,86 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIsNone(info["validDomainRatio"])
         self.assertTrue(info["feasibleMaskEvaluationSkipped"])
 
-    def test_validate_goal_allows_large_grid_when_expression_is_valid(self) -> None:
+    def test_validate_goal_preserves_large_grid_expression_as_legacy_not_certified(self) -> None:
         payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
         payload["feasibleDomainAdvancedExpressions"] = ["x >= 0"]
         normalized = storage.validate_goal(payload)
-        self.assertEqual(normalized["feasibleDomainExpressions"], ["x >= 0"])
+        self.assertEqual(normalized["legacyAdvancedExpressions"], ["x >= 0"])
+        self.assertEqual(normalized["feasibleDomainExpressions"], [])
+        self.assertEqual(normalized["aValid"], 1_000_000)
 
-    def test_validate_expression_mask_info_reports_large_grid_skip(self) -> None:
+    def test_validate_mask_info_uses_exact_box_union_without_full_grid_skip(self) -> None:
         payload = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
-        payload["feasibleDomainAdvancedExpressions"] = ["x >= 0"]
+        payload["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 500, "xMax": 1000, "yMin": 0, "yMax": 1000, "scope": {}},
+            }
+        ]
         normalized = storage.validate_goal(payload)
         mask_info = app.mask_info_for_display(app.feasible_mask_info_for_goal(normalized))
-        self.assertTrue(mask_info["feasibleMaskEvaluationSkipped"])
         self.assertEqual(mask_info["totalBins"], 1_000_000)
-        self.assertIsNone(mask_info["validBins"])
-        self.assertIsNone(mask_info["maskedBins"])
-        self.assertIsNone(mask_info["validDomainRatio"])
+        self.assertFalse(mask_info["feasibleMaskEvaluationSkipped"])
+        self.assertEqual(mask_info["maskedBins"], 500_000)
+        self.assertEqual(mask_info["validBins"], 500_000)
+        self.assertEqual(mask_info["aValidMode"], "exact_box_union")
 
-    def test_large_grid_analysis_falls_back_to_rectangular_coverage_denominator(self) -> None:
+    def test_box_union_counts_overlapping_masks_once(self) -> None:
+        payload = goal(axes=[axis("x", domain_max=10, resolution=1), axis("y", domain_max=10, resolution=1)])
+        payload["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 0, "xMax": 5, "yMin": 0, "yMax": 5, "scope": {}},
+            },
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 3, "xMax": 8, "yMin": 3, "yMax": 8, "scope": {}},
+            },
+        ]
+        normalized = storage.validate_goal(payload)
+        info = compute_a_valid_for_rules(normalized["axes"], normalized["feasibleDomainRules"])
+        self.assertEqual(info["totalBins"], 100)
+        self.assertEqual(info["maskedBins"], 46)
+        self.assertEqual(info["aValid"], 54)
+
+    def test_large_grid_analysis_uses_exact_a_valid_box_denominator(self) -> None:
         selected_goal = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
-        selected_goal["feasibleDomainAdvancedExpressions"] = ["x <= 500"]
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 500, "xMax": 1000, "yMin": 0, "yMax": 1000, "scope": {}},
+            }
+        ]
         normalized = storage.validate_goal(selected_goal)
         peer = record_from_rows(normalized, [{"x": "10", "y": "10"}], "peer")
         coverage = app.build_global_bin_counts([peer], normalized)
-        self.assertTrue(coverage["feasibleMaskEvaluationSkipped"])
-        self.assertEqual(coverage["validBins"], 1_000_000)
-        self.assertEqual(coverage["maskedBins"], 0)
+        self.assertFalse(coverage["feasibleMaskEvaluationSkipped"])
+        self.assertEqual(coverage["validBins"], 500_000)
+        self.assertEqual(coverage["maskedBins"], 500_000)
         analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(normalized))
         analyzer.set_peer_bin_counts(coverage["binCounts"])
         analyzer.set_feasible_domain(coverage["validBins"], coverage["maskedBins"], coverage["feasibleMaskEnabled"])
         result = analyzer.diagnose({"[10,10]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
-        self.assertAlmostEqual(result.coverage_C, 1 / 1_000_000)
+        self.assertAlmostEqual(result.coverage_C, 1 / 500_000)
 
     def test_grid_preview_request_skips_huge_preview_recalculation(self) -> None:
         selected_goal = goal(axes=[axis("x", domain_max=1000, resolution=1), axis("y", domain_max=1000, resolution=1)])
-        selected_goal["feasibleDomainAdvancedExpressions"] = ["x <= 500"]
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "x", "yAxis": "y", "xMin": 500, "xMax": 1000, "yMin": 0, "yMax": 1000, "scope": {}},
+            }
+        ]
         normalized = storage.validate_goal(selected_goal)
         payload = {
             "goalId": normalized["id"],
@@ -572,15 +618,23 @@ class DensityGridBehaviorTests(unittest.TestCase):
         with patch("app.find_goal", return_value=normalized):
             response = app.grid_preview_request(payload)
         self.assertTrue(response["metrics"]["gridPreviewSkipped"])
-        self.assertTrue(response["metrics"]["feasibleMaskEvaluationSkipped"])
-        self.assertIsNone(response["metrics"]["validBins"])
+        self.assertFalse(response["metrics"]["feasibleMaskEvaluationSkipped"])
+        self.assertEqual(response["metrics"]["validBins"], 500_000)
         self.assertIsNone(response["result"])
 
     def test_target_row_inside_domain_but_outside_feasible_mask_is_masked_out(self) -> None:
         selected_goal = goal(
             axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
         )
-        selected_goal["feasibleDomainExpressions"] = ["temperature <= 50"]
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "temperature", "yAxis": "pressure", "xMin": 50, "xMax": 100, "yMin": 0, "yMax": 10, "scope": {}},
+            }
+        ]
+        selected_goal = storage.validate_goal(selected_goal)
         recomputed = app.recompute_bin_occupancy_from_row_vectors(
             [[60.0, 5.0], [40.0, 5.0]],
             ["temperature", "pressure"],
@@ -595,7 +649,15 @@ class DensityGridBehaviorTests(unittest.TestCase):
         selected_goal = goal(
             axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)]
         )
-        selected_goal["feasibleDomainExpressions"] = ["temperature <= 50"]
+        selected_goal["feasibleDomainRules"] = [
+            {
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {"type": "focused_2d_mask", "xAxis": "temperature", "yAxis": "pressure", "xMin": 50, "xMax": 100, "yMin": 0, "yMax": 10, "scope": {}},
+            }
+        ]
+        selected_goal = storage.validate_goal(selected_goal)
         peer = record_from_rows(selected_goal, [{"temperature": "40", "pressure": "5"}], "peer")
         coverage = app.build_global_bin_counts([peer], selected_goal)
         analyzer = DensityGridAnalyzer(app.experiment_config_from_goal(selected_goal))
@@ -787,8 +849,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(len(normalized["feasibleDomainRules"]), 1)
         self.assertEqual(
             normalized["feasibleDomainExpressions"],
-            ["not (temperature > 80 and (pressure < 2 or pressure > 5))", "pressure >= 0"],
+            ["not (temperature > 80 and (pressure < 2 or pressure > 5))"],
         )
+        self.assertEqual(normalized["legacyAdvancedExpressions"], ["pressure >= 0"])
 
     def test_validate_goal_merges_focused_mask_rules(self) -> None:
         payload = goal(axes=[axis("temperature", domain_max=100, resolution=10), axis("pressure", domain_max=10, resolution=1)])
@@ -823,8 +886,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         payload["feasibleDomainExpressions"] = ["temperature <= 50"]
         normalized = storage.validate_goal(payload)
         self.assertEqual(normalized["feasibleDomainRules"], [])
-        self.assertEqual(normalized["feasibleDomainAdvancedExpressions"], ["temperature <= 50"])
-        self.assertEqual(normalized["feasibleDomainExpressions"], ["temperature <= 50"])
+        self.assertEqual(normalized["legacyAdvancedExpressions"], ["temperature <= 50"])
+        self.assertEqual(normalized["feasibleDomainAdvancedExpressions"], [])
+        self.assertEqual(normalized["feasibleDomainExpressions"], [])
 
     def test_gui_rule_rejects_bad_range(self) -> None:
         rule = {
@@ -841,8 +905,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
         self.assertIn("Feasible Rule Builder", template)
         self.assertIn("data-rule-convert", template)
-        self.assertIn("Convert to Advanced Expression", template)
-        self.assertIn("feasibleDomainAdvancedExpressions", template)
+        self.assertIn("Convert to Legacy Expression", template)
+        self.assertIn("legacyAdvancedExpressions", template)
+        self.assertIn("Goal Configuration Projection Mask Editor", template)
+        self.assertIn("task-progress-wrap", template)
         self.assertIn("Focused 2D Mask Builder", template)
         self.assertIn("Add Focused 2D Mask Rule", template)
         self.assertIn("Reset Focused Mask Builder", template)
