@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unittest
 from unittest.mock import patch
@@ -74,6 +75,34 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertTrue(payload["deferBootstrap"])
         self.assertEqual(payload["goals"], [])
         self.assertEqual(payload["clusters"], [])
+
+    def test_database_url_alone_does_not_enable_database_storage(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgres://user:pass@example/db", "LEESIN_STORAGE_BACKEND": "", "LEESIN_USE_DATABASE": ""},
+            clear=False,
+        ):
+            self.assertFalse(storage._db_enabled())
+            status = storage.storage_status()
+        self.assertEqual(status["storageBackend"], "json_file")
+        self.assertTrue(status["databaseUrlExists"])
+        self.assertTrue(status["databaseAutoUseDisabled"])
+        self.assertNotIn("postgres://user:pass@example/db", json.dumps(status))
+
+    def test_database_storage_requires_explicit_opt_in(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgres://user:pass@example/db", "LEESIN_STORAGE_BACKEND": "database", "LEESIN_USE_DATABASE": ""},
+            clear=False,
+        ):
+            self.assertTrue(storage._db_enabled())
+            self.assertEqual(storage.storage_status()["storageBackend"], "database")
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgres://user:pass@example/db", "LEESIN_STORAGE_BACKEND": "", "LEESIN_USE_DATABASE": "true"},
+            clear=False,
+        ):
+            self.assertTrue(storage._db_enabled())
 
     def test_cluster_summary_omits_heavy_density_payload_by_default(self) -> None:
         selected_goal = goal(axes=[axis("x")])

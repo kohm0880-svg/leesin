@@ -285,19 +285,32 @@ def cluster_fingerprint(record: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _database_requested() -> bool:
+    backend = os.environ.get("LEESIN_STORAGE_BACKEND", "").strip().lower()
+    return backend == "database" or _env_truthy("LEESIN_USE_DATABASE")
+
+
+def _database_url_exists() -> bool:
+    return bool(os.environ.get("DATABASE_URL", "").strip())
+
+
 def _db_enabled() -> bool:
-    url = os.environ.get("DATABASE_URL")
-    return bool(url and url.strip())
+    return _database_requested() and _database_url_exists()
 
 
 def _db_connect() -> "psycopg2.extensions.connection":
     if psycopg2 is None:
-        raise ModuleNotFoundError("psycopg2 is required when DATABASE_URL is set.")
+        raise ModuleNotFoundError("psycopg2 is required when database storage is explicitly enabled.")
     return psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=5)
 
 
 def init_database() -> None:
     if not _db_enabled():
+        STORE_DIR.mkdir(parents=True, exist_ok=True)
         return
     conn = _db_connect()
     try:
@@ -363,6 +376,27 @@ def storage_label(path: Path) -> str:
         return str(path.relative_to(Path(__file__).parent))
     except ValueError:
         return str(path)
+
+
+def storage_status() -> dict[str, Any]:
+    db_requested = _database_requested()
+    database_url_exists = _database_url_exists()
+    db_enabled = _db_enabled()
+    store_dir_configured = bool(os.environ.get("LEESIN_STORE_DIR", "").strip())
+    return {
+        "storageBackend": "database" if db_enabled else "json_file",
+        "storeDir": storage_label(STORE_DIR),
+        "leesinStoreDirExists": STORE_DIR.exists(),
+        "leesinStoreDirConfigured": store_dir_configured,
+        "databaseUrlExists": database_url_exists,
+        "databaseAutoUseDisabled": database_url_exists and not db_requested,
+        "databaseRequested": db_requested,
+        "dbEnabled": db_enabled,
+        "goalStorePath": storage_label(GOAL_STORE_PATH),
+        "clusterStorePath": storage_label(CLUSTER_STORE_PATH),
+        "isPersistentDiskJson": (not db_enabled) and store_dir_configured,
+        "isLocalJsonFallback": (not db_enabled) and (not store_dir_configured),
+    }
 
 
 def normalize_axis_name(name: Any) -> str:

@@ -57,6 +57,7 @@ from storage import (
     save_goal_store,
     should_save_data_clusters,
     storage_label,
+    storage_status,
     utc_now_iso,
     validate_goal,
 )
@@ -2719,28 +2720,39 @@ def compute_a_valid_for_goal_request(goal_id: str) -> dict[str, Any]:
         raise
 
 
+def build_storage_payload(cluster_count: int = 0) -> dict[str, Any]:
+    status = storage_status()
+    return {
+        **status,
+        "goalStoreFile": status["goalStorePath"],
+        "clusterStoreFile": status["clusterStorePath"],
+        "clusterCount": cluster_count,
+        "savedItems": [
+            "Experiment Goal 설정",
+            "selected-axis row-level sanitized numeric vectors",
+            "비식별 mean vector 호환 필드",
+            "row-level bin count summary",
+        ],
+        "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
+    }
+
+
 def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
     goals = normalize_goals_for_display(load_goal_store())
     peer_counts = bootstrap_peer_counts()
     peer_subset_counts = bootstrap_peer_subset_counts()
+    clusters = list_cluster_summaries()
     admin_auth_required = bool(os.environ.get("ADMIN_TOKEN")) and not admin_allowed
     return {
         "adminAllowed": admin_allowed,
         "adminAuthRequired": admin_auth_required,
         "goals": goals,
-        "clusters": list_cluster_summaries(),
+        "clusters": clusters,
         "peerCounts": peer_counts,
         "peerSubsetCounts": peer_subset_counts,
         "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in goals},
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
-        "storage": {
-            "storeDir": storage_label(STORE_DIR),
-            "goalStoreFile": storage_label(GOAL_STORE_PATH),
-            "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
-            "clusterCount": len(load_cluster_store()),
-            "savedItems": ["Experiment Goal 설정", "selected-axis row-level sanitized numeric vectors", "비식별 mean vector 호환 필드", "row-level bin count summary"],
-            "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
-        },
+        "storage": build_storage_payload(cluster_count=len(clusters)),
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
             "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
@@ -2761,14 +2773,7 @@ def build_shell_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "goalBinPreview": {},
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
         "deferBootstrap": True,
-        "storage": {
-            "storeDir": storage_label(STORE_DIR),
-            "goalStoreFile": storage_label(GOAL_STORE_PATH),
-            "clusterStoreFile": storage_label(CLUSTER_STORE_PATH),
-            "clusterCount": 0,
-            "savedItems": ["Experiment Goal 설정", "selected-axis row-level sanitized numeric vectors", "비식별 mean vector 호환 필드", "row-level bin count summary"],
-            "unsavedItems": ["원본 CSV 파일", "파일명", "비매핑 column", "개인정보 column"],
-        },
+        "storage": build_storage_payload(cluster_count=0),
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
             "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
@@ -2802,6 +2807,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/bootstrap":
             self._send_json(build_bootstrap_payload(admin_allowed=self._admin_allowed()))
+            return
+        if parsed.path == "/api/storage-status":
+            self._send_json(build_storage_payload(cluster_count=len(list_cluster_summaries())))
             return
         if parsed.path == "/healthz":
             self._send_json({"ok": True})
