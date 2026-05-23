@@ -961,6 +961,13 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("data-admin-focused-scope-field=\"mode\"", template)
         self.assertIn("loadAdminFocusedRuleIntoBuilder", template)
         self.assertIn("data-rule-edit", template)
+        self.assertIn("leesinGoalMaskEditorSettings", template)
+        self.assertIn("data-goal-mask-mini-add", template)
+        self.assertIn("data-goal-mask-drag-handle", template)
+        self.assertIn("zoomGoalMaskAtPoint", template)
+        self.assertIn("pairOrder", template)
+        self.assertIn("cardSelections", template)
+        self.assertIn("Reset Order", template)
 
     def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
