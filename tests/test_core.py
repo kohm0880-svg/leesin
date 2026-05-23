@@ -970,6 +970,12 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("viewByPair", template)
         self.assertIn("goal-mask-show-current", template)
         self.assertIn("Reset Order", template)
+        self.assertIn("goalMaskPlotArea", template)
+        self.assertIn("drawGoalMaskTicks", template)
+        self.assertIn("syncGoalMaskSelectionFromBuilder", template)
+        self.assertIn("canonicalFocusedMaskRuleKey", template)
+        self.assertIn("이미 같은 Mask가 존재합니다.", template)
+        self.assertIn("aria-invalid", template)
         self.assertNotIn('id="goal-mask-active-canvas"', template)
 
     def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:

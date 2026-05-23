@@ -27,6 +27,7 @@
     .panel-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
     label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:800; }
     select,input,textarea,button { min-height:40px; border:1px solid var(--line); border-radius:9px; padding:9px 11px; background:#fff; color:var(--ink); font:inherit; }
+    input.invalid { border-color:var(--red); background:#fff8f6; }
     textarea { min-height:110px; resize:vertical; }
     input[type="checkbox"] { min-height:auto; accent-color:var(--teal); }
     input[type="range"] { padding:0; accent-color:var(--teal); }
@@ -2137,6 +2138,56 @@
       const res = Math.max(Math.abs(Number(axis?.resolution) || 1), 1e-12);
       return Math.max(1, Math.ceil(span / res));
     }
+    function goalMaskPlotArea(width, height, isActive=false) {
+      const margin = {
+        left: isActive ? 46 : 34,
+        right: 8,
+        top: isActive ? 14 : 8,
+        bottom: isActive ? 34 : 24,
+      };
+      return {
+        margin,
+        x: margin.left,
+        y: margin.top,
+        width: Math.max(16, width - margin.left - margin.right),
+        height: Math.max(16, height - margin.top - margin.bottom),
+      };
+    }
+    function formatAxisTickValue(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return '-';
+      if (Math.abs(n) >= 1000) return formatNumber(n, 0);
+      if (Math.abs(n - Math.round(n)) < 1e-9) return formatNumber(n, 0);
+      return formatNumber(n, Math.abs(n) < 1 ? 3 : 2);
+    }
+    function finiteNumber(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+    function clampNumber(value, min, max) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      return Math.min(max, Math.max(min, n));
+    }
+    function clampRangeToAxis(axis, minValue, maxValue) {
+      const domain = axisDomainRange(axis);
+      const min = Number(minValue);
+      const max = Number(maxValue);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+      const lo = Math.min(min, max);
+      const hi = Math.max(min, max);
+      if (hi < domain.min || lo > domain.max) return null;
+      return {
+        min: Math.max(domain.min, lo),
+        max: Math.min(domain.max, hi),
+        outsideDomain: lo < domain.min || hi > domain.max,
+      };
+    }
+    function valueToBin(axis, value) {
+      const count = axisBinCount(axis);
+      const res = Math.max(Math.abs(Number(axis?.resolution) || 1), 1e-12);
+      return Math.max(0, Math.min(count - 1, Math.floor((Number(value) - Number(axis.domainMin)) / res)));
+    }
     function goalMaskAxisPairs(goal) {
       const axes = goal?.axes || [];
       const pairs = [];
@@ -2411,6 +2462,116 @@
       state.adminFocusedMaskBuilder = builder;
       return builder;
     }
+    function goalMaskBuilderSelectionStatus(goal=state.draftGoal, builder=ensureAdminFocusedMaskBuilder(goal)) {
+      const xAxis = axisByName(goal, builder.xAxis);
+      const yAxis = axisByName(goal, builder.yAxis);
+      const xMin = finiteNumber(builder.xMin);
+      const xMax = finiteNumber(builder.xMax);
+      const yMin = finiteNumber(builder.yMin);
+      const yMax = finiteNumber(builder.yMax);
+      const result = {
+        valid:false,
+        outsideDomain:false,
+        message:'Select a valid range first.',
+        selection:null,
+      };
+      if (!xAxis || !yAxis || xAxis.name === yAxis.name) return result;
+      if (xMin === null || xMax === null || yMin === null || yMax === null) return result;
+      if (xMin > xMax || yMin > yMax) return result;
+      const clampedX = clampRangeToAxis(xAxis, xMin, xMax);
+      const clampedY = clampRangeToAxis(yAxis, yMin, yMax);
+      if (!clampedX || !clampedY) {
+        return { ...result, message:'Range is outside domain.' };
+      }
+      const startBin = { xBin:valueToBin(xAxis, clampedX.min), yBin:valueToBin(yAxis, clampedY.min) };
+      const endBin = { xBin:valueToBin(xAxis, clampedX.max), yBin:valueToBin(yAxis, clampedY.max) };
+      return {
+        valid:true,
+        outsideDomain:clampedX.outsideDomain || clampedY.outsideDomain,
+        message: clampedX.outsideDomain || clampedY.outsideDomain ? 'Range is outside domain; preview is clamped.' : '',
+        selection:{
+          xAxis:xAxis.name,
+          yAxis:yAxis.name,
+          startBin,
+          endBin,
+          xMin:clampedX.min,
+          xMax:clampedX.max,
+          yMin:clampedY.min,
+          yMax:clampedY.max,
+        },
+      };
+    }
+    function setGoalMaskRangeInputValidity(status) {
+      const node = $('goal-mask-editor');
+      if (!node) return;
+      ['xMin','xMax','yMin','yMax'].forEach(field => {
+        const input = node.querySelector(`[data-admin-focused-field="${field}"]`);
+        if (!input) return;
+        input.classList.toggle('invalid', !status.valid);
+        input.setAttribute('aria-invalid', status.valid ? 'false' : 'true');
+      });
+      node.querySelectorAll('#focused-admin-add,[data-goal-mask-mini-add]').forEach(button => {
+        const pairKey = button.dataset.goalMaskMiniAdd;
+        const enabled = pairKey
+          ? Boolean(ensureGoalMaskEditor(state.draftGoal || blankGoal()).cardSelections?.[pairKey])
+          : status.valid;
+        button.disabled = !enabled;
+        button.title = enabled ? '' : 'Select a valid range first.';
+      });
+    }
+    function syncGoalMaskSelectionFromBuilder({ redraw=true }={}) {
+      const goal = state.draftGoal || blankGoal();
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      const status = goalMaskBuilderSelectionStatus(goal, builder);
+      const editor = ensureGoalMaskEditor(goal);
+      const pairKey = projectionKey(builder.xAxis, builder.yAxis);
+      editor.activePair = [builder.xAxis, builder.yAxis];
+      if (pairKey) editor.visiblePairs[pairKey] = true;
+      if (status.valid) {
+        editor.selection = status.selection;
+        editor.cardSelections[pairKey] = status.selection;
+      } else {
+        editor.selection = null;
+        if (pairKey) delete editor.cardSelections[pairKey];
+      }
+      state.goalMaskEditor = editor;
+      saveGoalMaskEditorSettings();
+      setGoalMaskRangeInputValidity(status);
+      if (redraw) scheduleGoalMaskCanvasRefresh();
+      return status;
+    }
+    function canonicalMaskNumber(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      return Number(n.toFixed(9));
+    }
+    function canonicalFocusedMaskRuleKey(rule) {
+      const spec = rule?.guiSpec || {};
+      if ((rule?.sourceType || spec.type) !== 'focused_2d_mask') return '';
+      const ranges = {};
+      const setRange = (axis, min, max) => {
+        const axisName = String(axis || '').trim();
+        const lo = canonicalMaskNumber(Math.min(Number(min), Number(max)));
+        const hi = canonicalMaskNumber(Math.max(Number(min), Number(max)));
+        if (!axisName || lo === null || hi === null) return;
+        ranges[axisName] = [lo, hi];
+      };
+      setRange(spec.xAxis, spec.xMin, spec.xMax);
+      setRange(spec.yAxis, spec.yMin, spec.yMax);
+      Object.entries(spec.scope || {}).forEach(([axisName, item]) => {
+        if ((item?.mode || 'all') !== 'range') return;
+        setRange(axisName, item.min, item.max);
+      });
+      return JSON.stringify(Object.keys(ranges).sort().map(axisName => [axisName, ranges[axisName]]));
+    }
+    function findDuplicateFocusedMaskRule(rule, goal=state.draftGoal, ignoreId=null) {
+      const key = canonicalFocusedMaskRuleKey(rule);
+      if (!key) return null;
+      return (goal?.feasibleDomainRules || []).find(item => {
+        if (!item || item.id === ignoreId) return false;
+        return canonicalFocusedMaskRuleKey(item) === key;
+      }) || null;
+    }
     function adminFocusedMaskRuleFromBuilder(goal=state.draftGoal, id=null) {
       const builder = ensureAdminFocusedMaskBuilder(goal);
       const scope = {};
@@ -2508,6 +2669,7 @@
       const visiblePairs = pairs.filter(pair => editor.visiblePairs[projectionKey(pair[0], pair[1])] !== false);
       const remainingAxes = axes.filter(axis => axis.name !== xAxis && axis.name !== yAxis);
       const draftRule = adminFocusedMaskRuleFromBuilder(goal, builder.editingRuleId || null);
+      const selectionStatus = goalMaskBuilderSelectionStatus(goal, builder);
       node.innerHTML = `<div class="rule-builder-card">
         <div>
           <h4>2D Mask Editor</h4>
@@ -2539,17 +2701,18 @@
               </div>
             </div>
             <div class="focused-mask-fields">
-              <label>${escapeHtml(xAxis)} min<input data-admin-focused-field="xMin" type="number" step="any" value="${escapeHtml(builder.xMin)}"></label>
-              <label>${escapeHtml(xAxis)} max<input data-admin-focused-field="xMax" type="number" step="any" value="${escapeHtml(builder.xMax)}"></label>
-              <label>${escapeHtml(yAxis)} min<input data-admin-focused-field="yMin" type="number" step="any" value="${escapeHtml(builder.yMin)}"></label>
-              <label>${escapeHtml(yAxis)} max<input data-admin-focused-field="yMax" type="number" step="any" value="${escapeHtml(builder.yMax)}"></label>
+              <label>${escapeHtml(xAxis)} min<input class="${selectionStatus.valid ? '' : 'invalid'}" data-admin-focused-field="xMin" type="number" step="any" value="${escapeHtml(builder.xMin)}" aria-invalid="${selectionStatus.valid ? 'false' : 'true'}"></label>
+              <label>${escapeHtml(xAxis)} max<input class="${selectionStatus.valid ? '' : 'invalid'}" data-admin-focused-field="xMax" type="number" step="any" value="${escapeHtml(builder.xMax)}" aria-invalid="${selectionStatus.valid ? 'false' : 'true'}"></label>
+              <label>${escapeHtml(yAxis)} min<input class="${selectionStatus.valid ? '' : 'invalid'}" data-admin-focused-field="yMin" type="number" step="any" value="${escapeHtml(builder.yMin)}" aria-invalid="${selectionStatus.valid ? 'false' : 'true'}"></label>
+              <label>${escapeHtml(yAxis)} max<input class="${selectionStatus.valid ? '' : 'invalid'}" data-admin-focused-field="yMax" type="number" step="any" value="${escapeHtml(builder.yMax)}" aria-invalid="${selectionStatus.valid ? 'false' : 'true'}"></label>
             </div>
             <div>
               <strong>Generated Expression Preview</strong>
               <div class="rule-expression-preview" id="focused-admin-expression">Generated expression: ${escapeHtml(draftRule.expression || 'incomplete rule')}</div>
+              <div class="small" id="focused-admin-range-warning">${selectionStatus.message ? escapeHtml(selectionStatus.message) : ''}</div>
             </div>
             <div class="row-actions">
-              <button class="secondary" id="focused-admin-add" type="button">Add Mask</button>
+              <button class="secondary" id="focused-admin-add" type="button" ${selectionStatus.valid ? '' : 'disabled title="Select a valid range first."'}>Add Mask</button>
               <button class="secondary" id="focused-admin-save" type="button" ${builder.editingRuleId ? '' : 'disabled'}>Save Changes</button>
               <button class="ghost" id="focused-admin-reset" type="button">Reset Tool</button>
             </div>
@@ -2613,6 +2776,68 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       return { ctx, width, height };
     }
+    function goalMaskCoordinateSystem(width, height, xAxis, yAxis, view, isActive=false) {
+      const plot = goalMaskPlotArea(width, height, isActive);
+      const xRange = axisDomainRange(xAxis);
+      const yRange = axisDomainRange(yAxis);
+      const xSpan = Math.max(1e-12, xRange.max - xRange.min);
+      const ySpan = Math.max(1e-12, yRange.max - yRange.min);
+      const zoom = Math.max(1, Math.min(80, Number(view?.zoom) || 1));
+      const panX = Number(view?.panX) || 0;
+      const panY = Number(view?.panY) || 0;
+      const contentWidth = plot.width * zoom;
+      const contentHeight = plot.height * zoom;
+      const xToPx = value => plot.x + panX + ((Number(value) - xRange.min) / xSpan) * contentWidth;
+      const yToPx = value => plot.y + panY + contentHeight - ((Number(value) - yRange.min) / ySpan) * contentHeight;
+      const pxToXValue = px => xRange.min + ((px - plot.x - panX) / contentWidth) * xSpan;
+      const pxToYValue = py => yRange.min + ((plot.y + panY + contentHeight - py) / contentHeight) * ySpan;
+      return { plot, xRange, yRange, xSpan, ySpan, zoom, panX, panY, contentWidth, contentHeight, xToPx, yToPx, pxToXValue, pxToYValue };
+    }
+    function drawGoalMaskTicks(ctx, width, height, xAxis, yAxis, coords, isActive=false) {
+      const { plot, xRange, yRange, pxToXValue, pxToYValue, xToPx, yToPx } = coords;
+      const tickCount = isActive ? 5 : 3;
+      const fontSize = isActive ? 11 : 10;
+      ctx.save();
+      ctx.fillStyle = '#667789';
+      ctx.strokeStyle = 'rgba(23,33,43,.18)';
+      ctx.lineWidth = 1;
+      ctx.font = `${fontSize}px Segoe UI, Arial, sans-serif`;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'center';
+      const visibleXMin = Math.max(xRange.min, Math.min(xRange.max, pxToXValue(plot.x)));
+      const visibleXMax = Math.max(xRange.min, Math.min(xRange.max, pxToXValue(plot.x + plot.width)));
+      const visibleYBottom = Math.max(yRange.min, Math.min(yRange.max, pxToYValue(plot.y + plot.height)));
+      const visibleYTop = Math.max(yRange.min, Math.min(yRange.max, pxToYValue(plot.y)));
+      for (let i = 0; i < tickCount; i += 1) {
+        const t = tickCount === 1 ? 0 : i / (tickCount - 1);
+        const value = visibleXMin + (visibleXMax - visibleXMin) * t;
+        const x = Math.max(plot.x, Math.min(plot.x + plot.width, xToPx(value)));
+        ctx.beginPath(); ctx.moveTo(x, plot.y + plot.height); ctx.lineTo(x, plot.y + plot.height + 4); ctx.stroke();
+        ctx.fillText(formatAxisTickValue(value), x, plot.y + plot.height + 7);
+      }
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < tickCount; i += 1) {
+        const t = tickCount === 1 ? 0 : i / (tickCount - 1);
+        const value = visibleYBottom + (visibleYTop - visibleYBottom) * t;
+        const y = Math.max(plot.y, Math.min(plot.y + plot.height, yToPx(value)));
+        ctx.beginPath(); ctx.moveTo(plot.x - 4, y); ctx.lineTo(plot.x, y); ctx.stroke();
+        ctx.fillText(formatAxisTickValue(value), plot.x - 6, y);
+      }
+      ctx.strokeStyle = '#d9e2ea';
+      ctx.strokeRect(plot.x, plot.y, plot.width, plot.height);
+      if (isActive) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(axisLabel(xAxis), plot.x + plot.width / 2, height - 3);
+        ctx.save();
+        ctx.translate(10, plot.y + plot.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText(axisLabel(yAxis), 0, 0);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
     function drawGoalMaskProjection(canvas, xAxisName, yAxisName, options={}) {
       const goal = state.draftGoal || blankGoal();
       const xAxis = axisByName(goal, xAxisName);
@@ -2621,41 +2846,35 @@
       const mini = Boolean(options.mini);
       const { ctx, width, height } = setupGoalMaskCanvas(canvas, mini ? 180 : 320, mini ? 140 : 360);
       const editor = ensureGoalMaskEditor(goal);
-      const xRange = axisDomainRange(xAxis);
-      const yRange = axisDomainRange(yAxis);
-      const xSpan = Math.max(1e-12, xRange.max - xRange.min);
-      const ySpan = Math.max(1e-12, yRange.max - yRange.min);
       const xBins = axisBinCount(xAxis);
       const yBins = axisBinCount(yAxis);
       const pairKey = projectionKey(xAxisName, yAxisName);
       const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
       const isActive = pairKey === activeKey;
       const view = isActive ? goalMaskViewForPair(pairKey, editor) : { zoom:1, panX:0, panY:0 };
-      const zoom = Math.max(1, Math.min(80, Number(view.zoom) || 1));
-      const panX = Number(view.panX) || 0;
-      const panY = Number(view.panY) || 0;
       canvas.dataset.xBins = String(xBins);
       canvas.dataset.yBins = String(yBins);
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, width, height);
-      const xToPx = value => panX + ((Number(value) - xRange.min) / xSpan) * width * zoom;
-      const yToPx = value => panY + height * zoom - ((Number(value) - yRange.min) / ySpan) * height * zoom;
+      const coords = goalMaskCoordinateSystem(width, height, xAxis, yAxis, view, isActive);
+      const { plot, xRange, yRange, xToPx, yToPx, zoom, panX, panY } = coords;
+      drawGoalMaskTicks(ctx, width, height, xAxis, yAxis, coords, isActive);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, 0, width, height);
+      ctx.rect(plot.x, plot.y, plot.width, plot.height);
       ctx.clip();
       ctx.strokeStyle = 'rgba(23,33,43,.10)';
       ctx.lineWidth = 1;
       const xStep = Math.max(1, Math.ceil(xBins / (mini ? 16 : 80)));
       const yStep = Math.max(1, Math.ceil(yBins / (mini ? 16 : 80)));
       for (let i=0; i<=xBins; i+=xStep) {
-        const x = panX + (i / xBins) * width * zoom;
-        ctx.beginPath(); ctx.moveTo(x, panY); ctx.lineTo(x, panY + height * zoom); ctx.stroke();
+        const x = plot.x + panX + (i / xBins) * plot.width * zoom;
+        ctx.beginPath(); ctx.moveTo(x, plot.y + panY); ctx.lineTo(x, plot.y + panY + plot.height * zoom); ctx.stroke();
       }
       for (let i=0; i<=yBins; i+=yStep) {
-        const y = panY + (i / yBins) * height * zoom;
-        ctx.beginPath(); ctx.moveTo(panX, y); ctx.lineTo(panX + width * zoom, y); ctx.stroke();
+        const y = plot.y + panY + (i / yBins) * plot.height * zoom;
+        ctx.beginPath(); ctx.moveTo(plot.x + panX, y); ctx.lineTo(plot.x + panX + plot.width * zoom, y); ctx.stroke();
       }
       if (editor.showProjectedMasks) {
         (goal.feasibleDomainRules || []).forEach(rule => {
@@ -2720,11 +2939,6 @@
         ctx.setLineDash([]);
       }
       ctx.restore();
-      if (!mini) {
-        ctx.fillStyle = '#17212b';
-        ctx.font = '12px Segoe UI, Arial, sans-serif';
-        ctx.fillText(`${xAxisName} × ${yAxisName}`, 12, 20);
-      }
     }
     function refreshGoalMaskCanvases() {
       document.querySelectorAll('canvas[data-goal-mask-mini]').forEach(canvas => {
@@ -2742,15 +2956,14 @@
       const pairKey = projectionKey(canvas.dataset.xAxis, canvas.dataset.yAxis);
       const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
       const view = (mini && pairKey === activeKey) ? goalMaskViewForPair(pairKey, editor) : { zoom:1, panX:0, panY:0 };
-      const zoom = Math.max(1, Math.min(80, Number(view.zoom) || 1));
-      const panX = Number(view.panX) || 0;
-      const panY = Number(view.panY) || 0;
-      const localX = event.clientX - rect.left - panX;
-      const localY = event.clientY - rect.top - panY;
+      const coords = goalMaskCoordinateSystem(rect.width, rect.height, xAxis, yAxis, view, pairKey === activeKey);
+      const { plot, pxToXValue, pxToYValue } = coords;
+      const mouseX = Math.max(plot.x, Math.min(plot.x + plot.width, event.clientX - rect.left));
+      const mouseY = Math.max(plot.y, Math.min(plot.y + plot.height, event.clientY - rect.top));
       const xBins = axisBinCount(xAxis);
       const yBins = axisBinCount(yAxis);
-      const xBin = Math.floor(localX / Math.max(1e-9, (rect.width / xBins) * zoom));
-      const yBin = yBins - 1 - Math.floor(localY / Math.max(1e-9, (rect.height / yBins) * zoom));
+      const xBin = Math.floor((pxToXValue(mouseX) - Number(xAxis.domainMin)) / Math.max(1e-12, Math.abs(Number(xAxis.resolution) || 1)));
+      const yBin = Math.floor((pxToYValue(mouseY) - Number(yAxis.domainMin)) / Math.max(1e-12, Math.abs(Number(yAxis.resolution) || 1)));
       return {
         xBin:Math.max(0, Math.min(xBins - 1, xBin)),
         yBin:Math.max(0, Math.min(yBins - 1, yBin)),
@@ -2812,9 +3025,26 @@
       return true;
     }
     function appendAdminFocusedMaskRuleFromBuilder() {
+      const status = syncGoalMaskSelectionFromBuilder({ redraw:false });
+      if (!status.valid) {
+        setAdminMessage('error', status.message || 'Focused 2D Mask range is incomplete or invalid.');
+        return false;
+      }
+      const builder = ensureAdminFocusedMaskBuilder(state.draftGoal);
+      builder.xMin = status.selection.xMin;
+      builder.xMax = status.selection.xMax;
+      builder.yMin = status.selection.yMin;
+      builder.yMax = status.selection.yMax;
+      state.adminFocusedMaskBuilder = builder;
       const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal, null);
       if (!rule.expression) {
         setAdminMessage('error', 'Focused 2D Mask range is incomplete or invalid.');
+        return false;
+      }
+      const duplicate = findDuplicateFocusedMaskRule(rule, state.draftGoal);
+      if (duplicate) {
+        setAdminMessage('error', '이미 같은 Mask가 존재합니다.');
+        loadAdminFocusedRuleIntoBuilder(duplicate.id);
         return false;
       }
       state.draftGoal.feasibleDomainRules = [...(state.draftGoal.feasibleDomainRules || []), rule];
@@ -3137,7 +3367,7 @@
       ['xAxis','yAxis','xMin','xMax','yMin','yMax'].forEach(field => {
         const input = node.querySelector(`[data-admin-focused-field="${field}"]`);
         if (!input) return;
-        builder[field] = field.endsWith('Axis') ? input.value : Number(input.value);
+        builder[field] = field.endsWith('Axis') ? input.value : (input.value === '' ? NaN : Number(input.value));
       });
       builder.scope = builder.scope || {};
       node.querySelectorAll('[data-admin-focused-scope]').forEach(item => {
@@ -3146,8 +3376,8 @@
         if (mode === 'range') {
           builder.scope[axisName] = {
             mode:'range',
-            min:Number(item.querySelector('[data-admin-focused-scope-field="min"]')?.value),
-            max:Number(item.querySelector('[data-admin-focused-scope-field="max"]')?.value),
+            min:item.querySelector('[data-admin-focused-scope-field="min"]')?.value === '' ? NaN : Number(item.querySelector('[data-admin-focused-scope-field="min"]')?.value),
+            max:item.querySelector('[data-admin-focused-scope-field="max"]')?.value === '' ? NaN : Number(item.querySelector('[data-admin-focused-scope-field="max"]')?.value),
           };
         } else {
           builder.scope[axisName] = { mode:'all' };
@@ -3159,10 +3389,12 @@
     function refreshAdminFocusedMaskBuilderPreview() {
       readAdminFocusedMaskBuilderFromForm();
       const node = $('focused-admin-expression');
-      if (!node) return;
+      const status = syncGoalMaskSelectionFromBuilder({ redraw:false });
       const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal);
-      node.textContent = `Generated expression: ${rule.expression || 'incomplete rule'}`;
-      refreshGoalMaskCanvases();
+      if (node) node.textContent = `Generated expression: ${rule.expression || 'incomplete rule'}`;
+      const warning = $('focused-admin-range-warning');
+      if (warning) warning.textContent = status.message || '';
+      scheduleGoalMaskCanvasRefresh();
     }
     function resetAdminFocusedMaskBuilder() {
       state.adminFocusedMaskBuilder = defaultAdminFocusedMaskBuilder(state.draftGoal || blankGoal());
@@ -3187,9 +3419,25 @@
         setAdminMessage('error', '편집할 Focused 2D Mask rule을 먼저 선택하세요.');
         return;
       }
+      const status = syncGoalMaskSelectionFromBuilder({ redraw:false });
+      if (!status.valid) {
+        setAdminMessage('error', status.message || 'Focused 2D Mask range is incomplete or invalid.');
+        return;
+      }
+      builder.xMin = status.selection.xMin;
+      builder.xMax = status.selection.xMax;
+      builder.yMin = status.selection.yMin;
+      builder.yMax = status.selection.yMax;
+      state.adminFocusedMaskBuilder = builder;
       const rule = adminFocusedMaskRuleFromBuilder(state.draftGoal, builder.editingRuleId);
       if (!rule.expression) {
         setAdminMessage('error', 'Focused 2D Mask range is incomplete or invalid.');
+        return;
+      }
+      const duplicate = findDuplicateFocusedMaskRule(rule, state.draftGoal, builder.editingRuleId);
+      if (duplicate) {
+        setAdminMessage('error', '이미 같은 Mask가 존재합니다.');
+        loadAdminFocusedRuleIntoBuilder(duplicate.id);
         return;
       }
       state.draftGoal.feasibleDomainRules = (state.draftGoal.feasibleDomainRules || []).map(item => item.id === builder.editingRuleId ? rule : item);
@@ -3734,7 +3982,13 @@
         event.preventDefault();
         const rect = canvas.getBoundingClientRect();
         const view = goalMaskViewForPair(pairKey, editor);
-        zoomGoalMaskAtPoint(view, event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1.18 : 1 / 1.18);
+        const xAxis = axisByName(state.draftGoal || blankGoal(), canvas.dataset.xAxis);
+        const yAxis = axisByName(state.draftGoal || blankGoal(), canvas.dataset.yAxis);
+        const plot = goalMaskPlotArea(rect.width, rect.height, true);
+        const mouseX = Math.max(0, Math.min(plot.width, event.clientX - rect.left - plot.x));
+        const mouseY = Math.max(0, Math.min(plot.height, event.clientY - rect.top - plot.y));
+        if (!xAxis || !yAxis) return;
+        zoomGoalMaskAtPoint(view, mouseX, mouseY, event.deltaY < 0 ? 1.18 : 1 / 1.18);
         editor.viewByPair[pairKey] = view;
         state.goalMaskEditor = editor;
         saveGoalMaskEditorSettings();
