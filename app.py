@@ -30,7 +30,7 @@ from feasible_box_counter import (
 )
 from feasible_mask import normalize_feasible_expressions
 from models import K_M, DensityDiagnosisResult, ExperimentConfig
-from stats_engine import BinGridTracker, DensityGridAnalyzer
+from stats_engine import BinGridTracker, DensityGridAnalyzer, compute_density_confidence
 from storage import (
     CLUSTER_STORE_PATH,
     GOAL_STORE_PATH,
@@ -81,6 +81,18 @@ def canonical_axis_order(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted((dict(axis) for axis in axes), key=lambda axis: normalize_axis_name(axis.get("name")))
 
 
+def axis_role(axis: dict[str, Any]) -> str:
+    return "output" if str(axis.get("role") or "").strip().lower() == "output" else "input"
+
+
+def input_axes_for_goal(goal: dict[str, Any]) -> list[dict[str, Any]]:
+    return [axis for axis in canonical_axis_order(goal.get("axes", [])) if axis_role(axis) == "input"]
+
+
+def output_axes_for_goal(goal: dict[str, Any]) -> list[dict[str, Any]]:
+    return [axis for axis in canonical_axis_order(goal.get("axes", [])) if axis_role(axis) == "output"]
+
+
 def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = None) -> dict[str, Any]:
     if not selected_axis_names:
         axes = canonical_axis_order(goal["axes"])
@@ -90,10 +102,13 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
     if not axes:
         raise ValueError("분석에 포함할 Axis를 하나 이상 선택하세요.")
     axis_name_set = {str(axis["name"]) for axis in axes}
+    input_axis_name_set = {str(axis["name"]) for axis in axes if axis_role(axis) == "input"}
+    if not input_axis_name_set:
+        raise ValueError("At least one input axis is required for Confidence and feasible design masks.")
     feasible_rules = [
         dict(rule)
         for rule in goal.get("feasibleDomainRules") or []
-        if rule_axes(rule).issubset(axis_name_set)
+        if rule.get("enabled", True) and rule_axes(rule).issubset(input_axis_name_set)
     ]
     feasible_expressions = [
         str(rule.get("expression") or "").strip()
@@ -105,6 +120,8 @@ def goal_subset(goal: dict[str, Any], selected_axis_names: list[str] | None = No
         "name": goal["name"],
         "K_m": float(goal.get("K_m", K_M)),
         "axes": axes,
+        "inputAxisNames": [axis["name"] for axis in axes if axis_role(axis) == "input"],
+        "outputAxisNames": [axis["name"] for axis in axes if axis_role(axis) == "output"],
         "feasibleDomainRules": feasible_rules,
         "legacyAdvancedExpressions": normalize_feasible_expressions(goal.get("legacyAdvancedExpressions")),
         "feasibleDomainAdvancedExpressions": [],
@@ -203,7 +220,9 @@ def nullable_numeric_delta(current: Any, previous: Any) -> float | None:
 
 
 def feasible_mask_info_for_goal(selected_goal: dict[str, Any]) -> dict[str, Any]:
-    axes = canonical_axis_order(selected_goal["axes"])
+    axes = input_axes_for_goal(selected_goal)
+    if not axes:
+        raise ValueError("At least one input axis is required for a_valid.")
     rules = selected_goal.get("feasibleDomainRules") or []
     boxes = compile_rules_to_mask_boxes(rules, axes)
     total_bins = compute_rectangular_total_bins(axes)
@@ -687,7 +706,11 @@ def build_projection_explorer(
     coverage_info: dict[str, Any] | None,
     target_row_bin_tuples: list[Any] | None,
 ) -> dict[str, Any]:
-    axes = canonical_axis_order(goal["axes"])
+    all_axes = canonical_axis_order(goal["axes"])
+    axes = [axis for axis in all_axes if axis_role(axis) == "input"]
+    if not axes:
+        axes = all_axes
+    axis_index_by_name = {axis["name"]: index for index, axis in enumerate(all_axes)}
     axis_order = [str(axis["name"]) for axis in axes]
     axis_meta = projection_axis_meta(axes)
     all_axis_pairs = [[x_axis, y_axis] for x_axis, y_axis in itertools.combinations(axis_order, 2)]
@@ -738,7 +761,7 @@ def build_projection_explorer(
 
 
 def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverage_info: dict[str, Any]) -> dict[str, Any]:
-    bin_counts = coverage_info.get("binCounts", {}) if isinstance(coverage_info, dict) else {}
+    bin_counts = (coverage_info.get("designBinCounts") or coverage_info.get("binCounts", {})) if isinstance(coverage_info, dict) else {}
     counts = [int(value) for value in bin_counts.values() if int(value) > 0]
     peer_valid_rows = int(sum(counts))
     mask_info = feasible_mask_info_for_goal(selected_goal)
@@ -803,13 +826,16 @@ def build_report_visualizations(
     target_row_vectors: list[Any] | None = None,
     target_row_vector_axis_order: list[str] | None = None,
 ) -> dict[str, Any]:
-    axes = canonical_axis_order(goal["axes"])
+    all_axes = canonical_axis_order(goal["axes"])
+    axes = [axis for axis in all_axes if axis_role(axis) == "input"] or all_axes
+    axis_index_by_name = {axis["name"]: index for index, axis in enumerate(all_axes)}
     coverage_axes = []
     equitability_axes = []
     axis_bin_counts = coverage_info.get("axisBinCounts", {}) if isinstance(coverage_info, dict) else {}
     axis_bin_counts_by_key = {normalize_axis_name(axis_name): counts for axis_name, counts in axis_bin_counts.items()}
 
-    for index, axis in enumerate(axes):
+    for axis in axes:
+        index = axis_index_by_name.get(axis["name"], 0)
         total_axis_bins = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
         row_level_counts = axis_bin_counts_by_key.get(normalize_axis_name(axis["name"]), {})
         distribution = build_axis_distribution_from_counts(row_level_counts, total_axis_bins)
@@ -893,7 +919,7 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
             "label": "Coverage",
             "score": round(float(result.coverage_C), 4),
             "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage measures how much of the feasible density grid is occupied by target-included reference row-level observations.",
+            "message": "Coverage measures how much of the feasible input design grid is occupied by target-included reference row-level observations. Output axes are excluded from Coverage.",
         }
     reasons = [
         {
@@ -907,7 +933,7 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
             "label": "Equitability",
             "score": round(float(result.equitability_E), 4),
             "impact": "down" if result.equitability_E < 0.5 else "stable",
-            "message": "Equitability measures whether reference observations are balanced across occupied density bins.",
+            "message": "Equitability measures whether reference observations are balanced across occupied input design bins.",
         },
     ]
     if warnings:
@@ -938,7 +964,7 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
     if result.observation_support_S < 0.5:
         messages.append("Observation Support is low. Add more row-level observations or saved external records with row-level sanitized axis vectors.")
     if result.coverage_C is not None and result.coverage_C < 0.3:
-        messages.append("Coverage is low. The target-included reference density map occupies only a small portion of the feasible domain-resolution grid.")
+        messages.append("Coverage is low. The target-included reference density map occupies only a small portion of the feasible input design grid.")
     if result.equitability_E < 0.5:
         messages.append("Equitability is low. Reference observations are concentrated in a small number of occupied bins.")
     if result.unseen_bin_rate > 0:
@@ -1272,6 +1298,26 @@ def recompute_bin_occupancy_from_row_vectors(
     }
 
 
+def design_goal_for_selected(goal: dict[str, Any], selected_goal: dict[str, Any]) -> dict[str, Any]:
+    design_axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"]) if axis_role(axis) == "input"]
+    if not design_axis_names:
+        raise ValueError("At least one input axis is required for Confidence.")
+    return goal_subset(goal, design_axis_names)
+
+
+def recompute_design_counts_from_vectors(
+    row_vectors: list[Any],
+    axis_order: list[str],
+    goal: dict[str, Any],
+    selected_goal: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, Any]]:
+    design_goal = design_goal_for_selected(goal, selected_goal)
+    recomputed = recompute_bin_occupancy_from_row_vectors(row_vectors, axis_order, design_goal)
+    if recomputed is None:
+        return {}, {"validMultidimensionalRowCount": 0, "totalRows": 0}
+    return recomputed["bin_occupancy"], recomputed["bin_occupancy_meta"]
+
+
 def build_global_bin_counts(peer_clusters: list[dict[str, Any]], selected_goal: dict[str, Any] | list[str]) -> dict[str, Any]:
     if isinstance(selected_goal, dict):
         canonical_axes = canonical_axis_order(selected_goal["axes"])
@@ -1527,8 +1573,17 @@ def run_density_analysis(
     target_meta: dict[str, Any],
     target_vector: np.ndarray | None = None,
     exclude_cluster_id: str | None = None,
+    target_design_bin_counts: dict[str, int] | None = None,
+    target_design_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]
+    design_goal = design_goal_for_selected(goal, selected_goal)
+    design_axis_names = [axis["name"] for axis in canonical_axis_order(design_goal["axes"])]
+    output_axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"]) if axis_role(axis) == "output"]
+    if target_design_bin_counts is None:
+        target_design_bin_counts = target_bin_counts if design_axis_names == axis_names else {}
+    if target_design_meta is None:
+        target_design_meta = target_meta if design_axis_names == axis_names else {}
     config = experiment_config_from_goal(selected_goal)
     peer_clusters = analysis_peer_clusters(goal, axis_names, exclude_cluster_id)
     peer_rows = [{"id": str(cluster.get("id", "")), "source": "stored", "values": [float(value) for value in cluster["values"]]} for cluster in peer_clusters]
@@ -1536,10 +1591,14 @@ def run_density_analysis(
     if peer_group.size == 0:
         peer_group = np.empty((0, len(axis_names)), dtype=float)
     coverage_info = build_global_bin_counts(peer_clusters, selected_goal)
+    design_coverage_info = build_global_bin_counts(peer_clusters, design_goal)
     warnings = out_of_domain_warnings(selected_goal, target_meta)
     external_bin_counts = {str(key): int(value) for key, value in (coverage_info.get("binCounts") or {}).items()}
     reference_bin_counts = dict(external_bin_counts)
     merge_count_maps(reference_bin_counts, target_bin_counts)
+    design_external_bin_counts = {str(key): int(value) for key, value in (design_coverage_info.get("binCounts") or {}).items()}
+    design_reference_bin_counts = dict(design_external_bin_counts)
+    merge_count_maps(design_reference_bin_counts, target_design_bin_counts or {})
     external_peer_record_count = int(coverage_info.get("coverageEligibleClusterCount") or 0)
     external_peer_observation_count = count_map_total(external_bin_counts)
     reference_observation_count = count_map_total(reference_bin_counts)
@@ -1566,8 +1625,22 @@ def run_density_analysis(
         feasible_mask_enabled=bool(coverage_info.get("feasibleMaskEnabled")),
     )
     result = analyzer.diagnose(target_bin_counts, target_meta)
+    design_observation_support, design_coverage, design_equitability, design_confidence = compute_density_confidence(
+        design_reference_bin_counts,
+        design_coverage_info.get("validBins"),
+        float(selected_goal.get("K_m", K_M)),
+    )
+    result.observation_support_S = float(design_observation_support)
+    result.coverage_C = None if design_coverage is None else float(design_coverage)
+    result.equitability_E = float(design_equitability)
+    result.confidence = design_confidence
+    result.peer_observation_count = count_map_total(design_reference_bin_counts)
+    result.valid_bins = int(design_coverage_info["validBins"]) if design_coverage_info.get("validBins") is not None else None
+    result.masked_bins = int(design_coverage_info["maskedBins"]) if design_coverage_info.get("maskedBins") is not None else 0
+    result.occupied_bins = len(design_reference_bin_counts)
     result_payload = result.to_payload(config.axis_names)
-    result_payload["totalBins"] = result_payload.get("total_bins")
+    result_payload["specificityTotalBins"] = result_payload.get("total_bins")
+    result_payload["totalBins"] = design_coverage_info.get("rectangularTotalBins", result_payload.get("total_bins"))
     result_payload["validTargetRows"] = result_payload.get("valid_target_rows")
     result_payload["outOfDomainRows"] = result_payload.get("out_of_domain_rows")
     result_payload["maskedOutTargetRows"] = result_payload.get("masked_out_target_rows")
@@ -1575,33 +1648,46 @@ def run_density_analysis(
     result_payload["occupiedBins"] = result_payload.get("occupied_bins")
     result_payload["outOfDomainWarnings"] = warnings
     result_payload["outOfDomainWarningCount"] = len(warnings)
-    result_payload["coverageBasis"] = coverage_info["coverageBasis"]
-    result_payload["coverageEligibleClusterCount"] = coverage_info["coverageEligibleClusterCount"]
-    result_payload["coverageLegacyExcludedClusterCount"] = coverage_info["coverageLegacyExcludedClusterCount"]
-    result_payload["coverageGridSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
-    result_payload["coverageAxisSignatureExcludedClusterCount"] = coverage_info["coverageGridSignatureExcludedClusterCount"]
+    result_payload["coverageBasis"] = "input_design_row_level_bin_occupancy"
+    result_payload["coverageEligibleClusterCount"] = design_coverage_info["coverageEligibleClusterCount"]
+    result_payload["coverageLegacyExcludedClusterCount"] = design_coverage_info["coverageLegacyExcludedClusterCount"]
+    result_payload["coverageGridSignatureExcludedClusterCount"] = design_coverage_info["coverageGridSignatureExcludedClusterCount"]
+    result_payload["coverageAxisSignatureExcludedClusterCount"] = design_coverage_info["coverageGridSignatureExcludedClusterCount"]
     result_payload["rowLevelObservationCount"] = reference_observation_count
     result_payload["gridSignature"] = coverage_info["gridSignature"]
-    result_payload["validBins"] = coverage_info.get("validBins", result.valid_bins)
-    result_payload["maskedBins"] = coverage_info.get("maskedBins", result.masked_bins)
-    result_payload["aValid"] = coverage_info.get("aValid", coverage_info.get("validBins", result.valid_bins))
-    result_payload["rectangularTotalBins"] = coverage_info.get("rectangularTotalBins", result.total_bins)
-    result_payload["aValidStatus"] = coverage_info.get("aValidStatus", "stale")
-    result_payload["aValidProgressPercent"] = coverage_info.get("aValidProgressPercent", 0)
-    result_payload["aValidMode"] = coverage_info.get("aValidMode", "exact_box_union")
-    result_payload["maskBoxCount"] = coverage_info.get("maskBoxCount", 0)
+    result_payload["validBins"] = design_coverage_info.get("validBins", result.valid_bins)
+    result_payload["maskedBins"] = design_coverage_info.get("maskedBins", result.masked_bins)
+    result_payload["aValid"] = design_coverage_info.get("aValid", design_coverage_info.get("validBins", result.valid_bins))
+    result_payload["rectangularTotalBins"] = design_coverage_info.get("rectangularTotalBins")
+    result_payload["aValidStatus"] = design_coverage_info.get("aValidStatus", "stale")
+    result_payload["aValidProgressPercent"] = design_coverage_info.get("aValidProgressPercent", 0)
+    result_payload["aValidMode"] = design_coverage_info.get("aValidMode", "exact_box_union")
+    result_payload["maskBoxCount"] = design_coverage_info.get("maskBoxCount", 0)
     result_payload["coveragePending"] = result_payload.get("coverage_C") is None
     result_payload["confidencePending"] = result_payload.get("confidence") is None
     result_payload["confidenceExact"] = result_payload.get("confidence") is not None
-    result_payload["validDomainRatio"] = coverage_info.get("validDomainRatio")
-    result_payload["valid_domain_ratio"] = coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio"))
-    result_payload["feasibleMaskEnabled"] = coverage_info.get("feasibleMaskEnabled", False)
-    result_payload["feasibleExpressions"] = coverage_info.get("feasibleExpressions", [])
-    result_payload["feasibleMaskEvaluationSkipped"] = coverage_info.get("feasibleMaskEvaluationSkipped", False)
-    result_payload["feasibleMaskWarning"] = coverage_info.get("feasibleMaskWarning", "")
-    result_payload["coverageWarning"] = coverage_info.get("coverageWarning", "")
-    result_payload["infeasiblePeerRows"] = coverage_info.get("infeasiblePeerRows", 0)
-    result_payload["infeasiblePeerBins"] = coverage_info.get("infeasiblePeerBins", 0)
+    result_payload["validDomainRatio"] = design_coverage_info.get("validDomainRatio")
+    result_payload["valid_domain_ratio"] = design_coverage_info.get("validDomainRatio", result_payload.get("valid_domain_ratio"))
+    result_payload["feasibleMaskEnabled"] = design_coverage_info.get("feasibleMaskEnabled", False)
+    result_payload["feasibleExpressions"] = design_coverage_info.get("feasibleExpressions", [])
+    result_payload["feasibleMaskEvaluationSkipped"] = design_coverage_info.get("feasibleMaskEvaluationSkipped", False)
+    result_payload["feasibleMaskWarning"] = design_coverage_info.get("feasibleMaskWarning", "")
+    result_payload["coverageWarning"] = design_coverage_info.get("coverageWarning", "")
+    result_payload["infeasiblePeerRows"] = design_coverage_info.get("infeasiblePeerRows", 0)
+    result_payload["infeasiblePeerBins"] = design_coverage_info.get("infeasiblePeerBins", 0)
+    axis_roles = {axis["name"]: axis_role(axis) for axis in canonical_axis_order(selected_goal["axes"])}
+    result_payload["axisRoles"] = axis_roles
+    result_payload["inputAxisNames"] = design_axis_names
+    result_payload["outputAxisNames"] = output_axis_names
+    result_payload["specificityAxisNames"] = axis_names
+    result_payload["confidenceAxisNames"] = design_axis_names
+    result_payload["designOccupiedBins"] = len(design_reference_bin_counts)
+    result_payload["designValidBins"] = design_coverage_info.get("validBins")
+    result_payload["designTotalBins"] = design_coverage_info.get("rectangularTotalBins")
+    result_payload["designMaskedBins"] = design_coverage_info.get("maskedBins")
+    result_payload["designCoverageC"] = result_payload.get("coverage_C")
+    result_payload["designEquitabilityE"] = result_payload.get("equitability_E")
+    result_payload["designConfidence"] = result_payload.get("confidence")
     result_payload["targetIncludedInReference"] = True
     result_payload["target_included_in_reference"] = True
     result_payload["internalDensityMode"] = internal_density_mode
@@ -1620,12 +1706,27 @@ def run_density_analysis(
     result_payload["reference_occupied_bins"] = reference_occupied_bins
     result_payload["referenceDensityPolicy"] = "target_included"
     coverage_for_result = {
-        **coverage_info,
-        "externalBinCounts": external_bin_counts,
-        "storedPeerBinCounts": external_bin_counts,
-        "binCounts": reference_bin_counts,
-        "referenceBinCounts": reference_bin_counts,
-        "externalPeerRecordCount": external_peer_record_count,
+            **coverage_info,
+            "designCoverageInfo": {key: value for key, value in design_coverage_info.items() if key not in {"binCounts", "axisBinCounts"}},
+            "externalBinCounts": external_bin_counts,
+            "storedPeerBinCounts": external_bin_counts,
+            "binCounts": reference_bin_counts,
+            "referenceBinCounts": reference_bin_counts,
+            "designBinCounts": design_reference_bin_counts,
+            "designExternalBinCounts": design_external_bin_counts,
+            "designAxisNames": design_axis_names,
+            "outputAxisNames": output_axis_names,
+            "specificityAxisNames": axis_names,
+            "confidenceAxisNames": design_axis_names,
+            "designOccupiedBins": len(design_reference_bin_counts),
+            "designValidBins": design_coverage_info.get("validBins"),
+            "designTotalBins": design_coverage_info.get("rectangularTotalBins"),
+            "designMaskedBins": design_coverage_info.get("maskedBins"),
+            "designCoverageC": result_payload.get("coverage_C"),
+            "designEquitabilityE": result_payload.get("equitability_E"),
+            "designConfidence": result_payload.get("confidence"),
+            "specificityTotalBins": result_payload.get("specificityTotalBins"),
+            "externalPeerRecordCount": external_peer_record_count,
         "peerRecordCount": external_peer_record_count,
         "externalPeerObservationCount": external_peer_observation_count,
         "referenceObservationCount": reference_observation_count,
@@ -1642,15 +1743,16 @@ def run_density_analysis(
         "peerGroup": peer_group,
         "coverageInfo": {
             **coverage_for_result,
-            "totalBins": result.total_bins,
+            "specificityTotalBins": coverage_info.get("totalBins", result.total_bins),
+            "totalBins": design_coverage_info.get("rectangularTotalBins", result.total_bins),
             "validBins": result.valid_bins,
             "maskedBins": result.masked_bins,
-            "aValid": coverage_info.get("aValid", result.valid_bins),
-            "rectangularTotalBins": coverage_info.get("rectangularTotalBins", result.total_bins),
-            "aValidStatus": coverage_info.get("aValidStatus", "stale"),
-            "aValidProgressPercent": coverage_info.get("aValidProgressPercent", 0),
-            "aValidMode": coverage_info.get("aValidMode", "exact_box_union"),
-            "maskBoxCount": coverage_info.get("maskBoxCount", 0),
+            "aValid": design_coverage_info.get("aValid", result.valid_bins),
+            "rectangularTotalBins": design_coverage_info.get("rectangularTotalBins"),
+            "aValidStatus": design_coverage_info.get("aValidStatus", "stale"),
+            "aValidProgressPercent": design_coverage_info.get("aValidProgressPercent", 0),
+            "aValidMode": design_coverage_info.get("aValidMode", "exact_box_union"),
+            "maskBoxCount": design_coverage_info.get("maskBoxCount", 0),
             "occupiedBins": result.occupied_bins,
         },
         "warnings": warnings,
@@ -1661,7 +1763,12 @@ def run_density_analysis(
             axis_names,
             len(peer_group),
             warnings,
-            coverage_info={**coverage_for_result, "totalBins": result.total_bins, "occupiedBins": result.occupied_bins},
+            coverage_info={
+                **coverage_for_result,
+                "specificityTotalBins": result.total_bins,
+                "totalBins": design_coverage_info.get("rectangularTotalBins", result.total_bins),
+                "occupiedBins": result.occupied_bins,
+            },
         ),
     }
 
@@ -1691,6 +1798,12 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
     axis_names = [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]
     key = peer_group_key(str(goal["id"]), axis_names)
     cluster_vector, dataset_meta = build_dataset_summary(rows, axis_mapping, selected_goal)
+    target_design_counts, target_design_meta = recompute_design_counts_from_vectors(
+        dataset_meta.get("row_level_vectors", []),
+        dataset_meta.get("row_level_vector_axis_order", []),
+        goal,
+        selected_goal,
+    )
     saved_cluster = None
     saved_cluster_is_new = False
 
@@ -1701,6 +1814,8 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             dataset_meta.get("bin_occupancy", {}),
             dataset_meta.get("bin_occupancy_meta", {}),
             cluster_vector,
+            target_design_bin_counts=target_design_counts,
+            target_design_meta=target_design_meta,
         )
     except ValueError as exc:
         peer_clusters = analysis_peer_clusters(goal, axis_names)
@@ -1888,12 +2003,20 @@ def analyze_batch_request(payload: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             try:
+                target_design_counts, target_design_meta = recompute_design_counts_from_vectors(
+                    dataset_meta.get("row_level_vectors", []),
+                    dataset_meta.get("row_level_vector_axis_order", []),
+                    goal,
+                    selected_goal,
+                )
                 analysis = run_density_analysis(
                     goal,
                     selected_goal,
                     dataset_meta.get("bin_occupancy", {}),
                     dataset_meta.get("bin_occupancy_meta", {}),
                     cluster_vector,
+                    target_design_bin_counts=target_design_counts,
+                    target_design_meta=target_design_meta,
                 )
                 result_payload = analysis["resultPayload"]
                 snapshot = analysis["snapshot"]
@@ -2041,12 +2164,28 @@ def record_density_counts_for_goal(cluster: dict[str, Any], selected_goal: dict[
     )
 
 
+def record_design_density_counts_for_goal(
+    cluster: dict[str, Any],
+    goal: dict[str, Any],
+    selected_goal: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, Any]]:
+    row_vectors = cluster.get("rowLevelVectors") if isinstance(cluster.get("rowLevelVectors"), list) else []
+    source_axis_order = [str(name) for name in (cluster.get("rowLevelVectorAxisOrder") or cluster.get("axisNames") or [])]
+    if row_vectors:
+        return recompute_design_counts_from_vectors(row_vectors, source_axis_order, goal, selected_goal)
+    design_goal = design_goal_for_selected(goal, selected_goal)
+    if [axis["name"] for axis in canonical_axis_order(design_goal["axes"])] == [axis["name"] for axis in canonical_axis_order(selected_goal["axes"])]:
+        return record_density_counts_for_goal(cluster, selected_goal)
+    return {}, {"validMultidimensionalRowCount": 0, "totalRows": 0}
+
+
 def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
     cluster = cluster_by_id(cluster_id)
     goal = find_goal(str(cluster["goalId"]))
     selected_goal = goal_subset(goal, [str(name) for name in cluster["axisNames"]])
     target = np.asarray(cluster["values"], dtype=float)
     target_counts, target_meta = record_density_counts_for_goal(cluster, selected_goal)
+    target_design_counts, target_design_meta = record_design_density_counts_for_goal(cluster, goal, selected_goal)
     uploaded = normalize_analysis_snapshot(cluster.get("analysisAtUpload"))
     try:
         analysis = run_density_analysis(
@@ -2056,6 +2195,8 @@ def reevaluate_cluster(cluster_id: str) -> dict[str, Any]:
             target_meta,
             target,
             exclude_cluster_id=str(cluster["id"]),
+            target_design_bin_counts=target_design_counts,
+            target_design_meta=target_design_meta,
         )
         current = analysis["resultPayload"]
         current_peer_group_size = len(analysis["peerGroup"])
@@ -2105,6 +2246,7 @@ def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], c
     try:
         target = np.asarray(cluster.get("values", []), dtype=float)
         target_counts, target_meta = record_density_counts_for_goal(cluster, selected_goal)
+        target_design_counts, target_design_meta = record_design_density_counts_for_goal(cluster, goal, selected_goal)
         # The target is always added into the reference map by run_density_analysis.
         # Exclude this saved record from the external peer side to avoid counting it twice.
         effective_exclude_cluster_id = str(exclude_cluster_id or cluster.get("id") or "").strip() or None
@@ -2115,6 +2257,8 @@ def impact_result_payload(goal: dict[str, Any], selected_goal: dict[str, Any], c
             target_meta,
             target,
             exclude_cluster_id=effective_exclude_cluster_id,
+            target_design_bin_counts=target_design_counts,
+            target_design_meta=target_design_meta,
         )
         return {"ok": True, "result": analysis["resultPayload"], "peerGroupSize": len(analysis["peerGroup"])}
     except ValueError as exc:
@@ -2331,9 +2475,9 @@ def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
         for size in range(1, len(axis_names) + 1):
             for subset in itertools.combinations(axis_names, size):
                 names = list(subset)
-                selected_goal = goal_subset(goal, names)
-                peer_clusters = load_peer_clusters(str(goal["id"]), names)
                 try:
+                    selected_goal = goal_subset(goal, names)
+                    peer_clusters = load_peer_clusters(str(goal["id"]), names)
                     goal_counts[axis_subset_key(names)] = int(build_global_bin_counts(peer_clusters, selected_goal)["coverageEligibleClusterCount"])
                 except ValueError:
                     goal_counts[axis_subset_key(names)] = 0
@@ -2343,12 +2487,15 @@ def bootstrap_peer_subset_counts() -> dict[str, dict[str, int]]:
 
 def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
     canonical_axes = canonical_axis_order(goal["axes"])
-    axis_names = [axis["name"] for axis in canonical_axes]
-    stored_clusters = load_peer_clusters(str(goal["id"]), axis_names)
-    coverage_info = build_global_bin_counts(stored_clusters, goal)
+    full_axis_names = [axis["name"] for axis in canonical_axes]
+    design_axes = input_axes_for_goal(goal)
+    design_axis_names = [axis["name"] for axis in design_axes]
+    design_goal = goal_subset(goal, design_axis_names)
+    stored_clusters = load_peer_clusters(str(goal["id"]), full_axis_names)
+    coverage_info = build_global_bin_counts(stored_clusters, design_goal)
     axis_previews = []
     total_bins = 1
-    for axis_index, axis in enumerate(canonical_axes):
+    for axis_index, axis in enumerate(design_axes):
         total = max(1, int(np.ceil((float(axis["domainMax"]) - float(axis["domainMin"])) / float(axis["resolution"]))))
         total_bins *= total
         occupied = len((coverage_info["axisBinCounts"].get(str(axis["name"])) or {}))
@@ -2379,6 +2526,9 @@ def goal_bin_preview(goal: dict[str, Any]) -> dict[str, Any]:
         "validBins": valid_bins,
         "aValid": coverage_info.get("aValid") if coverage_info.get("aValid") is not None else valid_bins,
         "rectangularTotalBins": coverage_info.get("rectangularTotalBins", total_bins),
+        "designTotalBins": coverage_info.get("rectangularTotalBins", total_bins),
+        "designAxes": design_axis_names,
+        "outputAxisNames": [axis["name"] for axis in canonical_axes if axis_role(axis) == "output"],
         "maskedBins": masked_bins,
         "maskBoxCount": coverage_info.get("maskBoxCount", 0),
         "validDomainRatio": coverage_info.get("validDomainRatio"),
@@ -2655,7 +2805,7 @@ def compute_a_valid_for_goal_request(goal_id: str) -> dict[str, Any]:
         "aValidProgressPercent": 0,
         "percent": 0,
         "message": "a_valid calculation started.",
-        "rectangularTotalBins": compute_rectangular_total_bins(goal["axes"]),
+        "rectangularTotalBins": compute_rectangular_total_bins(input_axes_for_goal(goal)),
     }
 
     def progress(percent: int, message: str) -> None:
@@ -2671,7 +2821,7 @@ def compute_a_valid_for_goal_request(goal_id: str) -> dict[str, Any]:
         )
 
     try:
-        result = compute_a_valid_for_rules(goal["axes"], goal.get("feasibleDomainRules") or [], progress_callback=progress)
+        result = compute_a_valid_for_rules(input_axes_for_goal(goal), goal.get("feasibleDomainRules") or [], progress_callback=progress)
         computed_at = datetime.now(timezone.utc)
         duration_ms = int((computed_at - started).total_seconds() * 1000)
         cache = {

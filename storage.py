@@ -411,6 +411,35 @@ def axis_subset_key(axis_names: list[str]) -> str:
     return "|".join(axis_signature(axis_names))
 
 
+def axis_role(axis: dict[str, Any]) -> str:
+    return "output" if str(axis.get("role") or "").strip().lower() == "output" else "input"
+
+
+def input_axes(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [axis for axis in axes if axis_role(axis) == "input"]
+
+
+def feasible_rule_axis_names(rule: dict[str, Any]) -> set[str]:
+    gui_spec = rule.get("guiSpec") if isinstance(rule.get("guiSpec"), dict) else {}
+    rule_type = str(gui_spec.get("type") or rule.get("sourceType") or "")
+    names: set[str] = set()
+    if rule_type == "focused_2d_mask" or rule.get("sourceType") == "focused_2d_mask":
+        for axis_name in (gui_spec.get("xAxis"), gui_spec.get("yAxis")):
+            if str(axis_name or "").strip():
+                names.add(str(axis_name).strip())
+        scope = gui_spec.get("scope") if isinstance(gui_spec.get("scope"), dict) else {}
+        for axis_name, scope_spec in scope.items():
+            if isinstance(scope_spec, dict) and str(scope_spec.get("mode") or "all").lower() == "range":
+                names.add(str(axis_name).strip())
+        return names
+    if_spec = gui_spec.get("if") if isinstance(gui_spec.get("if"), dict) else {}
+    then_spec = gui_spec.get("then") if isinstance(gui_spec.get("then"), dict) else {}
+    for axis_name in (if_spec.get("axis"), then_spec.get("axis")):
+        if str(axis_name or "").strip():
+            names.add(str(axis_name).strip())
+    return names
+
+
 def canonical_grid_axes(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     canonical: list[dict[str, Any]] = []
     for axis in axes:
@@ -470,8 +499,12 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
                 "domainMin": float(axis.get("domainMin")),
                 "domainMax": float(axis.get("domainMax")),
                 "resolution": float(axis.get("resolution")),
+                "role": axis_role(axis),
             }
         )
+    design_axes = input_axes(normalized_axes)
+    if not design_axes:
+        raise ValueError("At least one input axis is required.")
 
     ExperimentConfig(
         axis_names=[axis["name"] for axis in normalized_axes],
@@ -479,9 +512,24 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         resolution=[axis["resolution"] for axis in normalized_axes],
         K_m=k_m,
     )
-    allowed_axes = [axis["name"] for axis in normalized_axes]
-    feasible_rules = normalize_feasible_rules(goal.get("feasibleDomainRules"), allowed_axes)
-    rule_expressions = [rule["expression"] for rule in feasible_rules if rule.get("enabled", True)]
+    allowed_axes = [axis["name"] for axis in design_axes]
+    raw_rules = goal.get("feasibleDomainRules") if isinstance(goal.get("feasibleDomainRules"), list) else []
+    raw_input_rules = []
+    role_excluded_rules = []
+    allowed_axis_set = set(allowed_axes)
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        if feasible_rule_axis_names(raw_rule).issubset(allowed_axis_set):
+            raw_input_rules.append(raw_rule)
+        else:
+            excluded = dict(raw_rule)
+            excluded["enabled"] = False
+            excluded["roleExcluded"] = True
+            excluded["roleExcludedReason"] = "Output axis rules are excluded from certified design masks."
+            role_excluded_rules.append(excluded)
+    feasible_rules = normalize_feasible_rules(raw_input_rules, allowed_axes) + role_excluded_rules
+    rule_expressions = [str(rule.get("expression") or "") for rule in feasible_rules if rule.get("enabled", True) and str(rule.get("expression") or "")]
     source_advanced = []
     source_advanced.extend(normalize_feasible_expressions(goal.get("legacyAdvancedExpressions")))
     source_advanced.extend(normalize_feasible_expressions(goal.get("feasibleDomainAdvancedExpressions")))
@@ -495,9 +543,10 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
             legacy_advanced_expressions.append(expression)
             seen_legacy.add(expression)
     feasible_expressions = rule_expressions
-    mask_boxes = compile_rules_to_mask_boxes(feasible_rules, normalized_axes)
-    rectangular_total_bins = compute_rectangular_total_bins(normalized_axes)
-    current_mask_signature = mask_signature(normalized_axes, mask_boxes)
+    active_feasible_rules = [rule for rule in feasible_rules if rule.get("enabled", True)]
+    mask_boxes = compile_rules_to_mask_boxes(active_feasible_rules, design_axes)
+    rectangular_total_bins = compute_rectangular_total_bins(design_axes)
+    current_mask_signature = mask_signature(design_axes, mask_boxes)
     cache = goal.get("aValidCache") if isinstance(goal.get("aValidCache"), dict) else {}
     cache_ready = (
         cache.get("maskSignature") == current_mask_signature
@@ -522,6 +571,8 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         "name": name,
         "K_m": k_m,
         "axes": normalized_axes,
+        "inputAxisNames": [axis["name"] for axis in design_axes],
+        "outputAxisNames": [axis["name"] for axis in normalized_axes if axis_role(axis) == "output"],
         "feasibleDomainRules": feasible_rules,
         "legacyAdvancedExpressions": legacy_advanced_expressions,
         "feasibleDomainAdvancedExpressions": [],
@@ -530,8 +581,12 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         "feasibleMaskBoxes": mask_boxes,
         "maskBoxCount": len(mask_boxes),
         "rectangularTotalBins": rectangular_total_bins,
+        "designTotalBins": rectangular_total_bins,
         "aValid": cache.get("aValid") if cache_ready else None,
+        "designAValid": cache.get("aValid") if cache_ready else None,
         "maskedBins": cache.get("maskedBins") if cache_ready else None,
+        "designMaskedBins": cache.get("maskedBins") if cache_ready else None,
+        "designAxes": [axis["name"] for axis in design_axes],
         "aValidStatus": a_valid_status,
         "aValidProgressPercent": 100 if cache_ready else 0,
         "aValidMode": "exact_box_union",

@@ -104,6 +104,49 @@ class DensityGridBehaviorTests(unittest.TestCase):
         ):
             self.assertTrue(storage._db_enabled())
 
+    def test_axis_roles_default_to_input_and_design_total_excludes_output(self) -> None:
+        x_axis = axis("cement", domain_max=10, resolution=1)
+        y_axis = {**axis("strength", domain_max=100, resolution=10), "role": "output"}
+        payload = goal(axes=[x_axis, y_axis])
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(normalized["inputAxisNames"], ["cement"])
+        self.assertEqual(normalized["outputAxisNames"], ["strength"])
+        self.assertEqual(normalized["axes"][0]["role"], "input")
+        self.assertEqual(normalized["axes"][1]["role"], "output")
+        self.assertEqual(normalized["rectangularTotalBins"], 10)
+        self.assertEqual(normalized["designTotalBins"], 10)
+
+    def test_feasible_rules_referencing_output_axis_are_inactive_for_design_mask(self) -> None:
+        payload = goal(
+            axes=[
+                axis("cement", domain_max=10, resolution=1),
+                {**axis("strength", domain_max=100, resolution=10), "role": "output"},
+            ]
+        )
+        payload["feasibleDomainRules"] = [
+            {
+                "id": "rule_output",
+                "sourceType": "focused_2d_mask",
+                "editableMode": "gui",
+                "enabled": True,
+                "guiSpec": {
+                    "type": "focused_2d_mask",
+                    "xAxis": "cement",
+                    "yAxis": "strength",
+                    "xMin": 1,
+                    "xMax": 2,
+                    "yMin": 10,
+                    "yMax": 20,
+                    "scope": {},
+                },
+            }
+        ]
+        normalized = storage.validate_goal(payload)
+        self.assertEqual(normalized["feasibleDomainExpressions"], [])
+        self.assertEqual(normalized["maskBoxCount"], 0)
+        self.assertTrue(normalized["feasibleDomainRules"][0]["roleExcluded"])
+        self.assertFalse(normalized["feasibleDomainRules"][0]["enabled"])
+
     def test_cluster_summary_omits_heavy_density_payload_by_default(self) -> None:
         selected_goal = goal(axes=[axis("x")])
         record = record_from_rows(selected_goal, [{"x": "1"}, {"x": "2"}], "record_a")
@@ -297,6 +340,41 @@ class DensityGridBehaviorTests(unittest.TestCase):
             "target_included_in_reference",
         ]:
             self.assertIn(key, response["result"])
+
+    def test_specificity_uses_output_axis_but_confidence_uses_input_axes_only(self) -> None:
+        selected_goal = goal(
+            axes=[
+                axis("cement", domain_max=10, resolution=1),
+                {**axis("strength", domain_max=100, resolution=10), "role": "output"},
+            ]
+        )
+        payload = {
+            "goalId": selected_goal["id"],
+            "selectedAxes": ["cement", "strength"],
+            "axisMapping": {"cement": "cement", "strength": "strength"},
+            "rows": [
+                {"cement": "1", "strength": "20"},
+                {"cement": "1", "strength": "25"},
+                {"cement": "2", "strength": "50"},
+            ],
+        }
+        with (
+            patch("app.load_goal_store", return_value=[selected_goal]),
+            patch("storage.load_cluster_store", return_value=[]),
+            patch("app.load_cluster_store", return_value=[]),
+            patch("storage.save_cluster_store"),
+        ):
+            response = app.analyze_request_v2(payload)
+        result = response["result"]
+        selfEqual = self.assertEqual
+        selfEqual(result["specificityAxisNames"], ["cement", "strength"])
+        selfEqual(result["confidenceAxisNames"], ["cement"])
+        selfEqual(result["outputAxisNames"], ["strength"])
+        selfEqual(result["designTotalBins"], 10)
+        selfEqual(result["valid_bins"], 10)
+        selfEqual(result["specificityTotalBins"], 100)
+        self.assertIsNotNone(result["confidence"])
+        self.assertEqual(result["masked_out_target_rows"], 0)
 
     def test_single_target_without_stored_peer_still_analyzes_internal_density(self) -> None:
         selected_goal = goal(axes=[axis("x")])
@@ -950,6 +1028,8 @@ class DensityGridBehaviorTests(unittest.TestCase):
     def test_rule_builder_ui_controls_are_present(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
         self.assertIn("2D Mask Editor", template)
+        self.assertIn("Output axis", template)
+        self.assertIn("roleOutput", template)
         self.assertIn("data-rule-convert", template)
         self.assertIn("Convert to Legacy Expression", template)
         self.assertIn("legacyAdvancedExpressions", template)

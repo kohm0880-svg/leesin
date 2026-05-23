@@ -148,7 +148,7 @@
     .modal-head { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:14px 16px; border-bottom:1px solid var(--line); }
     .modal-body { padding:16px; display:grid; gap:14px; }
     .admin-toolbar { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; align-items:end; }
-    .axis-row { display:grid; grid-template-columns:1fr .65fr .7fr .7fr .7fr auto; gap:8px; align-items:end; }
+    .axis-row { display:grid; grid-template-columns:1fr .65fr .7fr .7fr .7fr .85fr auto; gap:8px; align-items:end; }
     .axis-sliders { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; grid-column:1 / -1; }
     .rule-builder-list { display:grid; gap:10px; margin-top:8px; }
     .rule-builder-card { display:grid; gap:10px; border:1px solid var(--line); border-radius:8px; padding:10px; background:#fff; }
@@ -463,7 +463,10 @@
     const escapeHtml = value => String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const clone = value => JSON.parse(JSON.stringify(value));
     const goalById = id => state.goals.find(goal => goal.id === id) || null;
-    const blankAxis = () => ({ name:'', unit:'', domainMin:0, domainMax:100, resolution:1 });
+    const axisRole = axis => String(axis?.role || '').toLowerCase() === 'output' ? 'output' : 'input';
+    const inputAxesForGoal = goal => (goal?.axes || []).filter(axis => axisRole(axis) === 'input');
+    const outputAxesForGoal = goal => (goal?.axes || []).filter(axis => axisRole(axis) === 'output');
+    const blankAxis = () => ({ name:'', unit:'', domainMin:0, domainMax:100, resolution:1, role:'input' });
     const blankGoal = () => ({ id:`goal_${Date.now()}`, name:'', K_m:10, axes:[blankAxis()], feasibleDomainRules:[], legacyAdvancedExpressions:[], feasibleDomainAdvancedExpressions:[], feasibleDomainExpressions:[], generatedFeasibleExpressions:[] });
     const isNil = value => value === null || value === undefined || value === '';
     const formatNumber = (value, decimals=2) => { if (isNil(value)) return '-'; const n=Number(value); return Number.isFinite(n) ? n.toFixed(decimals).replace(/\.0+$|(\.\d*[1-9])0+$/,'$1') : '-'; };
@@ -1909,8 +1912,9 @@
       const eligibleClusters = result.coverageEligibleClusterCount ?? meta.coverageEligibleClusterCount ?? 0;
       const legacyExcluded = result.coverageLegacyExcludedClusterCount ?? meta.coverageLegacyExcludedClusterCount ?? 0;
       const gridExcluded = result.coverageGridSignatureExcludedClusterCount ?? meta.coverageGridSignatureExcludedClusterCount ?? result.coverageAxisSignatureExcludedClusterCount ?? meta.coverageAxisSignatureExcludedClusterCount ?? 0;
-      const occupiedBins = result.occupied_bins ?? meta.occupiedBins ?? 0;
-      const totalBins = result.total_bins ?? meta.totalBins ?? 0;
+      const occupiedBins = result.designOccupiedBins ?? result.occupied_bins ?? meta.designOccupiedBins ?? meta.occupiedBins ?? 0;
+      const totalBins = result.designTotalBins ?? result.rectangularTotalBins ?? result.total_bins ?? meta.designTotalBins ?? meta.rectangularTotalBins ?? meta.totalBins ?? 0;
+      const specificityTotalBins = result.specificityTotalBins ?? result.total_bins ?? meta.specificityTotalBins ?? meta.totalBins ?? 0;
       const validBins = result.valid_bins ?? result.validBins ?? result.aValid ?? meta.validBins ?? meta.aValid ?? null;
       const maskedBins = result.masked_bins ?? result.maskedBins ?? meta.maskedBins ?? null;
       const validBinsText = validBins == null ? 'pending' : validBins;
@@ -1923,6 +1927,9 @@
       const extremeRate = result.extreme_specificity_rate ?? result.rare_bin_rate ?? 0;
       const maxSpecificity = result.max_specificity ?? null;
       const visualizationBasis = report.visualizations?.coverage?.basis || result.coverageBasis || meta.coverageBasis || 'row_level_bin_occupancy';
+      const specificityAxes = result.specificityAxisNames || meta.specificityAxisNames || [];
+      const confidenceAxes = result.confidenceAxisNames || result.inputAxisNames || meta.confidenceAxisNames || meta.inputAxisNames || [];
+      const outputAxes = result.outputAxisNames || meta.outputAxisNames || [];
       $('report-content').className = '';
       $('report-content').innerHTML = `
         ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => escapeHtml(w.message || `${w.role || 'target'} out-of-domain rows: ${w.outOfDomainRowCount ?? 0}`)).join('<br>')}</div>` : ''}
@@ -1952,7 +1959,11 @@
               <span class="metric-pill">external peer rows ${escapeHtml(externalPeerObservationCount)}</span>
               <span class="metric-pill">reference rows ${escapeHtml(referenceObservationCount)}</span>
               <span class="metric-pill">occupied bins ${escapeHtml(occupiedBins)}/${escapeHtml(validBinsText)} valid</span>
-              <span class="metric-pill">rectangular bins ${escapeHtml(totalBins)}</span>
+              <span class="metric-pill">design bins ${escapeHtml(totalBins)}</span>
+              <span class="metric-pill">specificity bins ${escapeHtml(specificityTotalBins)}</span>
+              <span class="metric-pill">specificity axes ${escapeHtml(specificityAxes.length)}</span>
+              <span class="metric-pill">confidence axes ${escapeHtml(confidenceAxes.length)} input</span>
+              <span class="metric-pill">output axes ${escapeHtml(outputAxes.join(', ') || '-')}</span>
               <span class="metric-pill">excluded legacy ${escapeHtml(legacyExcluded)}</span>
               <span class="metric-pill">grid mismatch ${escapeHtml(gridExcluded)}</span>
               <span class="metric-pill">unseen rows ${formatPercent(result.unseen_bin_rate,1)}</span>
@@ -1961,6 +1972,7 @@
               <span class="metric-pill">masked-out target rows ${escapeHtml(maskedOutTargetRows)}</span>
             </div>
             ${internalDensityMode ? '<div class="tag warn">특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.</div>' : ''}
+            <div class="small" style="margin-top:8px;">특이도는 선택된 input/output 전체 관측 좌표 기준입니다. 신뢰도는 input 실험 조건 공간 기준입니다.</div>
             ${legacyExcluded ? '<div class="tag warn">Legacy records without row-level vectors are excluded from density scoring.</div>' : ''}
           </div>
           <div class="notice">
@@ -2049,7 +2061,12 @@
       const serverPreview = state.goalBinPreview?.[goal.id];
       if (serverPreview) {
         const expressionCount = (goal.feasibleDomainExpressions || []).filter(Boolean).length;
-        return { ...serverPreview, feasibleExpressionCount: expressionCount };
+        return {
+          ...serverPreview,
+          feasibleExpressionCount: expressionCount,
+          designAxes: serverPreview.designAxes || inputAxesForGoal(goal).map(axis => axis.name),
+          outputAxisNames: serverPreview.outputAxisNames || outputAxesForGoal(goal).map(axis => axis.name),
+        };
       }
       const axes = goal.axes || [];
       const wantedSignature = axisSubsetKey(axes.map(axis => axis.name));
@@ -2078,7 +2095,8 @@
           });
         });
       });
-      const axisBins = axes.map(axis => {
+      const designAxes = inputAxesForGoal(goal);
+      const axisBins = designAxes.map(axis => {
         const totalBins = Math.max(1, Math.ceil((Number(axis.domainMax) - Number(axis.domainMin)) / Number(axis.resolution || 1)));
         const occupied = Object.keys(axisCounts[axis.name] || {}).length;
         return { axis:axis.name, totalBins, occupiedBins:occupied, coverage: totalBins ? occupied / totalBins : 0 };
@@ -2098,6 +2116,8 @@
         basis:'row_level_bin_occupancy',
         axisBins,
         totalBins,
+        designAxes: designAxes.map(axis => axis.name),
+        outputAxisNames: outputAxesForGoal(goal).map(axis => axis.name),
         aValid,
         maskedBins,
         occupiedBins,
@@ -2119,9 +2139,11 @@
       if (!preview) { $('goal-bin-preview').innerHTML = ''; return; }
       $('goal-bin-preview').innerHTML = `
         <strong>a_valid</strong><br>
-        기준: row-level bin occupancy<br>
+        기준: input design space<br>
         ${preview.occupiedBins}/${preview.totalBins} bins · a_valid ${escapeHtml(preview.aValid ?? 'pending')} · masked ${escapeHtml(preview.maskedBins ?? 'pending')} · Coverage ${formatPercent(preview.estimatedCoverage,2)}
         <div class="inline-metrics" style="margin-top:8px;">
+          <span class="metric-pill">input axes ${escapeHtml((preview.designAxes || []).length)}</span>
+          <span class="metric-pill">output excluded ${escapeHtml((preview.outputAxisNames || []).join(', ') || '-')}</span>
           <span class="metric-pill">eligible records ${escapeHtml(preview.coverageEligibleClusterCount ?? 0)}</span>
           <span class="metric-pill">row-level observations ${escapeHtml(preview.rowLevelObservationCount ?? 0)}</span>
           <span class="metric-pill">excluded legacy ${escapeHtml(preview.coverageLegacyExcludedClusterCount ?? 0)}</span>
@@ -2180,7 +2202,7 @@
       return type === 'focused_2d_mask' ? compileFocusedMaskRule(rule) : compileFeasibleGuiRule(rule);
     }
     function defaultFeasibleRule(goal=state.draftGoal) {
-      const axes = goal?.axes || [];
+      const axes = inputAxesForGoal(goal);
       const ifAxis = axes[0]?.name || '';
       const thenAxis = axes[1]?.name || ifAxis;
       const then = axes.find(axis => axis.name === thenAxis) || axes[0] || blankAxis();
@@ -2263,7 +2285,7 @@
       return Math.max(0, Math.min(count - 1, Math.floor((Number(value) - Number(axis.domainMin)) / res)));
     }
     function goalMaskAxisPairs(goal) {
-      const axes = goal?.axes || [];
+      const axes = inputAxesForGoal(goal);
       const pairs = [];
       for (let i = 0; i < axes.length; i += 1) {
         for (let j = i + 1; j < axes.length; j += 1) {
@@ -2449,7 +2471,7 @@
       if (type !== 'focused_2d_mask') return null;
       const spec = rule.guiSpec || {};
       const ranges = {};
-      (goal?.axes || []).forEach(axis => { ranges[axis.name] = axisDomainRange(axis); });
+      inputAxesForGoal(goal).forEach(axis => { ranges[axis.name] = axisDomainRange(axis); });
       if (spec.xAxis) ranges[spec.xAxis] = { min:Number(spec.xMin), max:Number(spec.xMax) };
       if (spec.yAxis) ranges[spec.yAxis] = { min:Number(spec.yMin), max:Number(spec.yMax) };
       Object.entries(spec.scope || {}).forEach(([axisName, scope]) => {
@@ -2467,7 +2489,7 @@
       if (!selection?.xAxis || !selection?.yAxis) return null;
       const builder = ensureAdminFocusedMaskBuilder(goal);
       const scope = {};
-      (goal?.axes || []).forEach(axis => {
+      inputAxesForGoal(goal).forEach(axis => {
         if (axis.name === selection.xAxis || axis.name === selection.yAxis) return;
         const item = builder.scope?.[axis.name] || { mode:'all' };
         scope[axis.name] = item.mode === 'range'
@@ -2492,7 +2514,7 @@
       };
     }
     function defaultAdminFocusedMaskBuilder(goal=state.draftGoal) {
-      const axes = goal?.axes || [];
+      const axes = inputAxesForGoal(goal);
       const xAxis = axes[0]?.name || '';
       const yAxis = axes[1]?.name || '';
       const xRange = axisDomainRange(axes[0]);
@@ -2511,7 +2533,7 @@
       };
     }
     function ensureAdminFocusedMaskBuilder(goal=state.draftGoal) {
-      const axes = goal?.axes || [];
+      const axes = inputAxesForGoal(goal);
       const names = axes.map(axis => axis.name).filter(Boolean);
       const defaults = defaultAdminFocusedMaskBuilder(goal);
       const builder = { ...defaults, ...(state.adminFocusedMaskBuilder || {}) };
@@ -2649,7 +2671,7 @@
     function adminFocusedMaskRuleFromBuilder(goal=state.draftGoal, id=null) {
       const builder = ensureAdminFocusedMaskBuilder(goal);
       const scope = {};
-      (goal?.axes || []).forEach(axis => {
+      inputAxesForGoal(goal).forEach(axis => {
         if (axis.name === builder.xAxis || axis.name === builder.yAxis) return;
         const item = builder.scope?.[axis.name] || { mode:'all' };
         scope[axis.name] = item.mode === 'range'
@@ -2691,8 +2713,8 @@
             enabled: rule.enabled !== false,
             guiSpec:{
               type:'focused_2d_mask',
-              xAxis:rule.guiSpec?.xAxis || goal?.axes?.[0]?.name || '',
-              yAxis:rule.guiSpec?.yAxis || goal?.axes?.[1]?.name || goal?.axes?.[0]?.name || '',
+              xAxis:rule.guiSpec?.xAxis || inputAxesForGoal(goal)?.[0]?.name || '',
+              yAxis:rule.guiSpec?.yAxis || inputAxesForGoal(goal)?.[1]?.name || inputAxesForGoal(goal)?.[0]?.name || '',
               xMin:Number(rule.guiSpec?.xMin ?? 0),
               xMax:Number(rule.guiSpec?.xMax ?? 0),
               yMin:Number(rule.guiSpec?.yMin ?? 0),
@@ -2709,8 +2731,8 @@
           enabled: rule.enabled !== false,
           guiSpec:{
             type:'conditional_range',
-            if:{ axis:rule.guiSpec?.if?.axis || goal?.axes?.[0]?.name || '', op:rule.guiSpec?.if?.op || '>', value:Number(rule.guiSpec?.if?.value ?? 0) },
-            then:{ axis:rule.guiSpec?.then?.axis || goal?.axes?.[1]?.name || goal?.axes?.[0]?.name || '', min:Number(rule.guiSpec?.then?.min ?? 0), max:Number(rule.guiSpec?.then?.max ?? 0) },
+            if:{ axis:rule.guiSpec?.if?.axis || inputAxesForGoal(goal)?.[0]?.name || '', op:rule.guiSpec?.if?.op || '>', value:Number(rule.guiSpec?.if?.value ?? 0) },
+            then:{ axis:rule.guiSpec?.then?.axis || inputAxesForGoal(goal)?.[1]?.name || inputAxesForGoal(goal)?.[0]?.name || '', min:Number(rule.guiSpec?.then?.min ?? 0), max:Number(rule.guiSpec?.then?.max ?? 0) },
           },
         };
         return { ...normalizedRule, expression: rule.expression || compileFeasibleGuiRule(normalizedRule) };
@@ -2727,9 +2749,9 @@
       const node = $('goal-mask-editor');
       if (!node) return;
       const goal = state.draftGoal || blankGoal();
-      const axes = goal.axes || [];
+      const axes = inputAxesForGoal(goal);
       if (axes.length < 2) {
-        node.innerHTML = `<div class="rule-builder-card"><h4>2D Mask Editor</h4><div class="empty">At least 2 axes required.</div></div>`;
+        node.innerHTML = `<div class="rule-builder-card"><h4>2D Mask Editor</h4><div class="small">실험 가능 영역을 설정합니다.</div><div class="empty">At least 2 axes required. At least 2 input axes are needed for masks.</div></div>`;
         return;
       }
       const pairs = orderedGoalMaskAxisPairs(goal);
@@ -3148,12 +3170,22 @@
     }
     function renderFeasibleRuleBuilder() {
       const goal = state.draftGoal || blankGoal();
-      const axes = goal.axes || [];
+      const axes = inputAxesForGoal(goal);
       const axisOptions = axisName => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === axisName ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
       const rules = normalizedFeasibleRulesForUi(goal);
       renderGoalMaskEditor();
       renderAdminFocusedMaskBuilder();
       $('feasible-rule-list').innerHTML = rules.length ? rules.map(rule => {
+        if (rule.roleExcluded) {
+          return `<div class="rule-builder-card" data-feasible-rule="${escapeHtml(rule.id)}" data-rule-type="role_excluded">
+            <div class="row-actions">
+              <span class="tag warn">inactive</span>
+              <span>Output axis를 참조하는 design mask rule은 제외됩니다.</span>
+            </div>
+            <div class="rule-expression-preview">${escapeHtml(rule.expression || compileFeasibleRule(rule) || 'inactive rule')}</div>
+            <div class="row-actions"><button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button></div>
+          </div>`;
+        }
         const expression = compileFeasibleRule(rule);
         if ((rule.sourceType || rule.guiSpec?.type) === 'focused_2d_mask') {
           const spec = rule.guiSpec || {};
@@ -3227,6 +3259,7 @@
             <label>Min<input data-axis-field="domainMin" data-index="${index}" type="number" step="any" value="${min}"></label>
             <label>Max<input data-axis-field="domainMax" data-index="${index}" type="number" step="any" value="${max}"></label>
             <label>Resolution<input data-axis-field="resolution" data-index="${index}" type="number" step="any" value="${res}"></label>
+            <label class="axis-toggle"><input data-axis-field="roleOutput" data-index="${index}" type="checkbox" ${axisRole(axis) === 'output' ? 'checked' : ''}><span>Output axis</span></label>
             <button class="danger" type="button" data-axis-remove="${index}">삭제</button>
           </div>
           <div class="axis-sliders">
@@ -3236,6 +3269,7 @@
           </div>
         </div>`;
       }).join('');
+      $('axis-editor').insertAdjacentHTML('afterbegin', '<div class="small">Output axis는 Confidence 계산에서 제외됩니다.</div>');
       renderFeasibleRuleBuilder();
       renderGoalSelects();
       renderGoalPreview();
@@ -3579,6 +3613,9 @@
       const cards = Array.from(document.querySelectorAll('[data-feasible-rule]'));
       return cards.map(card => {
         const existing = (state.draftGoal?.feasibleDomainRules || []).find(rule => rule.id === card.dataset.feasibleRule);
+        if (card.dataset.ruleType === 'role_excluded') {
+          return { ...(existing || {}), enabled:false, roleExcluded:true };
+        }
         if (card.dataset.ruleType === 'focused_2d_mask') {
           const enabled = Boolean(card.querySelector('[data-rule-field="enabled"]')?.checked);
           const rule = existing || {};
@@ -4141,7 +4178,16 @@
         if (event.target.id === 'compute-a-valid') computeAValid(event.target);
       });
       $('axis-add-button').addEventListener('click', () => { syncDraftFromAdminForm(); state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
-      $('axis-editor').addEventListener('input', event => { const field=event.target.dataset.axisField; if (!field) return; const axis=state.draftGoal.axes[Number(event.target.dataset.index)]; if (!axis) return; axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value); renderGoalPreview(); });
+      $('axis-editor').addEventListener('input', event => {
+        const field=event.target.dataset.axisField;
+        if (!field) return;
+        const axis=state.draftGoal.axes[Number(event.target.dataset.index)];
+        if (!axis) return;
+        if (field === 'roleOutput') axis.role = event.target.checked ? 'output' : 'input';
+        else axis[field]=field === 'name' || field === 'unit' ? event.target.value : Number(event.target.value);
+        markDraftGoalMaskStale();
+        renderGoalPreview();
+      });
       $('axis-editor').addEventListener('change', () => renderAdmin());
       $('axis-editor').addEventListener('click', event => { const index=event.target.dataset.axisRemove; if (index === undefined) return; syncDraftFromAdminForm(); state.draftGoal.axes.splice(Number(index),1); if (!state.draftGoal.axes.length) state.draftGoal.axes.push(blankAxis()); renderAdmin(); });
       $('admin-save-goal').addEventListener('click', event => saveGoal(event.currentTarget));
