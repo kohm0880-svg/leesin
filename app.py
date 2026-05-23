@@ -73,6 +73,8 @@ CERTIFIED_FEASIBLE_DOMAIN_MESSAGE = (
     "Leesin does not materialize the full multidimensional grid."
 )
 A_VALID_JOBS: dict[str, dict[str, Any]] = {}
+SERVER_INSTANCE_ID = os.environ.get("RENDER_INSTANCE_ID") or os.environ.get("HOSTNAME") or uuid.uuid4().hex[:12]
+SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 
 def canonical_axis_order(axes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2720,13 +2722,19 @@ def compute_a_valid_for_goal_request(goal_id: str) -> dict[str, Any]:
         raise
 
 
-def build_storage_payload(cluster_count: int = 0) -> dict[str, Any]:
+def build_storage_payload(cluster_count: int = 0, goal_count: int | None = None) -> dict[str, Any]:
     status = storage_status()
     return {
         **status,
+        "backend": status["storageBackend"],
         "goalStoreFile": status["goalStorePath"],
         "clusterStoreFile": status["clusterStorePath"],
+        "goalCount": goal_count,
         "clusterCount": cluster_count,
+        "recordCount": cluster_count,
+        "loadedAt": datetime.now(timezone.utc).isoformat(),
+        "serverInstance": SERVER_INSTANCE_ID,
+        "serverStartedAt": SERVER_STARTED_AT,
         "savedItems": [
             "Experiment Goal 설정",
             "selected-axis row-level sanitized numeric vectors",
@@ -2752,7 +2760,7 @@ def build_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "peerSubsetCounts": peer_subset_counts,
         "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in goals},
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
-        "storage": build_storage_payload(cluster_count=len(clusters)),
+        "storage": build_storage_payload(cluster_count=len(clusters), goal_count=len(goals)),
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
             "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
@@ -2773,7 +2781,7 @@ def build_shell_bootstrap_payload(admin_allowed: bool) -> dict[str, Any]:
         "goalBinPreview": {},
         "acceptedUploadTypes": [".csv", ".tsv", ".txt"],
         "deferBootstrap": True,
-        "storage": build_storage_payload(cluster_count=0),
+        "storage": build_storage_payload(cluster_count=0, goal_count=None),
         "domainDefinitions": {
             "cluster": "CSV 파일 하나는 저장 record로 처리됩니다. 저장/삭제는 record 단위지만, density calculation은 record 내부 row-level sanitized axis vectors를 현재 grid로 다시 binning해서 수행합니다.",
             "coverage": "Coverage and Equitability are calculated from row-level vectors re-binned into the current density grid.",
@@ -2809,7 +2817,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json(build_bootstrap_payload(admin_allowed=self._admin_allowed()))
             return
         if parsed.path == "/api/storage-status":
-            self._send_json(build_storage_payload(cluster_count=len(list_cluster_summaries())))
+            self._send_json(build_storage_payload(cluster_count=len(list_cluster_summaries()), goal_count=len(load_goal_store())))
             return
         if parsed.path == "/healthz":
             self._send_json({"ok": True})
@@ -2941,6 +2949,9 @@ class AppHandler(BaseHTTPRequestHandler):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Content-Length", str(len(data)))
         try:
             self.end_headers()
@@ -2972,6 +2983,26 @@ def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     # TODO: This app currently uses BaseHTTPRequestHandler rather than a WSGI app.
     # Add a WSGI adapter before switching a Render start command to gunicorn.
     init_database()
+    status = storage_status()
+    try:
+        loaded_goal_count = len(load_goal_store())
+    except Exception as exc:
+        loaded_goal_count = -1
+        print(f"Storage goal load check failed: {exc}")
+    try:
+        loaded_cluster_count = len(list_cluster_summaries())
+    except Exception as exc:
+        loaded_cluster_count = -1
+        print(f"Storage record load check failed: {exc}")
+    print(
+        "Storage status: "
+        f"backend={status.get('storageBackend')} "
+        f"storeDir={status.get('storeDir')} "
+        f"goalStorePath={status.get('goalStorePath')} "
+        f"clusterStorePath={status.get('clusterStorePath')} "
+        f"goals={loaded_goal_count} "
+        f"records={loaded_cluster_count}"
+    )
     server = ThreadingHTTPServer((host, port), AppHandler)
     print(f"Serving Leesin data quality certification at http://{host}:{port}")
     server.serve_forever()

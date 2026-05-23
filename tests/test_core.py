@@ -976,6 +976,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("canonicalFocusedMaskRuleKey", template)
         self.assertIn("이미 같은 Mask가 존재합니다.", template)
         self.assertIn("aria-invalid", template)
+        self.assertIn("bootstrapStatus", template)
+        self.assertIn("Retry Load", template)
+        self.assertIn("/api/bootstrap?_=", template)
+        self.assertIn("Loading saved goals", template)
         self.assertNotIn('id="goal-mask-active-canvas"', template)
 
     def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:

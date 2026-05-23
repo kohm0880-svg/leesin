@@ -216,6 +216,7 @@
       <div class="task-progress-track"><div id="task-progress-fill" class="task-progress-fill"></div></div>
       <div id="task-progress-message" class="small"></div>
     </section>
+    <section id="bootstrap-status-wrap" class="notice" aria-live="polite" style="display:none"></section>
 
     <section id="analysis-view" class="view-section active">
       <section class="toolbar section-card">
@@ -450,6 +451,10 @@
       gridPreviewMetrics: null,
       gridPreviewTimer: null,
       gridPreviewBusy: false,
+      bootstrapStatus: bootstrap.deferBootstrap ? 'loading' : 'ready',
+      bootstrapError: '',
+      bootstrapLoadedAt: null,
+      bootstrapRetryCount: 0,
       activeView: 'analysis-view',
       currentTask: null,
     };
@@ -563,6 +568,33 @@
       $('task-progress-fill').style.width = `${percent}%`;
       $('task-progress-message').textContent = task.message || '';
     }
+    function isBootstrapReady() {
+      return state.bootstrapStatus === 'ready';
+    }
+    function bootstrapStateMarkup(context='saved data') {
+      if (state.bootstrapStatus === 'loading') {
+        return `<div class="empty">Loading ${escapeHtml(context)}...</div>`;
+      }
+      if (state.bootstrapStatus === 'error') {
+        return `<div class="reason down"><strong>Failed to load saved data.</strong><br>${escapeHtml(state.bootstrapError || 'Bootstrap load failed')}<div class="row-actions" style="margin-top:8px"><button class="secondary" type="button" data-bootstrap-retry="true">Retry Load</button></div></div>`;
+      }
+      return '';
+    }
+    function renderBootstrapStatus() {
+      const wrap = $('bootstrap-status-wrap');
+      if (!wrap) return;
+      if (state.bootstrapStatus === 'ready') {
+        wrap.style.display = 'none';
+        wrap.innerHTML = '';
+        return;
+      }
+      wrap.style.display = '';
+      if (state.bootstrapStatus === 'loading') {
+        wrap.innerHTML = `<strong>Loading saved data...</strong><br><span class="small">Persistent storage bootstrap is still loading. Retry ${escapeHtml(state.bootstrapRetryCount)}.</span>`;
+        return;
+      }
+      wrap.innerHTML = `<strong>Failed to load saved data.</strong><br><span class="small">${escapeHtml(state.bootstrapError || 'Bootstrap load failed')}</span><div class="row-actions" style="margin-top:8px"><button class="secondary" type="button" data-bootstrap-retry="true">Retry Load</button></div>`;
+    }
 
     function setError(message) { $('user-error-box').textContent = message || ''; $('user-error-box').style.display = message ? 'block' : 'none'; }
     function setAdminMessage(kind, message) {
@@ -645,7 +677,11 @@
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetch(url, { ...options, signal:controller.signal });
+        const method = String(options.method || 'GET').toUpperCase();
+        const headers = { ...(method === 'GET' ? {'Accept':'application/json'} : {}), ...(options.headers || {}) };
+        const fetchOptions = { ...options, headers, signal:controller.signal };
+        if (method === 'GET' && fetchOptions.cache === undefined) fetchOptions.cache = 'no-store';
+        const response = await fetch(url, fetchOptions);
         let data = {};
         try { data = await response.json(); }
         catch (_error) { data = {}; }
@@ -719,6 +755,7 @@
     }
 
     function validationMessage() {
+      if (!isBootstrapReady()) return state.bootstrapStatus === 'error' ? '저장 데이터를 먼저 다시 불러오세요.' : '저장된 Goal을 불러오는 중입니다.';
       const goal = goalById(state.selectedGoalId);
       if (!goal) return 'Experiment Goal을 선택하세요.';
       if (!state.files.length) return 'CSV/TSV/TXT 파일을 업로드하세요.';
@@ -740,6 +777,12 @@
     }
 
     function renderGoalSelects() {
+      if (!isBootstrapReady()) {
+        const label = state.bootstrapStatus === 'error' ? 'Load failed' : 'Loading goals...';
+        $('goal-select').innerHTML = `<option value="">${escapeHtml(label)}</option>`;
+        $('admin-goal-select').innerHTML = `<option value="">${escapeHtml(label)}</option>`;
+        return;
+      }
       const options = state.goals.map(goal => `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.name)}</option>`).join('');
       $('goal-select').innerHTML = options || '<option value="">Goal 없음</option>'; $('goal-select').value = state.selectedGoalId;
       $('admin-goal-select').innerHTML = options || '<option value="">Goal 없음</option>'; $('admin-goal-select').value = state.draftGoal?.id || state.selectedGoalId;
@@ -747,12 +790,15 @@
     function renderStorageNote() {
       const storage = bootstrap.storage || {};
       $('peer-status').className = 'tag';
-      $('peer-status').textContent = `저장된 record ${state.clusters.length}개`;
+      $('peer-status').textContent = state.bootstrapStatus === 'loading'
+        ? 'Loading saved data...'
+        : (state.bootstrapStatus === 'error' ? 'Saved data load failed' : `저장된 record ${state.clusters.length}개`);
       const backend = storage.storageBackend || 'json_file';
       const isDatabase = backend === 'database' || storage.dbEnabled;
       const isPersistentJson = !isDatabase && storage.leesinStoreDirConfigured;
       const storageMode = isDatabase ? 'Storage: Database' : (isPersistentJson ? 'Storage: Persistent Disk JSON' : 'Storage: Local JSON');
       const pathLine = isDatabase ? '' : `<br>Path: ${escapeHtml(storage.storeDir || '-')}`;
+      const countLine = `<br>Storage summary: goals ${escapeHtml(storage.goalCount ?? (isBootstrapReady() ? state.goals.length : 'loading'))} · records ${escapeHtml(storage.clusterCount ?? (isBootstrapReady() ? state.clusters.length : 'loading'))}`;
       const fallbackLine = (!isDatabase && !isPersistentJson)
         ? '<br><span class="small">Deploy/restart may reset saved goals unless persistent disk is configured.</span>'
         : '';
@@ -760,7 +806,7 @@
         ? '<br><span class="small">DATABASE_URL is present but ignored because database storage was not explicitly enabled.</span>'
         : '';
       $('storage-note').innerHTML = `
-        <strong>${escapeHtml(storageMode)}</strong>${pathLine}${fallbackLine}${dbIgnoredLine}<br>
+        <strong>${escapeHtml(storageMode)}</strong>${pathLine}${countLine}${fallbackLine}${dbIgnoredLine}<br>
         저장: ${escapeHtml((storage.savedItems || []).join(', '))}<br>
         미저장: ${escapeHtml((storage.unsavedItems || []).join(', '))}<br>
         Density analysis re-bins saved row-level sanitized axis vectors into the current grid. Legacy records without row-level vectors are excluded from density scoring and grid preview recalculation.
@@ -768,6 +814,12 @@
     }
     // Analysis Mapping / Batch
     function renderMapping() {
+      if (!isBootstrapReady()) {
+        $('file-meta-box').textContent = state.bootstrapStatus === 'error' ? 'Saved data load failed.' : 'Loading saved goals...';
+        $('mapper-head').style.display = 'none';
+        $('mapping-box').innerHTML = bootstrapStateMarkup('saved goals');
+        return;
+      }
       const goal = goalById(state.selectedGoalId);
       const first = state.files[0];
       const peerCountText = goal ? ` · eligible density records ${currentPeerCount(goal)}` : '';
@@ -1958,15 +2010,37 @@
       resetSelection(goal, true);
     }
 
-    async function loadBootstrapData() {
+    async function loadBootstrapData({ retryCount=0 }={}) {
+      state.bootstrapStatus = 'loading';
+      state.bootstrapError = '';
+      state.bootstrapRetryCount = retryCount;
+      renderAll();
       try {
-        const { response, data } = await fetchJson('/api/bootstrap', { headers:{'Accept':'application/json'} }, 60000);
+        const { response, data } = await fetchJson(`/api/bootstrap?_=${Date.now()}`, { headers:{'Accept':'application/json'}, cache:'no-store' }, 60000);
         if (!response.ok) throw new Error(data.error || 'Bootstrap load failed');
         applyBootstrapData(data);
+        state.bootstrapStatus = 'ready';
+        state.bootstrapError = '';
+        state.bootstrapLoadedAt = new Date().toISOString();
+        state.bootstrapRetryCount = retryCount;
         renderAll();
         updateAdminTokenPanel();
       } catch (error) {
-        setError(error.message || 'Bootstrap load failed');
+        const message = error.message || 'Bootstrap load failed';
+        if (retryCount < 4) {
+          state.bootstrapStatus = 'loading';
+          state.bootstrapError = message;
+          state.bootstrapRetryCount = retryCount + 1;
+          renderAll();
+          const delays = [1000, 2000, 4000, 4000];
+          setTimeout(() => loadBootstrapData({ retryCount: retryCount + 1 }), delays[Math.min(retryCount, delays.length - 1)]);
+          return;
+        }
+        state.bootstrapStatus = 'error';
+        state.bootstrapError = message;
+        state.bootstrapRetryCount = retryCount;
+        renderAll();
+        setError(message);
       }
     }
 
@@ -3126,6 +3200,17 @@
     }
     // Goal Admin
     function renderAdmin() {
+      if (!isBootstrapReady()) {
+        $('admin-goal-name').value = '';
+        $('axis-editor').innerHTML = bootstrapStateMarkup('saved goals');
+        $('goal-mask-editor').innerHTML = '';
+        $('focused-mask-admin-builder').innerHTML = '';
+        $('feasible-rule-list').innerHTML = '';
+        $('goal-bin-preview').innerHTML = bootstrapStateMarkup('Goal preview');
+        renderGoalSelects();
+        renderClusterList();
+        return;
+      }
       state.draftGoal = state.draftGoal || clone(goalById(state.selectedGoalId) || blankGoal());
       state.draftGoal.feasibleDomainRules = normalizedFeasibleRulesForUi(state.draftGoal);
       state.draftGoal.legacyAdvancedExpressions = advancedExpressionsForGoal(state.draftGoal);
@@ -3248,6 +3333,15 @@
     }
     // Saved Records / Audit
     function renderSavedClusters() {
+      if (!isBootstrapReady()) {
+        $('cluster-goal-filter').innerHTML = '<option value="">Loading goals...</option>';
+        $('cluster-sort').value = state.clusterSort;
+        $('cluster-search').value = state.clusterSearch;
+        $('cluster-count').textContent = state.bootstrapStatus === 'error' ? 'load failed' : 'loading...';
+        $('peer-status').textContent = state.bootstrapStatus === 'error' ? 'Saved data load failed' : 'Loading saved data...';
+        $('saved-cluster-list').innerHTML = bootstrapStateMarkup('saved records');
+        return;
+      }
       renderClusterGoalFilter();
       $('cluster-sort').value = state.clusterSort;
       $('cluster-search').value = state.clusterSearch;
@@ -3258,11 +3352,15 @@
       $('saved-cluster-list').innerHTML = clusters.length ? `<div class="record-timeline">${renderClusterCards(clusters)}</div>` : '<div class="empty">저장된 record가 없습니다. CSV 분석 또는 batch save 후 여기에 표시됩니다.</div>';
     }
     function renderClusterList() {
+      if (!isBootstrapReady()) {
+        $('cluster-list').innerHTML = bootstrapStateMarkup('saved records');
+        return;
+      }
       const clusters = state.clusters || [];
       $('cluster-list').innerHTML = clusters.length ? `<div class="record-timeline">${renderClusterCards(clusters)}</div>` : '<div class="empty">저장된 record가 없습니다.</div>';
     }
     function renderAll() {
-      renderStorageNote(); renderGoalSelects(); renderMapping(); renderBatch(); renderSavedClusters(); updateAdminTokenPanel(); updateButtons();
+      renderBootstrapStatus(); renderStorageNote(); renderGoalSelects(); renderMapping(); renderBatch(); renderSavedClusters(); updateAdminTokenPanel(); updateButtons();
     }
 
     async function handleFiles(fileList) {
@@ -3720,6 +3818,12 @@
     }
 
     function bindEvents() {
+      document.addEventListener('click', event => {
+        const retry = event.target.closest?.('[data-bootstrap-retry]');
+        if (!retry) return;
+        setError('');
+        loadBootstrapData({ retryCount:0 });
+      });
       document.querySelectorAll('.quick-nav-item[data-view]').forEach(button => {
         button.addEventListener('click', () => showView(button.dataset.view));
       });
