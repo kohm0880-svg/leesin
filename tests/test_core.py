@@ -967,7 +967,10 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("zoomGoalMaskAtPoint", template)
         self.assertIn("pairOrder", template)
         self.assertIn("cardSelections", template)
+        self.assertIn("viewByPair", template)
+        self.assertIn("goal-mask-show-current", template)
         self.assertIn("Reset Order", template)
+        self.assertNotIn('id="goal-mask-active-canvas"', template)
 
     def test_focused_mask_side_panel_ui_controls_are_present(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")

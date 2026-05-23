@@ -114,7 +114,6 @@
     .goal-mask-workspace { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:12px; align-items:start; }
     .goal-mask-main { display:grid; gap:10px; min-width:0; }
     .goal-mask-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-    .goal-mask-active-canvas { width:100%; min-height:360px; border:1px solid var(--line); border-radius:8px; background:#fff; cursor:crosshair; touch-action:none; }
     .goal-mask-side-panel { position:sticky; top:16px; display:grid; gap:8px; border:1px solid var(--line); border-radius:8px; background:#fbfdfe; padding:12px; max-height:calc(100vh - 32px); overflow:auto; }
     .goal-mask-preview-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
     .goal-mask-preview-card { border:1px solid var(--line); border-radius:8px; background:#fff; padding:8px; display:grid; gap:6px; cursor:pointer; }
@@ -123,7 +122,7 @@
     .goal-mask-card-title { display:flex; align-items:center; gap:7px; cursor:pointer; user-select:none; }
     .goal-mask-drag-handle { cursor:grab; color:var(--muted); font-weight:900; letter-spacing:0; padding:2px 4px; border-radius:6px; }
     .goal-mask-drag-handle:active { cursor:grabbing; background:#eef5f7; }
-    .goal-mask-mini-canvas { width:100%; aspect-ratio:1.2 / 1; border:1px solid var(--line); border-radius:8px; background:#fff; }
+    .goal-mask-mini-canvas { width:100%; aspect-ratio:1.2 / 1; border:1px solid var(--line); border-radius:8px; background:#fff; cursor:crosshair; touch-action:none; }
     .goal-mask-card-selection { min-height:18px; color:var(--muted); font-size:12px; line-height:1.4; }
     .record-timeline { display:grid; gap:0; position:relative; padding-left:18px; }
     .record-timeline::before { content:""; position:absolute; left:7px; top:8px; bottom:8px; width:2px; background:var(--line); }
@@ -405,8 +404,10 @@
           visiblePairs: payload.visiblePairs || {},
           pairOrder: Array.isArray(payload.pairOrder) ? payload.pairOrder : [],
           cardSelections: payload.cardSelections || {},
+          viewByPair: payload.viewByPair || {},
           showAllPairs: payload.showAllPairs !== false,
           showProjectedMasks: payload.showProjectedMasks !== false,
+          showCurrentPreview: payload.showCurrentPreview !== false,
         }));
       } catch (_error) {}
     }
@@ -2186,9 +2187,11 @@
         selection:null,
         cardSelections:{},
         pairOrder:pairs.map(pair => projectionKey(pair[0], pair[1])),
+        viewByPair:{},
         visiblePairs,
         showAllPairs:true,
         showProjectedMasks:true,
+        showCurrentPreview:true,
       };
     }
     function ensureGoalMaskEditor(goal=state.draftGoal) {
@@ -2210,6 +2213,10 @@
       Object.keys(editor.cardSelections).forEach(key => {
         if (!pairKeys.has(key)) delete editor.cardSelections[key];
       });
+      editor.viewByPair = editor.viewByPair || {};
+      Object.keys(editor.viewByPair).forEach(key => {
+        if (!pairKeys.has(key)) delete editor.viewByPair[key];
+      });
       editor.visiblePairs = editor.visiblePairs || {};
       pairs.forEach(pair => {
         const key = projectionKey(pair[0], pair[1]);
@@ -2222,6 +2229,7 @@
       if (activeKey) editor.visiblePairs[activeKey] = true;
       editor.showAllPairs = pairs.every(pair => editor.visiblePairs[projectionKey(pair[0], pair[1])] !== false);
       editor.showProjectedMasks = editor.showProjectedMasks !== false;
+      editor.showCurrentPreview = editor.showCurrentPreview !== false;
       state.goalMaskEditor = editor;
       return editor;
     }
@@ -2244,6 +2252,15 @@
       editor.panX = mouseX - worldX * nextZoom;
       editor.panY = mouseY - worldY * nextZoom;
     }
+    function goalMaskViewForPair(pairKey, editor=ensureGoalMaskEditor(state.draftGoal || blankGoal())) {
+      editor.viewByPair = editor.viewByPair || {};
+      const view = { zoom:1, panX:0, panY:0, ...(editor.viewByPair[pairKey] || {}) };
+      view.zoom = Math.max(1, Math.min(80, Number(view.zoom) || 1));
+      view.panX = Number(view.panX) || 0;
+      view.panY = Number(view.panY) || 0;
+      editor.viewByPair[pairKey] = view;
+      return view;
+    }
     function markDraftGoalMaskStale() {
       if (!state.draftGoal) return;
       state.draftGoal.aValid = null;
@@ -2256,9 +2273,6 @@
       if (!xAxis || !yAxis || xAxis === yAxis) return;
       const editor = ensureGoalMaskEditor(goal);
       editor.activePair = [xAxis, yAxis];
-      editor.zoom = 1;
-      editor.panX = 0;
-      editor.panY = 0;
       editor.visiblePairs[projectionKey(xAxis, yAxis)] = true;
       state.goalMaskEditor = editor;
       const builder = ensureAdminFocusedMaskBuilder(goal);
@@ -2320,6 +2334,37 @@
       const yRange = ranges[yAxis];
       if (!xRange || !yRange) return null;
       return { xMin:xRange.min, xMax:xRange.max, yMin:yRange.min, yMax:yRange.max, ruleId:rule.id };
+    }
+    function currentGoalMaskSelectionRule(goal=state.draftGoal) {
+      const editor = ensureGoalMaskEditor(goal || blankGoal());
+      const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
+      const selection = state.goalMaskDrag?.selection || editor.cardSelections?.[activeKey] || editor.selection;
+      if (!selection?.xAxis || !selection?.yAxis) return null;
+      const builder = ensureAdminFocusedMaskBuilder(goal);
+      const scope = {};
+      (goal?.axes || []).forEach(axis => {
+        if (axis.name === selection.xAxis || axis.name === selection.yAxis) return;
+        const item = builder.scope?.[axis.name] || { mode:'all' };
+        scope[axis.name] = item.mode === 'range'
+          ? { mode:'range', min:Number(item.min), max:Number(item.max) }
+          : { mode:'all' };
+      });
+      return {
+        id:'__current_goal_mask_selection__',
+        sourceType:'focused_2d_mask',
+        editableMode:'gui',
+        enabled:true,
+        guiSpec:{
+          type:'focused_2d_mask',
+          xAxis:selection.xAxis,
+          yAxis:selection.yAxis,
+          xMin:Number(selection.xMin),
+          xMax:Number(selection.xMax),
+          yMin:Number(selection.yMin),
+          yMax:Number(selection.yMax),
+          scope,
+        },
+      };
     }
     function defaultAdminFocusedMaskBuilder(goal=state.draftGoal) {
       const axes = goal?.axes || [];
@@ -2459,12 +2504,10 @@
       builder.xAxis = xAxis;
       builder.yAxis = yAxis;
       state.adminFocusedMaskBuilder = builder;
-      const axisOptions = (selected, other='') => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === selected ? 'selected' : ''} ${axis.name === other ? 'disabled' : ''}>${escapeHtml(axis.name)}</option>`).join('');
       const activeKey = projectionKey(xAxis, yAxis);
       const visiblePairs = pairs.filter(pair => editor.visiblePairs[projectionKey(pair[0], pair[1])] !== false);
       const remainingAxes = axes.filter(axis => axis.name !== xAxis && axis.name !== yAxis);
       const draftRule = adminFocusedMaskRuleFromBuilder(goal, builder.editingRuleId || null);
-      const selectionText = `${xAxis}: ${formatNumber(builder.xMin,4)} ~ ${formatNumber(builder.xMax,4)} · ${yAxis}: ${formatNumber(builder.yMin,4)} ~ ${formatNumber(builder.yMax,4)}`;
       node.innerHTML = `<div class="rule-builder-card">
         <div>
           <h4>2D Mask Editor</h4>
@@ -2474,14 +2517,10 @@
           <div class="goal-mask-main">
             <div class="goal-mask-toolbar">
               <span class="metric-pill">Active ${escapeHtml(xAxis)} × ${escapeHtml(yAxis)}</span>
-              <label>X Axis<select data-admin-focused-field="xAxis">${axisOptions(xAxis, yAxis)}</select></label>
-              <label>Y Axis<select data-admin-focused-field="yAxis">${axisOptions(yAxis, xAxis)}</select></label>
-              <button class="secondary" type="button" data-goal-mask-zoom="in">Zoom In</button>
-              <button class="secondary" type="button" data-goal-mask-zoom="out">Zoom Out</button>
-              <button class="ghost" type="button" data-goal-mask-zoom="reset">Reset View</button>
+              <span class="small">카드를 클릭해 active projection을 바꾸고, canvas를 드래그해 mask range를 선택합니다.</span>
             </div>
-            <canvas id="goal-mask-active-canvas" class="goal-mask-active-canvas" data-x-axis="${escapeHtml(xAxis)}" data-y-axis="${escapeHtml(yAxis)}" aria-label="2D Mask Editor"></canvas>
-            <div class="notice" id="goal-mask-selection-info">Selected: ${escapeHtml(selectionText)}</div>
+            <input type="hidden" data-admin-focused-field="xAxis" value="${escapeHtml(xAxis)}">
+            <input type="hidden" data-admin-focused-field="yAxis" value="${escapeHtml(yAxis)}">
             <div>
               <strong>Remaining Axis Scope</strong>
               <div class="focused-scope-list">
@@ -2514,6 +2553,30 @@
               <button class="secondary" id="focused-admin-save" type="button" ${builder.editingRuleId ? '' : 'disabled'}>Save Changes</button>
               <button class="ghost" id="focused-admin-reset" type="button">Reset Tool</button>
             </div>
+            <div>
+              <h4>Mini Projection Grid</h4>
+              <div class="goal-mask-preview-grid">
+                ${visiblePairs.map(pair => {
+                  const key = projectionKey(pair[0], pair[1]);
+                  const selection = editor.cardSelections?.[key] || null;
+                  const selectedText = selection
+                    ? `${selection.xAxis} ${formatNumber(selection.xMin,4)}~${formatNumber(selection.xMax,4)} / ${selection.yAxis} ${formatNumber(selection.yMin,4)}~${formatNumber(selection.yMax,4)}`
+                    : 'selected: none';
+                  return `<div class="goal-mask-preview-card ${key === activeKey ? 'active' : ''}" data-goal-mask-mini-card="${escapeHtml(key)}" data-x-axis="${escapeHtml(pair[0])}" data-y-axis="${escapeHtml(pair[1])}">
+                    <div class="goal-mask-card-title" data-goal-mask-card-title="${escapeHtml(key)}">
+                      <span class="goal-mask-drag-handle" data-goal-mask-drag-handle="${escapeHtml(key)}" draggable="true" title="Drag to reorder">⋮⋮</span>
+                      <strong>${escapeHtml(pair[0])} × ${escapeHtml(pair[1])}</strong>
+                    </div>
+                    <canvas class="goal-mask-mini-canvas" data-goal-mask-mini="${escapeHtml(key)}" data-x-axis="${escapeHtml(pair[0])}" data-y-axis="${escapeHtml(pair[1])}" aria-label="${escapeHtml(`${pair[0]} by ${pair[1]} mask preview`)}"></canvas>
+                    <div class="goal-mask-card-selection">${escapeHtml(selectedText)}</div>
+                    <div class="row-actions">
+                      <button class="secondary" type="button" data-goal-mask-mini-add="${escapeHtml(key)}" ${selection ? '' : 'disabled'}>Add Mask</button>
+                      <button class="ghost" type="button" data-goal-mask-mini-clear="${escapeHtml(key)}" ${selection ? '' : 'disabled'}>Clear</button>
+                    </div>
+                  </div>`;
+                }).join('') || '<div class="empty">No visible projections.</div>'}
+              </div>
+            </div>
           </div>
           <aside class="goal-mask-side-panel">
             <h4>Projection View Panel</h4>
@@ -2522,7 +2585,8 @@
               <button class="ghost" type="button" data-goal-mask-visible="none">전체 끄기</button>
               <button class="ghost" type="button" data-goal-mask-reset-order="true">Reset Order</button>
             </div>
-            <label class="axis-toggle"><input id="goal-mask-show-projected" type="checkbox" ${editor.showProjectedMasks ? 'checked' : ''}><span>show projected masks</span></label>
+            <label class="axis-toggle"><input id="goal-mask-show-projected" type="checkbox" ${editor.showProjectedMasks ? 'checked' : ''}><span>show saved masks</span></label>
+            <label class="axis-toggle"><input id="goal-mask-show-current" type="checkbox" ${editor.showCurrentPreview ? 'checked' : ''}><span>show current preview</span></label>
             <div class="small">visible ${visiblePairs.length} / ${pairs.length}</div>
             <div class="focused-scope-list">
               ${pairs.map(pair => {
@@ -2531,30 +2595,6 @@
               }).join('')}
             </div>
           </aside>
-        </div>
-        <div>
-          <h4>Mini Projection Preview Grid</h4>
-          <div class="goal-mask-preview-grid">
-            ${visiblePairs.map(pair => {
-              const key = projectionKey(pair[0], pair[1]);
-              const selection = editor.cardSelections?.[key] || null;
-              const selectedText = selection
-                ? `${selection.xAxis} ${formatNumber(selection.xMin,4)}~${formatNumber(selection.xMax,4)} / ${selection.yAxis} ${formatNumber(selection.yMin,4)}~${formatNumber(selection.yMax,4)}`
-                : 'selected: none';
-              return `<div class="goal-mask-preview-card ${key === activeKey ? 'active' : ''}" data-goal-mask-mini-card="${escapeHtml(key)}" data-x-axis="${escapeHtml(pair[0])}" data-y-axis="${escapeHtml(pair[1])}">
-                <div class="goal-mask-card-title" data-goal-mask-card-title="${escapeHtml(key)}">
-                  <span class="goal-mask-drag-handle" data-goal-mask-drag-handle="${escapeHtml(key)}" draggable="true" title="Drag to reorder">⋮⋮</span>
-                  <strong>${escapeHtml(pair[0])} × ${escapeHtml(pair[1])}</strong>
-                </div>
-                <canvas class="goal-mask-mini-canvas" data-goal-mask-mini="${escapeHtml(key)}" data-x-axis="${escapeHtml(pair[0])}" data-y-axis="${escapeHtml(pair[1])}" aria-label="${escapeHtml(`${pair[0]} by ${pair[1]} mask preview`)}"></canvas>
-                <div class="goal-mask-card-selection">${escapeHtml(selectedText)}</div>
-                <div class="row-actions">
-                  <button class="secondary" type="button" data-goal-mask-mini-add="${escapeHtml(key)}" ${selection ? '' : 'disabled'}>Add Mask</button>
-                  <button class="ghost" type="button" data-goal-mask-mini-clear="${escapeHtml(key)}" ${selection ? '' : 'disabled'}>Clear</button>
-                </div>
-              </div>`;
-            }).join('') || '<div class="empty">No visible projections.</div>'}
-          </div>
         </div>
       </div>`;
       requestAnimationFrame(refreshGoalMaskCanvases);
@@ -2581,9 +2621,6 @@
       const mini = Boolean(options.mini);
       const { ctx, width, height } = setupGoalMaskCanvas(canvas, mini ? 180 : 320, mini ? 140 : 360);
       const editor = ensureGoalMaskEditor(goal);
-      const zoom = mini ? 1 : Math.max(1, Math.min(80, Number(editor.zoom) || 1));
-      const panX = mini ? 0 : Number(editor.panX) || 0;
-      const panY = mini ? 0 : Number(editor.panY) || 0;
       const xRange = axisDomainRange(xAxis);
       const yRange = axisDomainRange(yAxis);
       const xSpan = Math.max(1e-12, xRange.max - xRange.min);
@@ -2591,6 +2628,12 @@
       const xBins = axisBinCount(xAxis);
       const yBins = axisBinCount(yAxis);
       const pairKey = projectionKey(xAxisName, yAxisName);
+      const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
+      const isActive = pairKey === activeKey;
+      const view = isActive ? goalMaskViewForPair(pairKey, editor) : { zoom:1, panX:0, panY:0 };
+      const zoom = Math.max(1, Math.min(80, Number(view.zoom) || 1));
+      const panX = Number(view.panX) || 0;
+      const panY = Number(view.panY) || 0;
       canvas.dataset.xBins = String(xBins);
       canvas.dataset.yBins = String(yBins);
       ctx.clearRect(0, 0, width, height);
@@ -2634,6 +2677,29 @@
           ctx.strokeRect(left, top, rectW, rectH);
         });
       }
+      if (editor.showCurrentPreview) {
+        const currentRule = currentGoalMaskSelectionRule(goal);
+        const projected = projectedRuleRangeOnPair(currentRule, goal, xAxisName, yAxisName);
+        if (projected) {
+          const x0 = xToPx(projected.xMin);
+          const x1 = xToPx(projected.xMax);
+          const y0 = yToPx(projected.yMin);
+          const y1 = yToPx(projected.yMax);
+          const left = Math.min(x0, x1);
+          const top = Math.min(y0, y1);
+          const rectW = Math.abs(x1 - x0);
+          const rectH = Math.abs(y1 - y0);
+          const fullX = Number(projected.xMin) <= xRange.min && Number(projected.xMax) >= xRange.max;
+          const fullY = Number(projected.yMin) <= yRange.min && Number(projected.yMax) >= yRange.max;
+          ctx.fillStyle = fullX && fullY ? 'rgba(180,71,58,.10)' : 'rgba(180,71,58,.26)';
+          ctx.fillRect(left, top, rectW, rectH);
+          ctx.strokeStyle = '#b4473a';
+          ctx.lineWidth = isActive ? 2.2 : 1.6;
+          ctx.setLineDash([6, 4]);
+          ctx.strokeRect(left, top, rectW, rectH);
+          ctx.setLineDash([]);
+        }
+      }
       const dragSelection = state.goalMaskDrag?.selection;
       const savedSelection = editor.cardSelections?.[pairKey] || null;
       const fallbackSelection = !mini ? editor.selection : null;
@@ -2661,8 +2727,6 @@
       }
     }
     function refreshGoalMaskCanvases() {
-      const active = $('goal-mask-active-canvas');
-      if (active) drawGoalMaskProjection(active, active.dataset.xAxis, active.dataset.yAxis, { mini:false });
       document.querySelectorAll('canvas[data-goal-mask-mini]').forEach(canvas => {
         drawGoalMaskProjection(canvas, canvas.dataset.xAxis, canvas.dataset.yAxis, { mini:true });
       });
@@ -2675,9 +2739,12 @@
       const rect = canvas.getBoundingClientRect();
       const editor = ensureGoalMaskEditor(goal);
       const mini = Boolean(canvas.dataset.goalMaskMini);
-      const zoom = mini ? 1 : Math.max(1, Math.min(80, Number(editor.zoom) || 1));
-      const panX = mini ? 0 : (Number(editor.panX) || 0);
-      const panY = mini ? 0 : (Number(editor.panY) || 0);
+      const pairKey = projectionKey(canvas.dataset.xAxis, canvas.dataset.yAxis);
+      const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
+      const view = (mini && pairKey === activeKey) ? goalMaskViewForPair(pairKey, editor) : { zoom:1, panX:0, panY:0 };
+      const zoom = Math.max(1, Math.min(80, Number(view.zoom) || 1));
+      const panX = Number(view.panX) || 0;
+      const panY = Number(view.panY) || 0;
       const localX = event.clientX - rect.left - panX;
       const localY = event.clientY - rect.top - panY;
       const xBins = axisBinCount(xAxis);
@@ -3498,6 +3565,14 @@
           refreshGoalMaskCanvases();
           return;
         }
+        if (target.id === 'goal-mask-show-current') {
+          const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
+          editor.showCurrentPreview = Boolean(target.checked);
+          state.goalMaskEditor = editor;
+          saveGoalMaskEditorSettings();
+          refreshGoalMaskCanvases();
+          return;
+        }
         const pairKey = target.dataset.goalMaskPairVisible;
         if (pairKey) {
           const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
@@ -3533,19 +3608,6 @@
           state.goalMaskEditor = editor;
           saveGoalMaskEditorSettings();
           renderFeasibleRuleBuilder();
-          return;
-        }
-        const zoomAction = button.dataset.goalMaskZoom;
-        if (zoomAction) {
-          const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
-          const canvas = $('goal-mask-active-canvas');
-          const rect = canvas?.getBoundingClientRect();
-          if (zoomAction === 'in' && rect) zoomGoalMaskAtPoint(editor, rect.width / 2, rect.height / 2, 1.25);
-          if (zoomAction === 'out' && rect) zoomGoalMaskAtPoint(editor, rect.width / 2, rect.height / 2, 1 / 1.25);
-          if (zoomAction === 'reset') { editor.zoom = 1; editor.panX = 0; editor.panY = 0; }
-          state.goalMaskEditor = editor;
-          saveGoalMaskEditorSettings();
-          scheduleGoalMaskCanvasRefresh();
           return;
         }
         const visibleAction = button.dataset.goalMaskVisible;
@@ -3613,18 +3675,19 @@
         document.querySelectorAll('.goal-mask-preview-card.dragging').forEach(card => card.classList.remove('dragging'));
       });
       $('goal-mask-editor').addEventListener('pointerdown', event => {
-        const canvas = event.target.closest?.('#goal-mask-active-canvas, canvas[data-goal-mask-mini]');
+        const canvas = event.target.closest?.('canvas[data-goal-mask-mini]');
         if (!canvas) return;
         canvas.setPointerCapture?.(event.pointerId);
         const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
-        const isMini = Boolean(canvas.dataset.goalMaskMini);
+        const pairKey = projectionKey(canvas.dataset.xAxis, canvas.dataset.yAxis);
         editor.activePair = [canvas.dataset.xAxis, canvas.dataset.yAxis];
-        editor.visiblePairs[projectionKey(canvas.dataset.xAxis, canvas.dataset.yAxis)] = true;
+        editor.visiblePairs[pairKey] = true;
         state.goalMaskEditor = editor;
         const startBin = goalMaskBinFromEvent(canvas, event);
-        state.goalMaskDrag = (!isMini && (event.altKey || event.button === 1))
-          ? { type:'pan', canvas, startX:event.clientX, startY:event.clientY, panX:editor.panX || 0, panY:editor.panY || 0 }
-          : { type:'select', canvas, isMini, startBin, endBin:startBin };
+        const view = goalMaskViewForPair(pairKey, editor);
+        state.goalMaskDrag = (event.altKey || event.button === 1)
+          ? { type:'pan', canvas, pairKey, startX:event.clientX, startY:event.clientY, panX:view.panX || 0, panY:view.panY || 0 }
+          : { type:'select', canvas, pairKey, startBin, endBin:startBin };
         event.preventDefault();
       });
       $('goal-mask-editor').addEventListener('pointermove', event => {
@@ -3632,8 +3695,10 @@
         if (!drag || drag.canvas !== event.target) return;
         if (drag.type === 'pan') {
           const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
-          editor.panX = drag.panX + event.clientX - drag.startX;
-          editor.panY = drag.panY + event.clientY - drag.startY;
+          const view = goalMaskViewForPair(drag.pairKey, editor);
+          view.panX = drag.panX + event.clientX - drag.startX;
+          view.panY = drag.panY + event.clientY - drag.startY;
+          editor.viewByPair[drag.pairKey] = view;
           state.goalMaskEditor = editor;
           saveGoalMaskEditorSettings();
           scheduleGoalMaskCanvasRefresh();
@@ -3660,11 +3725,17 @@
         }
       });
       $('goal-mask-editor').addEventListener('wheel', event => {
-        if (!event.ctrlKey || event.target.id !== 'goal-mask-active-canvas') return;
-        event.preventDefault();
+        const canvas = event.target.closest?.('canvas[data-goal-mask-mini]');
+        if (!canvas) return;
         const editor = ensureGoalMaskEditor(state.draftGoal || blankGoal());
-        const rect = event.target.getBoundingClientRect();
-        zoomGoalMaskAtPoint(editor, event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1.18 : 1 / 1.18);
+        const pairKey = projectionKey(canvas.dataset.xAxis, canvas.dataset.yAxis);
+        const activeKey = projectionKey(editor.activePair?.[0], editor.activePair?.[1]);
+        if (pairKey !== activeKey) return;
+        event.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const view = goalMaskViewForPair(pairKey, editor);
+        zoomGoalMaskAtPoint(view, event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1.18 : 1 / 1.18);
+        editor.viewByPair[pairKey] = view;
         state.goalMaskEditor = editor;
         saveGoalMaskEditorSettings();
         scheduleGoalMaskCanvasRefresh();
