@@ -290,19 +290,19 @@
           <button class="secondary" id="axis-add-button" type="button">Axis 추가</button>
         </div>
         <div>
-          <h3>Feasible Rule Builder</h3>
-          <p class="small">Feasible Domain은 2D Projection Mask box / Focused 2D Mask / Conditional Rule에서 생성된 exact rectangular exclusion box 조합으로 정의됩니다. Leesin은 전체 고차원 grid를 실제로 생성하지 않고, a_valid는 mask box 합집합으로 exact 계산합니다.</p>
+          <h3>2D Mask Editor</h3>
+          <p class="small">실험 가능 영역을 설정합니다.</p>
           <div id="goal-mask-editor"></div>
           <div id="focused-mask-admin-builder"></div>
           <div id="feasible-rule-list" class="rule-builder-list"></div>
           <div class="row-actions">
-            <button class="secondary" id="feasible-rule-add" type="button">IF-THEN Rule 추가</button>
+            <button class="secondary" id="feasible-rule-add" type="button">Add Mask</button>
           </div>
         </div>
         <div>
-          <h3>Legacy Advanced Expressions</h3>
-          <p class="small">Advanced Expressions are no longer certified for exact a_valid. They are preserved for migration only and are not used in Coverage, Confidence, or row filtering. Convert them to Conditional or Focused 2D Projection Mask rules.</p>
-          <label>Legacy Advanced Expressions<textarea id="feasible-expression-input" spellcheck="false" disabled placeholder="Legacy expressions appear here for migration only."></textarea></label>
+          <h3>Legacy Expressions</h3>
+          <p class="small">이전 expression은 읽기 전용입니다.</p>
+          <label>Legacy Expressions<textarea id="feasible-expression-input" spellcheck="false" disabled placeholder="Legacy expressions"></textarea></label>
           <div class="row-actions">
             <button class="secondary" id="validate-feasible-expressions" type="button">Validate Expressions</button>
           </div>
@@ -856,7 +856,7 @@
         <div class="preview-metric"><span class="small">eligible records</span><strong>${escapeHtml(item.eligibleRecords ?? 0)}</strong></div>
         <div class="preview-metric"><span class="small">legacy excluded</span><strong>${escapeHtml(item.legacyExcluded ?? 0)}</strong></div>
         ${item.gridPreviewSkipped ? `<div class="notice">${escapeHtml(item.previewWarning || 'Grid preview recalculation skipped for this large grid.')}</div>` : ''}
-        ${item.feasibleMaskEnabled ? `<div class="notice">${escapeHtml(item.feasibleMaskMessage || 'a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.')}</div>` : ''}
+        ${item.feasibleMaskEnabled ? `<div class="notice">Feasible Mask: ${escapeHtml(item.aValidStatus || 'Stale')}</div>` : ''}
       </div>`;
     }
     // Grid Preview
@@ -1019,7 +1019,7 @@
       return `<aside class="focused-mask-side-panel" id="focused-mask-tool">
         <div>
           <h3>Focused Mask Tool Settings</h3>
-          <div class="small">Drag a projection region to fill the selected 2D range. The mask is stored only when Add Mask Rule or Save Changes is clicked.</div>
+          <div class="small">Drag to fill range. Save to apply.</div>
         </div>
         <label>Mask Mode<select id="focused-mask-mode"><option value="exclude" selected>Exclude selected region from feasible domain</option><option value="include" disabled>Include mode later</option></select></label>
         <label>Active Projection Pair<select id="focused-mask-pair">${pairOptions}</select></label>
@@ -1060,7 +1060,7 @@
           <div class="focused-expression" id="focused-mask-expression">${escapeHtml(expression)}</div>
         </div>
         <div class="row-actions">
-          <button class="primary" id="focused-mask-add" type="button">Add Mask Rule</button>
+          <button class="primary" id="focused-mask-add" type="button">Add Mask</button>
           <button class="secondary" id="focused-mask-save" type="button" ${state.focusedMaskEditingRuleId ? '' : 'disabled'}>Save Changes</button>
           <button class="ghost" id="focused-mask-reset" type="button">Reset Tool Settings</button>
         </div>
@@ -1084,13 +1084,13 @@
         <div class="projection-toolbar">
           <div>
             <h3>Projection Explorer</h3>
-            <div class="small">2D projection은 고차원 density grid를 두 축으로 압축한 보기입니다. 따라서 projection이 꽉 차 보여도 multidimensional exact bin은 sparse할 수 있습니다. Ctrl+Scroll로 확대하고, bin을 클릭하면 해당 target subset이 다른 projection에서 어디에 위치하는지 확인할 수 있습니다.</div>
+            <div class="small">Ctrl+Scroll로 확대하고, bin을 클릭해 target subset을 확인합니다.</div>
           </div>
           <label>Mode<select id="projection-mode">${modes.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('')}</select></label>
           <button class="ghost" id="projection-clear" type="button">선택 해제</button>
         </div>
         ${renderGridPreviewEditor(explorer)}
-        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Domain Mask</strong><br>Analysis Projection Explorer는 분석 결과를 해석하는 시각화 도구입니다. 공식 feasible domain 설정은 Goal Configuration Projection Mask Editor에서 수행합니다. Valid bins ${escapeHtml(explorer.validBins ?? explorer.aValid ?? 0)} · masked bins ${escapeHtml(explorer.maskedBins ?? 0)} · mask boxes ${escapeHtml(explorer.maskBoxCount ?? 0)}<div class="small">${escapeHtml(explorer.feasibleMaskMessage || 'a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.')}</div><div class="small">${(explorer.feasibleExpressions || []).map(expression => escapeHtml(expression)).join('<br>')}</div></div>` : ''}
+        ${explorer.feasibleMaskEnabled ? `<div class="notice"><strong>Feasible Mask</strong><br>Valid ${escapeHtml(explorer.validBins ?? explorer.aValid ?? 'pending')} · Masked ${escapeHtml(explorer.maskedBins ?? 'pending')} · Boxes ${escapeHtml(explorer.maskBoxCount ?? 0)}</div>` : ''}
         ${explorer.projectionPairTruncated ? `<div class="notice">Projection pairs truncated to ${escapeHtml(explorer.maxProjectionPairs)} of ${escapeHtml(explorer.allAxisPairCount)} for browser performance.</div>` : ''}
         <div class="notice" id="projection-selection-info">${escapeHtml(projectionSelectionText(explorer))}</div>
         ${explorer.targetRowTupleSampled ? `<div class="tag warn">Target row bin tuples are sampled for linked highlighting: ${escapeHtml(explorer.targetRowTupleLimit)} of ${escapeHtml(explorer.targetRowTupleCount)} rows.</div>` : ''}
@@ -1620,7 +1620,7 @@
         const rule = focusedRuleListForCurrentGoal().find(item => item.id === ruleId);
         const expression = rule?.expression || compileFocusedMaskRule(rule);
         if (!expression) return;
-        if (!confirm('이 규칙을 Legacy Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?')) return;
+        if (!confirm('Legacy Expression으로 전환할까요? 전환 후에는 UI 편집을 사용할 수 없습니다.')) return;
         const goal = clone(currentReportGoal());
         goal.feasibleDomainRules = normalizedFeasibleRulesForUi(goal).filter(item => item.id !== ruleId);
         goal.legacyAdvancedExpressions = [...advancedExpressionsForGoal(goal), expression];
@@ -1833,12 +1833,12 @@
           <div class="notice">
             <strong>Specificity Score 해석</strong><br>
             Specificity Score는 target rows가 들어간 bin의 target-included reference count를 occupied reference bin count 분포와 비교한 eCDF 기반 engineering score입니다. 낮은 reference count bin일수록 점수가 높아집니다. 이는 p-value나 사후확률이 아닙니다.
-            Mean Rarity는 보조 advanced metric으로 유지되며, 현재 Specificity Score 계산에는 사용되지 않습니다. 2D projection은 고차원 bin을 두 축으로 압축한 보기이므로, 2D에서는 꽉 차 보이는 영역도 multidimensional exact bin 기준으로는 sparse할 수 있습니다.
+            Mean Rarity는 보조 advanced metric으로 유지되며, 현재 Specificity Score 계산에는 사용되지 않습니다.
           </div>
           <div class="notice">
             <strong>Density 기준</strong><br>
             Main specificity and confidence use a target-included reference density map: saved external peer rows plus the current target rows.
-            ${result.confidencePending || result.coveragePending ? '<div class="tag warn">a_valid exact calculation is not ready. Coverage and Confidence will be available after Compute a_valid finishes.</div>' : ''}
+            ${result.confidencePending || result.coveragePending ? '<div class="tag warn">a_valid stale. Run Compute a_valid.</div>' : ''}
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">visualization ${escapeHtml(coverageBasisLabel(visualizationBasis))}</span>
               <span class="metric-pill">external peer records ${escapeHtml(externalPeerRecordCount ?? eligibleClusters)}</span>
@@ -1858,15 +1858,14 @@
           </div>
           <div class="notice">
             <strong>Feasible Domain</strong><br>
-            ${feasibleMaskEnabled ? 'Feasible Domain is defined by exact 2D Projection Mask boxes. Masked bins are excluded from Coverage and Specificity calculations.' : 'No Feasible Domain Mask is active; the full Cartesian domain is valid.'}
+            ${feasibleMaskEnabled ? 'Mask enabled.' : 'No mask.'}
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">total bins ${escapeHtml(totalBins)}</span>
               <span class="metric-pill">valid bins ${escapeHtml(validBinsText)}</span>
               <span class="metric-pill">masked bins ${escapeHtml(maskedBinsText)}</span>
-              <span class="metric-pill">mask boxes ${escapeHtml(maskBoxCount)}</span>
+              <span class="metric-pill">masks ${escapeHtml(maskBoxCount)}</span>
               <span class="metric-pill">valid domain ${escapeHtml(validDomainText)}</span>
             </div>
-            <div class="small" style="margin-top:8px;">a_valid is computed exactly from the union of mask boxes. Leesin does not materialize the full grid.</div>
             ${feasibleExpressions.length ? `<div class="small" style="margin-top:8px;">${feasibleExpressions.map(expression => escapeHtml(expression)).join('<br>')}</div>` : ''}
           </div>
           <div class="small">Max specificity ${maxSpecificity == null ? '-' : formatPercent(maxSpecificity,1)} · Mean Rarity advanced ${formatNumber(result.mean_rarity,3)} · Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
@@ -1964,7 +1963,7 @@
       if (totalBins > 100000) warnings.push('Resolution이 현재 데이터 수에 비해 과도하게 세밀할 수 있음.');
       if (legacyExcluded) warnings.push('일부 기존 record는 row-level vectors가 없어 density 계산에서 제외됩니다.');
       if (gridSignatureExcluded) warnings.push('Axis 구성이 맞지 않는 record는 density 계산에서 제외됩니다.');
-      if (expressionCount) warnings.push('Feasible Domain은 mask box 합집합으로 exact 계산됩니다. Advanced Expression은 certified rule로 사용되지 않습니다.');
+      if (expressionCount) warnings.push('Mask rules configured.');
       return {
         basis:'row_level_bin_occupancy',
         axisBins,
@@ -1989,9 +1988,9 @@
       const preview = computeGoalPreview(state.draftGoal);
       if (!preview) { $('goal-bin-preview').innerHTML = ''; return; }
       $('goal-bin-preview').innerHTML = `
-        <strong>a_valid / Bin Preview</strong><br>
+        <strong>a_valid</strong><br>
         기준: row-level bin occupancy<br>
-        전체: ${preview.occupiedBins}/${preview.totalBins} rectangular bins · a_valid ${escapeHtml(preview.aValid ?? 'pending')} · masked ${escapeHtml(preview.maskedBins ?? 'pending')} · Coverage preview ${formatPercent(preview.estimatedCoverage,2)}
+        ${preview.occupiedBins}/${preview.totalBins} bins · a_valid ${escapeHtml(preview.aValid ?? 'pending')} · masked ${escapeHtml(preview.maskedBins ?? 'pending')} · Coverage ${formatPercent(preview.estimatedCoverage,2)}
         <div class="inline-metrics" style="margin-top:8px;">
           <span class="metric-pill">eligible records ${escapeHtml(preview.coverageEligibleClusterCount ?? 0)}</span>
           <span class="metric-pill">row-level observations ${escapeHtml(preview.rowLevelObservationCount ?? 0)}</span>
@@ -2000,7 +1999,7 @@
           <span class="metric-pill">feasible rules ${escapeHtml(preview.feasibleExpressionCount ?? 0)}</span>
           <span class="metric-pill">a_valid status ${escapeHtml(state.draftGoal?.aValidStatus || 'ready')}</span>
         </div>
-        <div class="small">Coverage와 Confidence는 a_valid 계산 완료 후 exact denominator를 사용합니다. Leesin은 전체 고차원 grid를 실제로 생성하지 않습니다.</div>
+        <div class="small">Coverage와 Confidence는 a_valid 준비 후 표시됩니다.</div>
         ${preview.coveragePending ? '<div class="tag warn">Mask or axis settings changed. Recompute a_valid.</div>' : ''}
         <div class="row-actions" style="margin-top:8px;"><button class="secondary" id="compute-a-valid" type="button">Compute a_valid</button></div>
         ${(preview.warnings || (preview.warning ? [preview.warning] : [])).map(message => `<div class="tag warn">${escapeHtml(message)}</div>`).join('')}
@@ -2199,30 +2198,29 @@
       const ruleExpressions = new Set((goal?.feasibleDomainRules || []).filter(rule => rule.enabled !== false).map(rule => rule.expression || compileFeasibleRule(rule)).filter(Boolean));
       return (goal?.feasibleDomainExpressions || []).filter(expression => !ruleExpressions.has(expression));
     }
-    // Feasible Rule Builder
+    // Feasible Mask UI
     function renderGoalMaskEditor() {
       const node = $('goal-mask-editor');
       if (!node) return;
       const goal = state.draftGoal || blankGoal();
       const axes = goal.axes || [];
       if (axes.length < 2) {
-        node.innerHTML = `<div class="rule-builder-card"><h4>Goal Configuration Projection Mask Editor</h4><div class="empty">2D Projection Mask requires at least 2 axes.</div></div>`;
+        node.innerHTML = `<div class="rule-builder-card"><h4>2D Mask Editor</h4><div class="empty">At least 2 axes required.</div></div>`;
         return;
       }
       const builder = ensureAdminFocusedMaskBuilder(goal);
       const axisOptions = selected => axes.map(axis => `<option value="${escapeHtml(axis.name)}" ${axis.name === selected ? 'selected' : ''}>${escapeHtml(axis.name)}</option>`).join('');
       node.innerHTML = `<div class="rule-builder-card">
         <div>
-          <h4>Goal Configuration Projection Mask Editor</h4>
-          <div class="small">Goal Configuration Projection Mask Editor는 실험 가능 영역을 정의하는 설정 도구입니다. Analysis Projection Explorer는 분석 결과를 해석하는 시각화 도구입니다.</div>
-          <div class="small">현재 2D plane은 Domain Range / Resolution만으로 표시됩니다. 전체 고차원 grid는 materialize하지 않습니다.</div>
+          <h4>2D Mask Editor</h4>
+          <div class="small">실험 가능 영역을 설정합니다.</div>
         </div>
         <div class="focused-mask-fields">
           <label>X Axis<select data-goal-mask-axis="xAxis">${axisOptions(builder.xAxis)}</select></label>
           <label>Y Axis<select data-goal-mask-axis="yAxis">${axisOptions(builder.yAxis)}</select></label>
         </div>
-        <canvas id="goal-mask-editor-canvas" class="projection-canvas" width="320" height="260" aria-label="Goal Configuration Projection Mask Editor"></canvas>
-        <div class="small">캔버스를 드래그하면 아래 Focused 2D Mask Builder의 X/Y min/max가 채워집니다. Add Focused 2D Mask Rule을 눌러야 실제 rule로 저장됩니다.</div>
+        <canvas id="goal-mask-editor-canvas" class="projection-canvas" width="320" height="260" aria-label="2D Mask Editor"></canvas>
+        <div class="small">Drag to fill X/Y range.</div>
       </div>`;
       requestAnimationFrame(drawGoalMaskEditorCanvas);
     }
@@ -2246,8 +2244,8 @@
       }
       ctx.fillStyle = '#667789';
       ctx.font = '12px Segoe UI';
-      ctx.fillText('Goal Configuration Projection Mask Editor', 12, 20);
-      ctx.fillText('Drag selection fills Focused Mask Builder ranges.', 12, 40);
+      ctx.fillText('2D Mask Editor', 12, 20);
+      ctx.fillText('Drag to set range.', 12, 40);
     }
     function renderAdminFocusedMaskBuilder() {
       const goal = state.draftGoal || blankGoal();
@@ -2257,9 +2255,8 @@
       const builder = ensureAdminFocusedMaskBuilder(goal);
       if (axes.length < 2) {
         node.innerHTML = `<div class="rule-builder-card">
-          <h4>Focused 2D Mask Builder</h4>
-          <div class="small">2D Focused Mask can be created here manually, or after analysis from Report &gt; Projection Explorer by dragging a projection region.</div>
-          <div class="empty">Focused 2D Mask requires at least 2 axes.</div>
+          <h4>Focused Mask</h4>
+          <div class="empty">At least 2 axes required.</div>
         </div>`;
         return;
       }
@@ -2268,8 +2265,7 @@
       const draftRule = adminFocusedMaskRuleFromBuilder(goal, builder.editingRuleId || null);
       node.innerHTML = `<div class="rule-builder-card" id="focused-mask-admin-card">
         <div>
-          <h4>Focused 2D Mask Builder</h4>
-          <div class="small">2D Focused Mask can be created here manually, or after analysis from Report &gt; Projection Explorer by dragging a projection region.</div>
+          <h4>Focused Mask</h4>
         </div>
         <div class="rule-builder-row">
           <label>X Axis<select data-admin-focused-field="xAxis">${axisOptions(builder.xAxis, builder.yAxis)}</select></label>
@@ -2301,9 +2297,9 @@
           <div class="rule-expression-preview" id="focused-admin-expression">Generated expression: ${escapeHtml(draftRule.expression || 'incomplete rule')}</div>
         </div>
         <div class="row-actions">
-          <button class="secondary" id="focused-admin-add" type="button">Add Focused 2D Mask Rule</button>
-          <button class="secondary" id="focused-admin-save" type="button" ${builder.editingRuleId ? '' : 'disabled'}>Save Focused Mask Changes</button>
-          <button class="ghost" id="focused-admin-reset" type="button">Reset Focused Mask Builder</button>
+          <button class="secondary" id="focused-admin-add" type="button">Add Mask</button>
+          <button class="secondary" id="focused-admin-save" type="button" ${builder.editingRuleId ? '' : 'disabled'}>Save Changes</button>
+          <button class="ghost" id="focused-admin-reset" type="button">Reset</button>
         </div>
       </div>`;
     }
@@ -2356,7 +2352,7 @@
             <button class="danger" type="button" data-rule-remove="${escapeHtml(rule.id)}">삭제</button>
           </div>
         </div>`;
-      }).join('') : '<div class="empty">아직 certified feasible mask rule이 없습니다. Conditional Rule 또는 Focused 2D Mask를 추가하세요.</div>';
+      }).join('') : '<div class="empty">No mask rules yet.</div>';
     }
     // Goal Admin
     function renderAdmin() {
@@ -2738,7 +2734,7 @@
         updateTaskProgress(20, 'validate axes', 'Axis와 rule 구조를 확인합니다.');
         const { response, data } = await fetchJson('/api/admin/goals/validate-expressions', { method:'POST', headers:adminHeaders(), body:JSON.stringify(state.draftGoal) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Feasible expression 검증 실패');
-        updateTaskProgress(80, 'a_valid exact', 'mask box union 결과를 반영합니다.');
+        updateTaskProgress(80, 'a_valid', '상태를 반영합니다.');
         state.draftGoal = clone(data.goal || state.draftGoal);
         renderAdmin();
         setAdminMessage('success', `Feasible mask rule 검증 완료 · a_valid ${data.maskInfo?.validBins ?? data.maskInfo?.aValid ?? 'pending'} / ${data.maskInfo?.totalBins ?? '-'}`);
@@ -2767,9 +2763,9 @@
       syncDraftFromAdminForm();
       if (button?.dataset.loading === 'true') return;
       setButtonLoading(button, true, '계산 중...');
-      startTaskProgress('a_valid 계산', 'mask box union을 계산 중입니다.');
+      startTaskProgress('a_valid 계산', '계산 중입니다.');
       try {
-        updateTaskProgress(10, 'rules normalize', '저장된 Goal의 mask box union 계산을 요청합니다.');
+        updateTaskProgress(10, 'rules normalize', '저장된 Goal 설정을 확인합니다.');
         const goalId = state.draftGoal?.id;
         if (!goalId) throw new Error('먼저 Goal을 저장하세요.');
         const { response, data } = await fetchJson(`/api/admin/goals/${encodeURIComponent(goalId)}/compute-a-valid`, { method:'POST', headers:adminHeaders(), body:JSON.stringify({}) }, 60000);
@@ -2984,14 +2980,14 @@
         if (event.target.id === 'focused-admin-add') {
           setButtonLoading(event.target, true, '추가 중...');
           startTaskProgress('Feasible mask rule 저장', 'Focused 2D Mask rule을 생성합니다.');
-          try { updateTaskProgress(50, 'compile rule', '선택 범위를 mask box rule로 변환합니다.'); addAdminFocusedMaskRule(); endTaskProgress('Focused 2D Mask rule 추가 완료'); }
+          try { updateTaskProgress(50, 'compile rule', '선택 범위를 저장합니다.'); addAdminFocusedMaskRule(); endTaskProgress('Mask 추가 완료'); }
           catch (error) { setAdminMessage('error', error.message || 'Focused 2D Mask rule 추가 실패'); failTaskProgress(error.message || 'Focused 2D Mask rule 추가 실패'); }
           finally { setButtonLoading(event.target, false); updateButtons(); }
         }
         if (event.target.id === 'focused-admin-save') {
           setButtonLoading(event.target, true, '저장 중...');
           startTaskProgress('Feasible mask rule 수정', 'Focused 2D Mask rule 변경사항을 저장합니다.');
-          try { updateTaskProgress(50, 'compile rule', '수정된 범위를 mask box rule로 변환합니다.'); saveAdminFocusedMaskRule(); endTaskProgress('Focused 2D Mask rule 수정 완료'); }
+          try { updateTaskProgress(50, 'compile rule', '수정된 범위를 저장합니다.'); saveAdminFocusedMaskRule(); endTaskProgress('Mask 수정 완료'); }
           catch (error) { setAdminMessage('error', error.message || 'Focused 2D Mask rule 수정 실패'); failTaskProgress(error.message || 'Focused 2D Mask rule 수정 실패'); }
           finally { setButtonLoading(event.target, false); updateButtons(); }
         }
@@ -3063,8 +3059,8 @@
           const expression = rule?.expression || compileFeasibleRule(rule);
           const type = rule?.sourceType || rule?.guiSpec?.type || 'gui_conditional';
           const message = type === 'focused_2d_mask'
-            ? '이 규칙을 Legacy Expression으로 전환하면 더 이상 Focused Mask UI로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?'
-            : '이 규칙을 Legacy Expression으로 전환하면 더 이상 IF-THEN Rule Builder로 편집할 수 없고 certified a_valid 계산에는 사용되지 않습니다. 계속하시겠습니까?';
+            ? 'Legacy Expression으로 전환할까요? 전환 후에는 Focused Mask UI로 편집할 수 없습니다.'
+            : 'Legacy Expression으로 전환할까요? 전환 후에는 IF-THEN UI로 편집할 수 없습니다.';
           if (expression && confirm(message)) {
             state.draftGoal.feasibleDomainRules = state.draftGoal.feasibleDomainRules.filter(item => item.id !== convertId);
             state.draftGoal.legacyAdvancedExpressions = [...advancedExpressionsForGoal(state.draftGoal), expression];
