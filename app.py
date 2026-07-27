@@ -9,6 +9,7 @@ import itertools
 import json
 import math
 import os
+import threading
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -73,6 +74,7 @@ CERTIFIED_FEASIBLE_DOMAIN_MESSAGE = (
     "Leesin does not materialize the full multidimensional grid."
 )
 A_VALID_JOBS: dict[str, dict[str, Any]] = {}
+GOAL_LOG_WRITE_LOCK = threading.Lock()
 SERVER_INSTANCE_ID = os.environ.get("RENDER_INSTANCE_ID") or os.environ.get("HOSTNAME") or uuid.uuid4().hex[:12]
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
@@ -778,7 +780,11 @@ def density_preview_metrics_from_coverage(selected_goal: dict[str, Any], coverag
     else:
         proportions = [count / peer_valid_rows for count in counts]
         equitability = -sum(p * math.log(p) for p in proportions if p > 0) / math.log(occupied_bins)
-    confidence = float((observation_support * coverage * equitability) ** (1.0 / 3.0)) if observation_support and coverage and equitability else None
+    confidence = (
+        None
+        if coverage is None
+        else float((observation_support * coverage * equitability) ** (1.0 / 3.0))
+    )
     return {
         "totalBins": int(total_bins),
         "validBins": valid_bins,
@@ -871,6 +877,11 @@ def build_report_visualizations(
     visualization_basis = basis_values.pop() if len(basis_values) == 1 else "mixed"
     normalized_target_bins = {str(key): int(value) for key, value in (target_bin_counts or {}).items()}
     target_meta = target_meta or {}
+    grid_preview_metrics = density_preview_metrics_from_coverage(goal, coverage_info or {})
+    grid_preview_metrics["primaryReferenceMode"] = "external"
+    grid_preview_metrics["referenceModes"] = reference_modes_log_summary(
+        (coverage_info or {}).get("referenceModes")
+    )
     return {
         "observationSupport": {
             "peerObservationCount": int(result.peer_observation_count),
@@ -900,7 +911,7 @@ def build_report_visualizations(
             "totalRows": int(target_meta.get("totalRows") or result.target_total_rows),
         },
         "projectionExplorer": build_projection_explorer(goal, coverage_info or {}, target_row_bin_tuples or []),
-        "gridPreviewMetrics": density_preview_metrics_from_coverage(goal, coverage_info or {}),
+        "gridPreviewMetrics": grid_preview_metrics,
         "targetRowVectors": target_row_vectors or [],
         "targetRowVectorAxisOrder": target_row_vector_axis_order or [axis["name"] for axis in axes],
         "axisNames": [axis["name"] for axis in axes],
@@ -919,14 +930,14 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
             "label": "Coverage",
             "score": round(float(result.coverage_C), 4),
             "impact": "down" if result.coverage_C < 0.3 else "stable",
-            "message": "Coverage measures how much of the feasible input design grid is occupied by target-included reference row-level observations. Output axes are excluded from Coverage.",
+            "message": "Coverage measures how much of the feasible input design grid is occupied by the primary External reference observations. Output axes are excluded from Coverage.",
         }
     reasons = [
         {
             "label": "Observation Support",
             "score": round(float(result.observation_support_S), 4),
             "impact": "down" if result.observation_support_S < 0.6 else "stable",
-            "message": "Observation Support uses target-included reference row-level observations: S = reference rows / (reference rows + K_density). K_density currently reuses the goal K_m value.",
+            "message": "Observation Support uses primary External reference observations: S = reference rows / (reference rows + K_density). K_density currently reuses the goal K_m value.",
         },
         coverage_reason,
         {
@@ -939,10 +950,10 @@ def confidence_reasons(result: DensityDiagnosisResult, warnings: list[dict[str, 
     if warnings:
         reasons.append(
             {
-                "label": "Out-of-domain rows",
+                "label": "Analysis warnings",
                 "score": 0.0,
                 "impact": "down",
-                "message": f"{len(warnings)} target row-level warning(s) were reported. Out-of-domain rows are excluded from target density occupancy and reflected in out_of_domain_rate.",
+                "message": f"{len(warnings)} warning(s) were reported, including reference-support and target-domain warnings.",
             }
         )
     return reasons
@@ -953,9 +964,9 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
     if result.confidence is None:
         messages.append("a_valid exact calculation is not ready. Specificity, Observation Support, and Equitability are available now; Coverage and Confidence will be available after Compute a_valid finishes.")
     if result.specificity_score > 0.75 and result.confidence is not None and result.confidence > 0.7:
-        messages.append("Specificity Score and confidence are both high. Target rows fall in low-density bins relative to the target-included reference count distribution.")
+        messages.append("External Specificity and confidence are both high. Target rows fall in low-density bins relative to saved external references.")
     elif result.specificity_score > 0.75 and (result.confidence is None or result.confidence <= 0.4):
-        messages.append("Target rows are rare against the current target-included reference density map, but the map itself has limited support. Interpret the outlier signal cautiously.")
+        messages.append("Target rows are unsupported or rare against the External reference density map, but that map has limited support. Interpret the outlier signal cautiously.")
     elif result.specificity_score <= 0.5:
         messages.append("Target rows mostly fall in dense or ordinary occupied reference bins.")
     else:
@@ -964,7 +975,7 @@ def build_summary(result: DensityDiagnosisResult) -> list[str]:
     if result.observation_support_S < 0.5:
         messages.append("Observation Support is low. Add more row-level observations or saved external records with row-level sanitized axis vectors.")
     if result.coverage_C is not None and result.coverage_C < 0.3:
-        messages.append("Coverage is low. The target-included reference density map occupies only a small portion of the feasible input design grid.")
+        messages.append("Coverage is low. The External reference density map occupies only a small portion of the feasible input design grid.")
     if result.equitability_E < 0.5:
         messages.append("Equitability is low. Reference observations are concentrated in a small number of occupied bins.")
     if result.unseen_bin_rate > 0:
@@ -1566,6 +1577,169 @@ def format_peer_filter_error(diagnostics: dict[str, Any]) -> str:
     )
 
 
+def empty_external_reference_result(
+    config: ExperimentConfig,
+    target_bin_counts: dict[str, int],
+    target_meta: dict[str, Any],
+    valid_bins: int | None,
+    masked_bins: int | None,
+    feasible_mask_enabled: bool,
+) -> DensityDiagnosisResult:
+    target_tracker = BinGridTracker(config.domain_range, config.resolution)
+    target_tracker.add_bin_counts(target_bin_counts)
+    target_valid_rows = target_tracker.observation_count
+    if target_valid_rows <= 0:
+        raise ValueError("Density grid analysis requires at least one valid target row-level observation.")
+    invalid_target_rows = int(target_meta.get("invalidRowCount") or 0)
+    out_of_domain_rows = int(target_meta.get("outOfDomainRowCount") or 0)
+    masked_out_target_rows = int(target_meta.get("maskedOutRowCount") or target_meta.get("infeasibleRowCount") or 0)
+    target_total_rows = int(
+        target_meta.get("totalRows")
+        or (target_valid_rows + invalid_target_rows + out_of_domain_rows)
+    )
+    total_bins = target_tracker.total_bins
+    boundary_rarity = math.log(max(1, total_bins))
+    return DensityDiagnosisResult(
+        engine="density_grid",
+        specificity_score=1.0,
+        mean_bin_specificity=1.0,
+        max_specificity=1.0,
+        extreme_specificity_rate=1.0,
+        mean_rarity=float(boundary_rarity),
+        max_rarity=float(boundary_rarity),
+        unseen_bin_rate=1.0,
+        rare_bin_rate=1.0,
+        out_of_domain_rate=float(out_of_domain_rows / target_total_rows) if target_total_rows > 0 else 0.0,
+        observation_support_S=0.0,
+        coverage_C=0.0,
+        equitability_E=0.0,
+        confidence=0.0,
+        peer_observation_count=0,
+        valid_target_rows=int(target_valid_rows),
+        invalid_target_rows=invalid_target_rows,
+        out_of_domain_rows=out_of_domain_rows,
+        masked_out_target_rows=masked_out_target_rows,
+        target_total_rows=target_total_rows,
+        total_bins=total_bins,
+        valid_bins=valid_bins,
+        masked_bins=masked_bins,
+        occupied_bins=0,
+        feasible_mask_enabled=feasible_mask_enabled,
+    )
+
+
+def diagnose_reference_mode(
+    config: ExperimentConfig,
+    reference_bin_counts: dict[str, int],
+    design_reference_bin_counts: dict[str, int],
+    target_bin_counts: dict[str, int],
+    target_meta: dict[str, Any],
+    coverage_info: dict[str, Any],
+    design_coverage_info: dict[str, Any],
+    k_density: float,
+    *,
+    empty_external_boundary: bool = False,
+) -> DensityDiagnosisResult:
+    reference_observations = count_map_total(reference_bin_counts)
+    if reference_observations <= 0 and empty_external_boundary:
+        return empty_external_reference_result(
+            config,
+            target_bin_counts,
+            target_meta,
+            int(design_coverage_info["validBins"]) if design_coverage_info.get("validBins") is not None else None,
+            int(design_coverage_info["maskedBins"]) if design_coverage_info.get("maskedBins") is not None else 0,
+            bool(design_coverage_info.get("feasibleMaskEnabled")),
+        )
+    analyzer = DensityGridAnalyzer(config)
+    analyzer.set_peer_bin_counts(reference_bin_counts)
+    analyzer.set_feasible_domain(
+        valid_bins=coverage_info.get("validBins"),
+        masked_bins=int(coverage_info.get("maskedBins") or 0) if coverage_info.get("maskedBins") is not None else 0,
+        feasible_mask_enabled=bool(coverage_info.get("feasibleMaskEnabled")),
+    )
+    result = analyzer.diagnose(target_bin_counts, target_meta)
+    observation_support, coverage, equitability, confidence = compute_density_confidence(
+        design_reference_bin_counts,
+        design_coverage_info.get("validBins"),
+        k_density,
+    )
+    result.observation_support_S = float(observation_support)
+    result.coverage_C = None if coverage is None else float(coverage)
+    result.equitability_E = float(equitability)
+    result.confidence = confidence
+    result.peer_observation_count = count_map_total(design_reference_bin_counts)
+    result.valid_bins = int(design_coverage_info["validBins"]) if design_coverage_info.get("validBins") is not None else None
+    result.masked_bins = int(design_coverage_info["maskedBins"]) if design_coverage_info.get("maskedBins") is not None else 0
+    result.occupied_bins = len(design_reference_bin_counts)
+    return result
+
+
+def reference_mode_payload(
+    base_payload: dict[str, Any],
+    result: DensityDiagnosisResult,
+    config: ExperimentConfig,
+    mode: str,
+    reference_policy: str,
+    target_included: bool,
+    reference_bin_counts: dict[str, int],
+    design_reference_bin_counts: dict[str, int],
+    design_coverage_info: dict[str, Any],
+    external_peer_record_count: int,
+    external_peer_observation_count: int,
+    no_external_reference: bool = False,
+) -> dict[str, Any]:
+    payload = dict(base_payload)
+    payload.update(result.to_payload(config.axis_names))
+    payload["referenceMode"] = mode
+    payload["referenceModeLabel"] = mode.title()
+    payload["referenceDensityPolicy"] = reference_policy
+    payload["reference_density_policy"] = reference_policy
+    payload["targetIncludedInReference"] = target_included
+    payload["target_included_in_reference"] = target_included
+    payload["referenceObservationCount"] = count_map_total(reference_bin_counts)
+    payload["reference_observation_count"] = count_map_total(reference_bin_counts)
+    payload["rowLevelObservationCount"] = count_map_total(reference_bin_counts)
+    payload["referenceOccupiedBins"] = len(reference_bin_counts)
+    payload["reference_occupied_bins"] = len(reference_bin_counts)
+    payload["peerObservationCount"] = count_map_total(design_reference_bin_counts)
+    payload["peer_observation_count"] = count_map_total(design_reference_bin_counts)
+    payload["externalPeerRecordCount"] = external_peer_record_count
+    payload["external_peer_record_count"] = external_peer_record_count
+    payload["externalPeerObservationCount"] = external_peer_observation_count
+    payload["external_peer_observation_count"] = external_peer_observation_count
+    payload["designOccupiedBins"] = len(design_reference_bin_counts)
+    payload["designValidBins"] = design_coverage_info.get("validBins")
+    payload["designTotalBins"] = design_coverage_info.get("rectangularTotalBins")
+    payload["designMaskedBins"] = design_coverage_info.get("maskedBins")
+    payload["designCoverageC"] = payload.get("coverage_C")
+    payload["designEquitabilityE"] = payload.get("equitability_E")
+    payload["designConfidence"] = payload.get("confidence")
+    payload["occupiedBins"] = payload.get("occupied_bins")
+    payload["validTargetRows"] = payload.get("valid_target_rows")
+    payload["outOfDomainRows"] = payload.get("out_of_domain_rows")
+    payload["maskedOutTargetRows"] = payload.get("masked_out_target_rows")
+    payload["infeasibleTargetRows"] = payload.get("infeasible_target_rows")
+    payload["coveragePending"] = payload.get("coverage_C") is None
+    payload["confidencePending"] = payload.get("confidence") is None
+    payload["confidenceExact"] = payload.get("confidence") is not None
+    payload["noExternalReference"] = bool(no_external_reference)
+    payload["no_external_reference"] = bool(no_external_reference)
+    if mode == "external":
+        payload["specificity_interpretation"] = (
+            "Higher means target rows fall in lower-density bins in the saved external peer density map. "
+            "When no external reference rows exist, the boundary score is 1.0 and confidence is 0.0."
+        )
+    elif mode == "internal":
+        payload["specificity_interpretation"] = (
+            "Higher means target rows fall in lower-density bins within the target-only density map."
+        )
+    else:
+        payload["specificity_interpretation"] = (
+            "Higher means target rows fall in lower-density bins in the pooled external-plus-target density map."
+        )
+    return payload
+
+
 def run_density_analysis(
     goal: dict[str, Any],
     selected_goal: dict[str, Any],
@@ -1603,17 +1777,18 @@ def run_density_analysis(
     external_peer_observation_count = count_map_total(external_bin_counts)
     reference_observation_count = count_map_total(reference_bin_counts)
     reference_occupied_bins = len(reference_bin_counts)
-    internal_density_mode = external_peer_record_count == 0 or external_peer_observation_count == 0
-    self_contained_warning = bool(internal_density_mode and reference_observation_count > 0)
-    if self_contained_warning:
+    no_external_reference = external_peer_record_count == 0 or external_peer_observation_count == 0
+    internal_density_mode = False
+    self_contained_warning = False
+    if no_external_reference:
         warnings.append(
             {
                 "role": "reference",
-                "internalDensityMode": True,
+                "noExternalReference": True,
                 "message": (
-                    "특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. "
-                    "외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 "
-                    "업로드된 데이터 내부의 상대적 희소 구간을 의미합니다."
+                    "External reference row가 없습니다. External Specificity는 외부 지지 없음의 "
+                    "경계값 100으로, External Confidence는 0으로 표시됩니다. "
+                    "이는 이상치 판정의 확실성이 100이라는 뜻이 아닙니다."
                 ),
             }
         )
@@ -1704,21 +1879,94 @@ def run_density_analysis(
     result_payload["reference_observation_count"] = reference_observation_count
     result_payload["referenceOccupiedBins"] = reference_occupied_bins
     result_payload["reference_occupied_bins"] = reference_occupied_bins
-    result_payload["referenceDensityPolicy"] = "target_included"
+    result_payload["referenceDensityPolicy"] = "target_included_pooled"
+    pooled_result = result
+    pooled_payload = reference_mode_payload(
+        result_payload,
+        pooled_result,
+        config,
+        "pooled",
+        "target_included_pooled",
+        True,
+        reference_bin_counts,
+        design_reference_bin_counts,
+        design_coverage_info,
+        external_peer_record_count,
+        external_peer_observation_count,
+    )
+    external_result = diagnose_reference_mode(
+        config,
+        external_bin_counts,
+        design_external_bin_counts,
+        target_bin_counts,
+        target_meta,
+        coverage_info,
+        design_coverage_info,
+        float(selected_goal.get("K_m", K_M)),
+        empty_external_boundary=True,
+    )
+    external_payload = reference_mode_payload(
+        result_payload,
+        external_result,
+        config,
+        "external",
+        "external_only",
+        False,
+        external_bin_counts,
+        design_external_bin_counts,
+        design_coverage_info,
+        external_peer_record_count,
+        external_peer_observation_count,
+        no_external_reference=no_external_reference,
+    )
+    internal_result = diagnose_reference_mode(
+        config,
+        target_bin_counts,
+        target_design_bin_counts or {},
+        target_bin_counts,
+        target_meta,
+        coverage_info,
+        design_coverage_info,
+        float(selected_goal.get("K_m", K_M)),
+    )
+    internal_payload = reference_mode_payload(
+        result_payload,
+        internal_result,
+        config,
+        "internal",
+        "target_only_internal",
+        True,
+        target_bin_counts,
+        target_design_bin_counts or {},
+        design_coverage_info,
+        external_peer_record_count,
+        external_peer_observation_count,
+    )
+    reference_modes = {
+        "external": external_payload,
+        "pooled": pooled_payload,
+        "internal": internal_payload,
+    }
+    result = external_result
+    result_payload = external_payload
+    result_payload["primaryReferenceMode"] = "external"
+    result_payload["referenceModes"] = reference_modes
+    result_payload["noExternalReference"] = no_external_reference
+    result_payload["no_external_reference"] = no_external_reference
     coverage_for_result = {
             **coverage_info,
             "designCoverageInfo": {key: value for key, value in design_coverage_info.items() if key not in {"binCounts", "axisBinCounts"}},
             "externalBinCounts": external_bin_counts,
             "storedPeerBinCounts": external_bin_counts,
-            "binCounts": reference_bin_counts,
-            "referenceBinCounts": reference_bin_counts,
-            "designBinCounts": design_reference_bin_counts,
+            "binCounts": external_bin_counts,
+            "referenceBinCounts": external_bin_counts,
+            "designBinCounts": design_external_bin_counts,
             "designExternalBinCounts": design_external_bin_counts,
             "designAxisNames": design_axis_names,
             "outputAxisNames": output_axis_names,
             "specificityAxisNames": axis_names,
             "confidenceAxisNames": design_axis_names,
-            "designOccupiedBins": len(design_reference_bin_counts),
+            "designOccupiedBins": len(design_external_bin_counts),
             "designValidBins": design_coverage_info.get("validBins"),
             "designTotalBins": design_coverage_info.get("rectangularTotalBins"),
             "designMaskedBins": design_coverage_info.get("maskedBins"),
@@ -1729,13 +1977,31 @@ def run_density_analysis(
             "externalPeerRecordCount": external_peer_record_count,
         "peerRecordCount": external_peer_record_count,
         "externalPeerObservationCount": external_peer_observation_count,
-        "referenceObservationCount": reference_observation_count,
-        "referenceOccupiedBins": reference_occupied_bins,
-        "targetIncludedInReference": True,
+        "referenceObservationCount": external_peer_observation_count,
+        "referenceOccupiedBins": len(external_bin_counts),
+        "targetIncludedInReference": False,
         "internalDensityMode": internal_density_mode,
         "selfContainedReferenceWarning": self_contained_warning,
-        "rowLevelObservationCount": reference_observation_count,
+        "noExternalReference": no_external_reference,
+        "referenceModes": reference_modes,
+        "rowLevelObservationCount": external_peer_observation_count,
     }
+    snapshot = analysis_snapshot(
+        result,
+        axis_names,
+        len(peer_group),
+        warnings,
+        coverage_info={
+            **coverage_for_result,
+            "specificityTotalBins": result.total_bins,
+            "totalBins": design_coverage_info.get("rectangularTotalBins", result.total_bins),
+            "occupiedBins": result.occupied_bins,
+        },
+    )
+    snapshot["specificityInterpretation"] = result_payload.get("specificity_interpretation")
+    snapshot["primaryReferenceMode"] = "external"
+    snapshot["referenceModes"] = reference_modes
+    snapshot["noExternalReference"] = no_external_reference
     return {
         "config": config,
         "peerRows": peer_rows,
@@ -1758,18 +2024,7 @@ def run_density_analysis(
         "warnings": warnings,
         "result": result,
         "resultPayload": result_payload,
-        "snapshot": analysis_snapshot(
-            result,
-            axis_names,
-            len(peer_group),
-            warnings,
-            coverage_info={
-                **coverage_for_result,
-                "specificityTotalBins": result.total_bins,
-                "totalBins": design_coverage_info.get("rectangularTotalBins", result.total_bins),
-                "occupiedBins": result.occupied_bins,
-            },
-        ),
+        "snapshot": snapshot,
     }
 
 
@@ -1841,7 +2096,7 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
         stored_count = int(coverage_info["coverageEligibleClusterCount"])
         saved_text = "saved" if saved_cluster_is_new else "already stored"
         raise ValueError(
-            "Density analysis uses target-included reference row-level bin occupancy in the current grid. "
+            "Density analysis computes External, Pooled, and Internal reference modes in the current grid. "
             f"Eligible external density records={stored_count}, external peer row-level observations={coverage_info['rowLevelObservationCount']}. "
             f"Excluded legacy records={coverage_info['coverageLegacyExcludedClusterCount']}, "
             f"axis mismatches={coverage_info['coverageGridSignatureExcludedClusterCount']}. "
@@ -1865,10 +2120,11 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
 
     summary = build_summary(result)
     summary.append("Density scoring re-bins saved row-level sanitized axis vectors into the current grid.")
-    if result_payload.get("selfContainedReferenceWarning"):
-        summary.append("특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.")
+    summary.append("External is the primary result; Pooled and Internal are reported separately and are never combined.")
+    if result_payload.get("noExternalReference"):
+        summary.append("External reference가 없어 External Specificity는 경계값 100, Confidence는 0입니다. 이는 판정 확실성 100을 뜻하지 않습니다.")
     if analysis["warnings"]:
-        summary.append(f"{len(analysis['warnings'])} out-of-domain value(s) were clipped for bin calculations and surfaced as warnings.")
+        summary.append(f"{len(analysis['warnings'])} analysis warning(s) were surfaced.")
     if saved_cluster:
         status = "saved as a new record" if saved_cluster_is_new else "detected as an existing duplicate and not saved again"
         summary.append(f"Raw uploaded rows, filename, and unmapped columns were not stored; only the sanitized density summary was {status}.")
@@ -1889,7 +2145,10 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "externalPeerObservationCount": result_payload.get("externalPeerObservationCount"),
             "referenceObservationCount": result_payload.get("referenceObservationCount"),
             "referenceOccupiedBins": result_payload.get("referenceOccupiedBins"),
-            "targetIncludedInReference": True,
+            "targetIncludedInReference": False,
+            "primaryReferenceMode": "external",
+            "referenceModes": ["external", "pooled", "internal"],
+            "noExternalReference": result_payload.get("noExternalReference"),
             "internalDensityMode": result_payload.get("internalDensityMode"),
             "axis_names": config.axis_names,
             "axes": canonical_axis_order(selected_goal["axes"]),
@@ -1915,8 +2174,14 @@ def analyze_request_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "storage_policy": "Raw upload rows, filenames, and unmapped columns are not stored.",
         },
         "result": result_payload,
+        "referenceModes": result_payload.get("referenceModes", {}),
         "summary": summary,
         "confidenceReasons": confidence_reasons(result, analysis["warnings"]),
+        "gridPreviewSessionId": str(payload.get("gridPreviewSessionId") or "").strip(),
+        "gridPreviewLogs": grid_preview_session_logs(
+            goal,
+            str(payload.get("gridPreviewSessionId") or "").strip(),
+        ),
         "visualizations": build_report_visualizations(
             selected_goal,
             peer_group,
@@ -2343,7 +2608,10 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "reference_observation_count",
             "reference_occupied_bins",
             "reference_density_policy",
+            "primary_reference_mode",
+            "reference_modes",
             "target_included_in_reference",
+            "no_external_reference",
             "internal_density_mode",
             "self_contained_reference_warning",
             "engine",
@@ -2383,6 +2651,7 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
             "out_of_domain_warnings",
             "confidence_reasons",
             "summary_messages",
+            "grid_preview_logs",
         ]
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -2399,7 +2668,10 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "reference_observation_count": result.get("referenceObservationCount", result.get("reference_observation_count")),
                 "reference_occupied_bins": result.get("referenceOccupiedBins", result.get("reference_occupied_bins")),
                 "reference_density_policy": result.get("referenceDensityPolicy", result.get("reference_density_policy")),
+                "primary_reference_mode": result.get("primaryReferenceMode", "external"),
+                "reference_modes": json.dumps(report.get("referenceModes", result.get("referenceModes", {})), ensure_ascii=False),
                 "target_included_in_reference": result.get("targetIncludedInReference", result.get("target_included_in_reference")),
+                "no_external_reference": result.get("noExternalReference", result.get("no_external_reference")),
                 "internal_density_mode": result.get("internalDensityMode", result.get("internal_density_mode")),
                 "self_contained_reference_warning": result.get("selfContainedReferenceWarning", result.get("self_contained_reference_warning")),
                 "engine": result.get("engine"),
@@ -2439,6 +2711,7 @@ def export_report_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "out_of_domain_warnings": json.dumps(result.get("outOfDomainWarnings", []), ensure_ascii=False),
                 "confidence_reasons": json.dumps(report.get("confidenceReasons", []), ensure_ascii=False),
                 "summary_messages": json.dumps(report.get("summary", []), ensure_ascii=False),
+                "grid_preview_logs": json.dumps(report.get("gridPreviewLogs", []), ensure_ascii=False),
             }
         )
         return {"filename": f"leesin_report_{timestamp}.csv", "mime": "text/csv", "content": output.getvalue()}
@@ -2567,6 +2840,7 @@ def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], prev
                 "domainMin": float(preview.get("domainMin", axis["domainMin"])),
                 "domainMax": float(preview.get("domainMax", axis["domainMax"])),
                 "resolution": float(preview.get("resolution", axis["resolution"])),
+                "role": axis_role(axis),
             }
         )
     preview_goal = {
@@ -2587,6 +2861,130 @@ def grid_preview_goal(goal: dict[str, Any], selected_axis_names: list[str], prev
     return preview_goal
 
 
+def grid_preview_log_axes(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    axes: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            axes.append(
+                {
+                    "name": name,
+                    "domainMin": float(value.get("domainMin")),
+                    "domainMax": float(value.get("domainMax")),
+                    "resolution": float(value.get("resolution")),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    return axes
+
+
+def reference_modes_log_summary(reference_modes: Any) -> dict[str, Any]:
+    if not isinstance(reference_modes, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for mode in ("external", "pooled", "internal"):
+        item = reference_modes.get(mode)
+        if not isinstance(item, dict):
+            continue
+
+        def value(*keys: str) -> Any:
+            for key in keys:
+                if key in item:
+                    return item.get(key)
+            return None
+
+        summary[mode] = {
+            "mode": mode,
+            "label": str(value("referenceModeLabel", "label") or mode.title()),
+            "referencePolicy": str(value("referenceDensityPolicy", "referencePolicy") or ""),
+            "targetIncludedInReference": bool(value("targetIncludedInReference")),
+            "noExternalReference": bool(value("noExternalReference")),
+            "specificityScore": value("specificity_score", "specificityScore"),
+            "confidence": value("confidence"),
+            "observationSupportS": value("observation_support_S", "observationSupportS"),
+            "coverageC": value("coverage_C", "coverageC"),
+            "equitabilityE": value("equitability_E", "equitabilityE"),
+            "referenceObservationCount": value("referenceObservationCount", "reference_observation_count"),
+            "occupiedBins": value("designOccupiedBins", "occupied_bins", "occupiedBins"),
+            "validBins": value("designValidBins", "valid_bins", "validBins"),
+            "maskedBins": value("designMaskedBins", "masked_bins", "maskedBins"),
+            "aValid": value("aValid", "valid_bins", "validBins"),
+        }
+    return summary
+
+
+def grid_preview_session_logs(goal: dict[str, Any], session_id: str) -> list[dict[str, Any]]:
+    if not session_id:
+        return []
+    return [
+        dict(item)
+        for item in (goal.get("gridPreviewLogs") or [])
+        if isinstance(item, dict) and str(item.get("sessionId") or "") == session_id
+    ]
+
+
+def make_grid_preview_log_entry(
+    goal: dict[str, Any],
+    session_id: str,
+    action: str,
+    axes_after: list[dict[str, Any]],
+    reference_modes_after: dict[str, Any],
+    *,
+    axes_before: Any = None,
+    reference_modes_before: Any = None,
+    applied_as_goal_default: bool = False,
+) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()[:128]
+    if not session_id:
+        raise ValueError("gridPreviewSessionId is required to persist Grid Preview logs.")
+    existing = grid_preview_session_logs(goal, session_id)
+    previous = existing[-1] if existing else {}
+    before_axes = grid_preview_log_axes(axes_before)
+    if not before_axes:
+        before_axes = grid_preview_log_axes(previous.get("axesAfter"))
+    if not before_axes:
+        before_axes = grid_preview_log_axes(goal.get("axes"))
+    before_modes = reference_modes_log_summary(reference_modes_before)
+    if not before_modes:
+        before_modes = reference_modes_log_summary(previous.get("referenceModesAfter"))
+    created_at = utc_now_iso()
+    return {
+        "version": 1,
+        "id": f"gridlog_{uuid.uuid4().hex}",
+        "sessionId": session_id,
+        "sequence": len(existing) + 1,
+        "createdAt": created_at,
+        "action": str(action or "preview_recalculated"),
+        "axesBefore": before_axes,
+        "axesAfter": grid_preview_log_axes(axes_after),
+        "referenceModesBefore": before_modes,
+        "referenceModesAfter": reference_modes_log_summary(reference_modes_after),
+        "appliedAsGoalDefault": bool(applied_as_goal_default),
+        "appliedAt": created_at if applied_as_goal_default else None,
+    }
+
+
+def persist_grid_preview_log(goal_id: str, entry: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    with GOAL_LOG_WRITE_LOCK:
+        goals = normalize_goals_for_display(load_goal_store())
+        goal = next((item for item in goals if str(item.get("id")) == goal_id), None)
+        if goal is None:
+            raise ValueError("Selected Experiment Goal does not exist.")
+        updated_goal = dict(goal)
+        updated_goal["gridPreviewLogs"] = [*(goal.get("gridPreviewLogs") or []), entry]
+        updated_goal = validate_goal(updated_goal)
+        updated_goals = [updated_goal if item["id"] == goal_id else item for item in goals]
+        save_goal_store(updated_goals)
+    return updated_goal, grid_preview_session_logs(updated_goal, str(entry.get("sessionId") or ""))
+
+
 def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
     goal = find_goal(str(payload.get("goalId", "")))
     selected_axis_names = payload.get("selectedAxes") or [axis["name"] for axis in goal["axes"]]
@@ -2600,8 +2998,10 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
     if preview_total_bins > MAX_GRID_PREVIEW_BINS:
         return skipped_grid_preview_payload(preview_goal, preview_total_bins)
     axis_names = [axis["name"] for axis in canonical_axis_order(preview_goal["axes"])]
+    design_preview_goal = design_goal_for_selected(preview_goal, preview_goal)
     peer_clusters = analysis_peer_clusters(goal, axis_names)
     coverage_info = build_global_bin_counts(peer_clusters, preview_goal)
+    design_coverage_info = build_global_bin_counts(peer_clusters, design_preview_goal)
     coverage_info["totalBins"] = density_preview_metrics_from_coverage(preview_goal, coverage_info)["totalBins"]
 
     target_axis_order = [str(name) for name in (payload.get("targetRowVectorAxisOrder") or axis_names)]
@@ -2612,44 +3012,121 @@ def grid_preview_request(payload: dict[str, Any]) -> dict[str, Any]:
         "row_bin_tuples": [],
         "bin_occupancy_meta": {"validMultidimensionalRowCount": 0, "invalidRowCount": 0, "outOfDomainRowCount": 0, "totalRows": 0},
     }
+    target_design_recomputed = recompute_bin_occupancy_from_row_vectors(
+        target_vectors,
+        target_axis_order,
+        design_preview_goal,
+    ) or {
+        "bin_occupancy": {},
+        "bin_occupancy_meta": {"validMultidimensionalRowCount": 0, "invalidRowCount": 0, "outOfDomainRowCount": 0, "totalRows": 0},
+    }
     external_bin_counts = {str(key): int(value) for key, value in (coverage_info.get("binCounts") or {}).items()}
-    reference_bin_counts = dict(external_bin_counts)
-    merge_count_maps(reference_bin_counts, target_recomputed["bin_occupancy"])
+    pooled_bin_counts = dict(external_bin_counts)
+    merge_count_maps(pooled_bin_counts, target_recomputed["bin_occupancy"])
+    internal_bin_counts = dict(target_recomputed["bin_occupancy"])
+    design_external_bin_counts = {str(key): int(value) for key, value in (design_coverage_info.get("binCounts") or {}).items()}
+    design_pooled_bin_counts = dict(design_external_bin_counts)
+    merge_count_maps(design_pooled_bin_counts, target_design_recomputed["bin_occupancy"])
+    design_internal_bin_counts = dict(target_design_recomputed["bin_occupancy"])
+    external_peer_record_count = int(coverage_info.get("coverageEligibleClusterCount") or 0)
+    external_peer_observation_count = count_map_total(external_bin_counts)
     preview_coverage_info = {
         **coverage_info,
         "externalBinCounts": external_bin_counts,
         "storedPeerBinCounts": external_bin_counts,
-        "binCounts": reference_bin_counts,
-        "referenceBinCounts": reference_bin_counts,
-        "externalPeerRecordCount": int(coverage_info.get("coverageEligibleClusterCount") or 0),
-        "externalPeerObservationCount": count_map_total(external_bin_counts),
-        "referenceObservationCount": count_map_total(reference_bin_counts),
-        "referenceOccupiedBins": len(reference_bin_counts),
-        "targetIncludedInReference": True,
-        "internalDensityMode": count_map_total(external_bin_counts) == 0,
+        "binCounts": external_bin_counts,
+        "referenceBinCounts": external_bin_counts,
+        "designBinCounts": design_external_bin_counts,
+        "externalPeerRecordCount": external_peer_record_count,
+        "externalPeerObservationCount": external_peer_observation_count,
+        "referenceObservationCount": external_peer_observation_count,
+        "referenceOccupiedBins": len(external_bin_counts),
+        "targetIncludedInReference": False,
+        "internalDensityMode": False,
+        "noExternalReference": external_peer_observation_count == 0,
     }
-    metrics = density_preview_metrics_from_coverage(preview_goal, preview_coverage_info)
+    metrics = density_preview_metrics_from_coverage(
+        design_preview_goal,
+        {
+            **design_coverage_info,
+            "designBinCounts": design_external_bin_counts,
+            "externalPeerRecordCount": external_peer_record_count,
+            "externalPeerObservationCount": count_map_total(design_external_bin_counts),
+            "referenceObservationCount": count_map_total(design_external_bin_counts),
+            "targetIncludedInReference": False,
+        },
+    )
     projection_explorer = build_projection_explorer(preview_goal, preview_coverage_info, target_recomputed["row_bin_tuples"])
     projection_explorer["gridPreviewMetrics"] = metrics
 
     result_payload: dict[str, Any] | None = None
-    if metrics["peerValidRows"] > 0 and target_recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"] > 0:
-        analyzer = DensityGridAnalyzer(experiment_config_from_goal(preview_goal))
-        analyzer.set_peer_bin_counts(reference_bin_counts)
-        analyzer.set_feasible_domain(
-            valid_bins=metrics["validBins"],
-            masked_bins=metrics["maskedBins"],
-            feasible_mask_enabled=metrics["feasibleMaskEnabled"],
+    reference_modes: dict[str, Any] = {}
+    if target_recomputed["bin_occupancy_meta"]["validMultidimensionalRowCount"] > 0:
+        config = experiment_config_from_goal(preview_goal)
+        mode_specs = (
+            ("external", "external_only", False, external_bin_counts, design_external_bin_counts, True),
+            ("pooled", "target_included_pooled", True, pooled_bin_counts, design_pooled_bin_counts, False),
+            ("internal", "target_only_internal", True, internal_bin_counts, design_internal_bin_counts, False),
         )
-        result_payload = analyzer.diagnose(target_recomputed["bin_occupancy"], target_recomputed["bin_occupancy_meta"]).to_payload(axis_names)
+        for mode, policy, included, reference_counts, design_counts, empty_boundary in mode_specs:
+            mode_result = diagnose_reference_mode(
+                config,
+                reference_counts,
+                design_counts,
+                target_recomputed["bin_occupancy"],
+                target_recomputed["bin_occupancy_meta"],
+                coverage_info,
+                design_coverage_info,
+                float(preview_goal.get("K_m", K_M)),
+                empty_external_boundary=empty_boundary,
+            )
+            reference_modes[mode] = reference_mode_payload(
+                {},
+                mode_result,
+                config,
+                mode,
+                policy,
+                included,
+                reference_counts,
+                design_counts,
+                design_coverage_info,
+                external_peer_record_count,
+                external_peer_observation_count,
+                no_external_reference=mode == "external" and external_peer_observation_count == 0,
+            )
+        result_payload = reference_modes["external"]
+    metrics["primaryReferenceMode"] = "external"
+    metrics["referenceModes"] = reference_modes_log_summary(reference_modes)
+    projection_explorer["gridPreviewMetrics"] = metrics
+
+    log_entry = None
+    session_logs: list[dict[str, Any]] = []
+    persisted_goal: dict[str, Any] | None = None
+    session_id = str(payload.get("gridPreviewSessionId") or "").strip()
+    if session_id:
+        latest_goal = find_goal(str(goal["id"]))
+        log_entry = make_grid_preview_log_entry(
+            latest_goal,
+            session_id,
+            str(payload.get("logAction") or "preview_recalculated"),
+            preview_goal["axes"],
+            reference_modes,
+            axes_before=payload.get("previousAxes"),
+            reference_modes_before=payload.get("previousReferenceModes"),
+        )
+        persisted_goal, session_logs = persist_grid_preview_log(str(goal["id"]), log_entry)
 
     return {
         "previewGoal": preview_goal,
         "metrics": metrics,
         "result": result_payload,
+        "referenceModes": reference_modes,
         "projectionExplorer": projection_explorer,
         "targetBinOccupancy": target_recomputed["bin_occupancy"],
         "targetBinOccupancyMeta": target_recomputed["bin_occupancy_meta"],
+        "gridPreviewLogEntry": log_entry,
+        "gridPreviewLogs": session_logs,
+        "goalGridPreviewLogs": list(persisted_goal.get("gridPreviewLogs") or []) if persisted_goal else list(goal.get("gridPreviewLogs") or []),
         "coverageInfo": {key: value for key, value in preview_coverage_info.items() if key not in {"binCounts", "axisBinCounts", "referenceBinCounts", "externalBinCounts", "storedPeerBinCounts"}},
     }
 
@@ -2728,6 +3205,20 @@ def apply_goal_grid_defaults_request(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             updated_axes.append(dict(axis))
     updated_goal["axes"] = updated_axes
+    grid_preview_log_entry = None
+    session_id = str(payload.get("gridPreviewSessionId") or "").strip()
+    if session_id:
+        grid_preview_log_entry = make_grid_preview_log_entry(
+            goal,
+            session_id,
+            "apply_goal_default",
+            updated_axes,
+            payload.get("referenceModes") if isinstance(payload.get("referenceModes"), dict) else {},
+            axes_before=payload.get("previousAxes"),
+            reference_modes_before=payload.get("previousReferenceModes"),
+            applied_as_goal_default=True,
+        )
+        updated_goal["gridPreviewLogs"] = [*(goal.get("gridPreviewLogs") or []), grid_preview_log_entry]
     updated_goal = validate_goal(updated_goal)
     updated_goals = [updated_goal if item["id"] == goal_id else item for item in goals]
 
@@ -2767,6 +3258,8 @@ def apply_goal_grid_defaults_request(payload: dict[str, Any]) -> dict[str, Any]:
         "peerCounts": bootstrap_peer_counts(),
         "peerSubsetCounts": bootstrap_peer_subset_counts(),
         "goalBinPreview": {goal["id"]: goal_bin_preview(goal) for goal in normalized_goals},
+        "gridPreviewLogEntry": grid_preview_log_entry,
+        "gridPreviewLogs": grid_preview_session_logs(updated_goal, session_id),
     }
 
 

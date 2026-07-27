@@ -27,6 +27,7 @@ CLUSTER_STORE_PATH = STORE_DIR / "data_cluster_store.json"
 DB_TABLE_NAME = os.environ.get("LEESIN_DB_TABLE", "leesin_contents").strip() or "leesin_contents"
 DB_KEY_GOALS = "goal_store"
 DB_KEY_CLUSTERS = "cluster_store"
+GRID_PREVIEW_LOG_VERSION = 1
 
 
 DEFAULT_GOALS = [
@@ -62,6 +63,9 @@ ANALYSIS_AT_UPLOAD_KEYS = {
     "referenceObservationCount": None,
     "referenceOccupiedBins": None,
     "targetIncludedInReference": None,
+    "primaryReferenceMode": None,
+    "referenceModes": {},
+    "noExternalReference": None,
     "internalDensityMode": None,
     "selfContainedReferenceWarning": None,
     "engine": None,
@@ -133,6 +137,110 @@ def normalize_int_count_map(values: Any) -> dict[str, int]:
         if count <= 0:
             continue
         normalized[str(key)] = count
+    return normalized
+
+
+def normalize_grid_preview_log_axes(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            normalized.append(
+                {
+                    "name": name,
+                    "domainMin": float(value.get("domainMin")),
+                    "domainMax": float(value.get("domainMax")),
+                    "resolution": float(value.get("resolution")),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def normalize_grid_preview_mode_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for mode in ("external", "pooled", "internal"):
+        item = value.get(mode)
+        if not isinstance(item, dict):
+            continue
+        mode_payload: dict[str, Any] = {
+            "mode": mode,
+            "label": str(item.get("label") or mode.title()),
+            "referencePolicy": str(item.get("referencePolicy") or ""),
+            "targetIncludedInReference": bool(item.get("targetIncludedInReference")),
+            "noExternalReference": bool(item.get("noExternalReference")),
+        }
+        for key in (
+            "specificityScore",
+            "confidence",
+            "observationSupportS",
+            "coverageC",
+            "equitabilityE",
+            "referenceObservationCount",
+            "occupiedBins",
+            "validBins",
+            "maskedBins",
+            "aValid",
+        ):
+            raw = item.get(key)
+            if raw is None:
+                mode_payload[key] = None
+                continue
+            try:
+                mode_payload[key] = float(raw) if key not in {
+                    "referenceObservationCount",
+                    "occupiedBins",
+                    "validBins",
+                    "maskedBins",
+                    "aValid",
+                } else int(raw)
+            except (TypeError, ValueError):
+                mode_payload[key] = None
+        normalized[mode] = mode_payload
+    return normalized
+
+
+def normalize_grid_preview_logs(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        log_id = str(value.get("id") or "").strip()
+        session_id = str(value.get("sessionId") or "").strip()
+        created_at = str(value.get("createdAt") or "").strip()
+        if not log_id or not session_id or not created_at:
+            continue
+        try:
+            sequence = max(1, int(value.get("sequence") or 1))
+        except (TypeError, ValueError):
+            sequence = 1
+        normalized.append(
+            {
+                "version": GRID_PREVIEW_LOG_VERSION,
+                "id": log_id,
+                "sessionId": session_id,
+                "sequence": sequence,
+                "createdAt": created_at,
+                "action": str(value.get("action") or "preview_recalculated"),
+                "axesBefore": normalize_grid_preview_log_axes(value.get("axesBefore")),
+                "axesAfter": normalize_grid_preview_log_axes(value.get("axesAfter")),
+                "referenceModesBefore": normalize_grid_preview_mode_summary(value.get("referenceModesBefore")),
+                "referenceModesAfter": normalize_grid_preview_mode_summary(value.get("referenceModesAfter")),
+                "appliedAsGoalDefault": bool(value.get("appliedAsGoalDefault")),
+                "appliedAt": str(value.get("appliedAt") or "").strip() or None,
+            }
+        )
     return normalized
 
 
@@ -566,6 +674,7 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
             "durationMs": 0,
         }
     a_valid_status = "ready" if cache_ready else "stale"
+    grid_preview_logs = normalize_grid_preview_logs(goal.get("gridPreviewLogs"))
     return {
         "id": str(goal.get("id") or f"goal_{abs(hash(name))}"),
         "name": name,
@@ -593,6 +702,8 @@ def validate_goal(goal: dict[str, Any]) -> dict[str, Any]:
         "maskSignature": current_mask_signature,
         "aValidComputedAt": cache.get("computedAt") if cache_ready else None,
         "aValidCache": dict(cache) if cache else {},
+        "gridPreviewLogVersion": GRID_PREVIEW_LOG_VERSION,
+        "gridPreviewLogs": grid_preview_logs,
     }
 
 

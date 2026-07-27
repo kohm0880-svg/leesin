@@ -177,7 +177,7 @@
       <div>
         <h1>Leesin 데이터 품질 인증</h1>
         <p class="subtitle">
-          Leesin accumulates target-included reference row-level observations on the Goal density grid and reports how rare the target occupancy is as a Specificity Score.
+          Leesin reports External, Pooled, and Internal row-level density results separately. External saved-peer analysis is the primary result.
           Confidence is engineering confidence from Observation Support, Coverage, and Equitability.
         </p>
         <span id="peer-status" class="tag"></span>
@@ -293,7 +293,7 @@
         </div>
         <div class="notice">
           <strong>계산 기준</strong><br>
-          Observation Support is based on target-included reference row-level observations. Specificity, Coverage C, and Equitability E are calculated from row-level density grid occupancy.
+          External uses saved peers only, Pooled uses saved peers plus the target, and Internal uses the target only. Each mode calculates its own Specificity and Confidence; the three results are not combined.
         </div>
         <div class="admin-toolbar">
           <label>Existing Goal<select id="admin-goal-select"></select></label>
@@ -451,6 +451,10 @@
       gridPreviewMetrics: null,
       gridPreviewTimer: null,
       gridPreviewBusy: false,
+      gridPreviewSessionId: '',
+      gridPreviewLastAxes: null,
+      gridPreviewLastReferenceModes: null,
+      gridPreviewNextAction: 'preview_recalculated',
       bootstrapStatus: bootstrap.deferBootstrap ? 'loading' : 'ready',
       bootstrapError: '',
       bootstrapLoadedAt: null,
@@ -462,6 +466,7 @@
     const $ = id => document.getElementById(id);
     const escapeHtml = value => String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const clone = value => JSON.parse(JSON.stringify(value));
+    const newGridPreviewSessionId = () => `grid_${Date.now()}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
     const goalById = id => state.goals.find(goal => goal.id === id) || null;
     const axisRole = axis => String(axis?.role || '').toLowerCase() === 'output' ? 'output' : 'input';
     const inputAxesForGoal = goal => (goal?.axes || []).filter(axis => axisRole(axis) === 'input');
@@ -753,6 +758,10 @@
       const first = state.files[0];
       state.axisMapping = first ? buildSuggestedMapping(goal, first.headers) : {};
       state.report = null; state.batch = null;
+      state.gridPreviewSessionId = '';
+      state.gridPreviewLastAxes = null;
+      state.gridPreviewLastReferenceModes = null;
+      state.gridPreviewNextAction = 'preview_recalculated';
       renderAll();
       renderReport(null);
     }
@@ -949,12 +958,39 @@
       const resolution = Math.max(Math.abs(Number(axis.resolution) || 1), 1e-12);
       return Math.max(1, Math.ceil(span / resolution));
     }
+    function referenceModesFor(reportOrResult) {
+      const source = reportOrResult || {};
+      return source.referenceModes || source.result?.referenceModes || source.result?.reference_modes || {};
+    }
+    function renderReferenceModeCards(referenceModes, compact=false) {
+      const modes = referenceModes || {};
+      const labels = {
+        external:['External','saved peer only'],
+        pooled:['Pooled','saved peer + target'],
+        internal:['Internal','target only'],
+      };
+      const cards = ['external','pooled','internal'].map(mode => {
+        const item = modes[mode];
+        if (!item) return '';
+        const [label, basis] = labels[mode];
+        const noExternal = mode === 'external' && Boolean(item.noExternalReference ?? item.no_external_reference);
+        const referenceRows = item.referenceObservationCount ?? item.reference_observation_count ?? item.peer_observation_count ?? 0;
+        return `<div class="score ${mode === 'external' ? 'hero' : ''}">
+          <small>${escapeHtml(label)}${mode === 'external' ? ' · primary' : ''}</small>
+          <strong>${formatPercent(item.specificity_score,1)}</strong>
+          <div class="small">Specificity · Confidence ${formatPercent(item.confidence,0)}</div>
+          ${compact ? '' : `<div class="small">${escapeHtml(basis)} · reference rows ${escapeHtml(referenceRows)}</div>`}
+          ${noExternal ? '<div class="tag warn">외부 reference 없음: 경계값 100 · 신뢰도 0</div>' : ''}
+        </div>`;
+      }).join('');
+      return cards ? `<div class="score-grid">${cards}</div>` : '';
+    }
     function renderPreviewMetrics(metrics) {
       const item = metrics || {};
       const validBinsText = item.validBins ?? item.aValid ?? item.totalBins ?? 0;
       const maskedBinsText = item.maskedBins ?? 0;
       const validDomainText = formatPercent(item.validDomainRatio, 1);
-      return `<div class="preview-metrics" id="grid-preview-metrics">
+      return `${renderReferenceModeCards(item.referenceModes, true)}<div class="preview-metrics" id="grid-preview-metrics">
         <div class="preview-metric"><span class="small">Z / Observation Support</span><strong>${formatPercent(item.observationSupportZ,1)}</strong></div>
         <div class="preview-metric"><span class="small">C / Coverage</span><strong>${formatPercent(item.coverageC,1)}</strong></div>
         <div class="preview-metric"><span class="small">E / Equitability</span><strong>${formatPercent(item.equitabilityE,1)}</strong></div>
@@ -976,7 +1012,7 @@
       return `<div class="grid-preview-editor">
         <div>
           <h3>Grid Preview Editor</h3>
-          <div class="small">Preview changes re-bin saved row-level sanitized vectors in memory. Nothing is stored until Apply as Goal Default.</div>
+          <div class="small">Preview changes re-bin saved row-level sanitized vectors. Every completed recalculation is stored in this Experiment Goal's audit log; Apply changes the Goal defaults.</div>
         </div>
         ${renderPreviewMetrics(metrics)}
         <div class="grid-preview-axis-list">
@@ -1404,7 +1440,7 @@
         if (label) label.textContent = `bins ${previewAxisBinCount(axis)}`;
       });
     }
-    async function recalculateGridPreview() {
+    async function recalculateGridPreview(logAction='preview_recalculated') {
       if (!state.report || state.gridPreviewBusy) return;
       state.gridPreviewBusy = true;
       const button = $('grid-preview-recalc');
@@ -1414,20 +1450,36 @@
         updateTaskProgress(18, 'read settings', 'Domain Range / Resolution preview 값을 읽습니다.');
         const meta = state.report.meta || {};
         const visualizations = state.report.visualizations || {};
+        const previewAxes = readPreviewAxesFromEditor();
+        const previousAxes = state.gridPreviewLastAxes || meta.axes || [];
+        const previousReferenceModes = state.gridPreviewLastReferenceModes || referenceModesFor(state.report);
         const { response, data } = await fetchJson('/api/grid-preview', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
             goalId: meta.goal_id || state.selectedGoalId,
             selectedAxes: meta.axis_names || visualizations.projectionExplorer?.axisOrder || [],
-            previewAxes: readPreviewAxesFromEditor(),
+            previewAxes,
             targetRowVectors: visualizations.targetRowVectors || [],
             targetRowVectorAxisOrder: visualizations.targetRowVectorAxisOrder || visualizations.projectionExplorer?.axisOrder || [],
+            gridPreviewSessionId: state.gridPreviewSessionId || state.report.gridPreviewSessionId,
+            logAction,
+            previousAxes,
+            previousReferenceModes,
           }),
         }, 60000);
         if (!response.ok) throw new Error(data.error || 'Grid preview failed');
         updateTaskProgress(75, 'projection rebuild', '2D projection payload를 갱신합니다.');
         state.gridPreviewMetrics = data.metrics || null;
+        state.gridPreviewLastAxes = clone(previewAxes);
+        state.gridPreviewLastReferenceModes = clone(data.referenceModes || {});
+        state.gridPreviewNextAction = 'preview_recalculated';
+        state.report.referenceModes = data.referenceModes || state.report.referenceModes || {};
+        state.report.result.referenceModes = data.referenceModes || state.report.result.referenceModes || {};
+        state.report.gridPreviewLogs = data.gridPreviewLogs || state.report.gridPreviewLogs || [];
+        const loggedGoal = goalById(meta.goal_id || state.selectedGoalId);
+        if (loggedGoal && data.goalGridPreviewLogs) loggedGoal.gridPreviewLogs = data.goalGridPreviewLogs;
+        if (state.draftGoal?.id === loggedGoal?.id && data.goalGridPreviewLogs) state.draftGoal.gridPreviewLogs = clone(data.goalGridPreviewLogs);
         if (data.projectionExplorer) {
           data.projectionExplorer.gridPreviewMetrics = data.metrics || {};
           state.report.visualizations.projectionExplorer = data.projectionExplorer;
@@ -1446,10 +1498,11 @@
         updateButtons();
       }
     }
-    function scheduleGridPreview() {
+    function scheduleGridPreview(logAction='preview_edit') {
       updatePreviewBinLabels();
       clearTimeout(state.gridPreviewTimer);
-      state.gridPreviewTimer = setTimeout(recalculateGridPreview, 400);
+      state.gridPreviewNextAction = logAction;
+      state.gridPreviewTimer = setTimeout(() => recalculateGridPreview(state.gridPreviewNextAction), 400);
     }
     function resetGridPreviewToCurrentGoal() {
       const axes = state.report?.meta?.axes || [];
@@ -1468,7 +1521,7 @@
         if (resNumber) resNumber.value = axis.resolution;
         if (resSlider) resSlider.value = axis.resolution;
       });
-      scheduleGridPreview();
+      scheduleGridPreview('reset');
     }
     async function applyGridPreviewAsDefault() {
       if (!state.report) return;
@@ -1492,6 +1545,10 @@
             goalId: meta.goal_id || state.selectedGoalId,
             selectedAxes: meta.axis_names || state.projectionExplorer?.axisOrder || [],
             previewAxes,
+            gridPreviewSessionId: state.gridPreviewSessionId || state.report.gridPreviewSessionId,
+            referenceModes: state.gridPreviewLastReferenceModes || referenceModesFor(state.report),
+            previousAxes: state.gridPreviewLastAxes || meta.axes || [],
+            previousReferenceModes: state.gridPreviewLastReferenceModes || referenceModesFor(state.report),
           }),
         }, 60000);
         if (!response.ok) throw adminRequestError(response, data, 'Goal grid apply failed');
@@ -1765,7 +1822,7 @@
         });
       }
       const recalcButton = $('grid-preview-recalc');
-      if (recalcButton) recalcButton.addEventListener('click', recalculateGridPreview);
+      if (recalcButton) recalcButton.addEventListener('click', () => recalculateGridPreview('manual_recalculate'));
       const applyButton = $('grid-preview-apply');
       if (applyButton) applyButton.addEventListener('click', applyGridPreviewAsDefault);
       const resetButton = $('grid-preview-reset');
@@ -1887,6 +1944,30 @@
       requestAnimationFrame(redrawProjectionExplorer);
     }
 
+    function previewAxesLogText(axes) {
+      return (axes || []).map(axis => `${axis.name}[${formatNumber(axis.domainMin,3)}, ${formatNumber(axis.domainMax,3)}] / ${formatNumber(axis.resolution,3)}`).join(' · ') || '-';
+    }
+    function previewModeLogText(referenceModes) {
+      return ['external','pooled','internal'].map(mode => {
+        const item = referenceModes?.[mode];
+        if (!item) return '';
+        return `${mode[0].toUpperCase()}: S ${formatPercent(item.specificityScore,1)} / C ${formatPercent(item.confidence,0)}`;
+      }).filter(Boolean).join(' · ') || '-';
+    }
+    function renderGridPreviewLogs(logs, emptyMessage='이 분석 실행에서 Grid Preview 변경이 없습니다.') {
+      const items = Array.isArray(logs) ? logs : [];
+      if (!items.length) return `<div class="small">${escapeHtml(emptyMessage)}</div>`;
+      return `<div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>시각 / 동작</th><th>Domain Range · Resolution</th><th>External / Pooled / Internal</th></tr></thead>
+        <tbody>${items.map(item => `<tr>
+          <td>${escapeHtml(item.sequence ?? '-')}</td>
+          <td>${escapeHtml(item.createdAt || '')}<br><span class="small">${escapeHtml(item.action || '')}${item.appliedAsGoalDefault ? ' · Goal 적용' : ''}</span></td>
+          <td><span class="small">전 ${escapeHtml(previewAxesLogText(item.axesBefore))}</span><br>후 ${escapeHtml(previewAxesLogText(item.axesAfter))}</td>
+          <td><span class="small">전 ${escapeHtml(previewModeLogText(item.referenceModesBefore))}</span><br>후 ${escapeHtml(previewModeLogText(item.referenceModesAfter))}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+    }
+
     // Report Rendering
     function renderReport(report=state.report, activate=false) {
       if (!report) {
@@ -1903,6 +1984,7 @@
       }
       state.report = report;
       const result = report.result || {};
+      const referenceModes = referenceModesFor(report);
       const warnings = result.outOfDomainWarnings || [];
       const meta = report.meta || {};
       const referenceObservationCount = result.referenceObservationCount ?? result.reference_observation_count ?? meta.referenceObservationCount ?? result.rowLevelObservationCount ?? meta.rowLevelObservationCount ?? 0;
@@ -1932,11 +2014,11 @@
       const outputAxes = result.outputAxisNames || meta.outputAxisNames || [];
       $('report-content').className = '';
       $('report-content').innerHTML = `
-        ${warnings.length ? `<div class="reason down"><strong>Out-of-domain warnings (${warnings.length})</strong><br>${warnings.map(w => escapeHtml(w.message || `${w.role || 'target'} out-of-domain rows: ${w.outOfDomainRowCount ?? 0}`)).join('<br>')}</div>` : ''}
-        <div class="score-grid">
+        ${warnings.length ? `<div class="reason down"><strong>Analysis warnings (${warnings.length})</strong><br>${warnings.map(w => escapeHtml(w.message || `${w.role || 'target'} out-of-domain rows: ${w.outOfDomainRowCount ?? 0}`)).join('<br>')}</div>` : ''}
+        ${renderReferenceModeCards(referenceModes) || `<div class="score-grid">
           <div class="score hero"><small>Confidence</small><strong>${formatPercent(result.confidence,0)}</strong><div class="small">Engineering confidence</div></div>
           <div class="score"><small>Specificity Score</small><strong>${formatPercent(result.specificity_score,1)}</strong><div class="small">${escapeHtml(result.specificity_method || 'occupied_bin_count_ecdf')}</div></div>
-        </div>
+        </div>`}
         <div class="report-body">
           <div class="metrics">
             <div class="metric"><span class="small">Observation Support S</span><strong>${formatPercent(result.observation_support_S,0)}</strong></div>
@@ -1946,12 +2028,13 @@
           </div>
           <div class="notice">
             <strong>Specificity Score 해석</strong><br>
-            Specificity Score는 target rows가 들어간 bin의 target-included reference count를 occupied reference bin count 분포와 비교한 eCDF 기반 engineering score입니다. 낮은 reference count bin일수록 점수가 높아집니다. 이는 p-value나 사후확률이 아닙니다.
+            주 분석인 External Specificity는 target rows가 들어간 bin의 saved external reference count를 occupied external bin count 분포와 비교한 eCDF 기반 engineering score입니다. 낮은 reference count bin일수록 점수가 높아집니다. 이는 p-value나 사후확률이 아닙니다.
+            외부 reference가 0개면 외부 지지가 전혀 없다는 경계값으로 100을 표시하고, 판단 근거 부족은 Confidence 0으로 별도 표시합니다.
             Mean Rarity는 보조 advanced metric으로 유지되며, 현재 Specificity Score 계산에는 사용되지 않습니다.
           </div>
           <div class="notice">
             <strong>Density 기준</strong><br>
-            Main specificity and confidence use a target-included reference density map: saved external peer rows plus the current target rows.
+            External(기존 peer만)을 주 분석으로 사용합니다. Pooled(기존 peer+target)와 Internal(target만)은 비교용으로 별도 계산하며 세 결과를 합산하지 않습니다.
             ${result.confidencePending || result.coveragePending ? '<div class="tag warn">a_valid stale. Run Compute a_valid.</div>' : ''}
             <div class="inline-metrics" style="margin-top:8px;">
               <span class="metric-pill">visualization ${escapeHtml(coverageBasisLabel(visualizationBasis))}</span>
@@ -1971,7 +2054,7 @@
               <span class="metric-pill">out-of-domain ${formatPercent(result.out_of_domain_rate,1)}</span>
               <span class="metric-pill">masked-out target rows ${escapeHtml(maskedOutTargetRows)}</span>
             </div>
-            ${internalDensityMode ? '<div class="tag warn">특이도는 표적 군집을 포함한 reference density map 기준으로 계산됩니다. 외부 peer record가 없는 경우, 이 값은 과거 실험 대비 이상치가 아니라 업로드된 데이터 내부의 상대적 희소 구간을 의미합니다.</div>' : ''}
+            ${result.noExternalReference || result.no_external_reference ? '<div class="tag warn">External reference 없음: External Specificity 100은 외부 지지 없음의 경계값이며, 판정 확실성 100을 뜻하지 않습니다. External Confidence는 0입니다.</div>' : ''}
             <div class="small" style="margin-top:8px;">특이도는 선택된 input/output 전체 관측 좌표 기준입니다. 신뢰도는 input 실험 조건 공간 기준입니다.</div>
             ${legacyExcluded ? '<div class="tag warn">Legacy records without row-level vectors are excluded from density scoring.</div>' : ''}
           </div>
@@ -1989,6 +2072,7 @@
           </div>
           <div class="small">Max specificity ${maxSpecificity == null ? '-' : formatPercent(maxSpecificity,1)} · Mean Rarity advanced ${formatNumber(result.mean_rarity,3)} · Max rarity ${formatNumber(result.max_rarity,3)} · Analysis ${escapeHtml(meta.analysis_timestamp || '')}</div>
           ${renderProjectionExplorer(report.visualizations?.projectionExplorer)}
+          <div><h3>Grid Preview 변경 로그</h3>${renderGridPreviewLogs(report.gridPreviewLogs)}</div>
           <div><h3>요약</h3>${(report.summary || []).map(item => `<div class="pill">${escapeHtml(item)}</div>`).join('')}</div>
           <div><h3>Confidence Reasons</h3>${(report.confidenceReasons || []).map(item => `<div class="reason ${item.impact === 'down' ? 'down' : ''}"><strong>${escapeHtml(item.label)} · ${formatPercent(item.score, item.label === 'Coverage' ? 1 : 0)}</strong><br>${escapeHtml(item.message)}</div>`).join('')}</div>
         </div>`;
@@ -2156,6 +2240,10 @@
         <div class="row-actions" style="margin-top:8px;"><button class="secondary" id="compute-a-valid" type="button">Compute a_valid</button></div>
         ${(preview.warnings || (preview.warning ? [preview.warning] : [])).map(message => `<div class="tag warn">${escapeHtml(message)}</div>`).join('')}
         ${(preview.axisBins || []).map(item => `<div class="small">${escapeHtml(item.axis)}: ${item.occupiedBins}/${item.totalBins} bins · ${formatPercent(item.coverage,1)}</div>`).join('')}
+        <details style="margin-top:10px;">
+          <summary>Grid Preview 로그 ${(state.draftGoal?.gridPreviewLogs || []).length}건</summary>
+          ${renderGridPreviewLogs(state.draftGoal?.gridPreviewLogs || [], '이 Experiment Goal에는 아직 Grid Preview 로그가 없습니다.')}
+        </details>
       `;
     }
     const feasibleRuleOperators = ['>','>=','<','<=','==','!='];
@@ -3430,12 +3518,17 @@
       setButtonLoading(button, true, state.files.length === 1 ? '분석 중...' : 'Batch preview 중...');
       startTaskProgress(state.files.length === 1 ? '분석 실행' : 'Batch upload preview', 'row-level density grid 계산을 시작합니다.');
       setError(''); setClusterMessage('', '');
+      state.gridPreviewSessionId = newGridPreviewSessionId();
+      state.gridPreviewLastAxes = null;
+      state.gridPreviewLastReferenceModes = null;
       try {
         if (state.files.length === 1) {
           updateTaskProgress(15, 'parse/mapping', 'CSV column mapping을 적용합니다.');
-          const { response, data } = await fetchJson('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping }) }, 60000);
+          const { response, data } = await fetchJson('/api/analyze', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ goalId:state.selectedGoalId, rows:state.files[0].rows, selectedAxes:selectedAxisNames(goal), axisMapping:state.axisMapping, gridPreviewSessionId:state.gridPreviewSessionId }) }, 60000);
           if (!response.ok) { state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; renderAll(); throw new Error(data.error || '분석 실패'); }
-          updateTaskProgress(75, 'specificity/Z/E', 'target-included reference density 기준으로 점수를 계산합니다.');
+          updateTaskProgress(75, 'three reference modes', 'External, Pooled, Internal 점수를 각각 계산합니다.');
+          state.gridPreviewLastAxes = clone(data.meta?.axes || []);
+          state.gridPreviewLastReferenceModes = clone(referenceModesFor(data));
           state.clusters = data.clusters || state.clusters; state.peerCounts = data.peerCounts || state.peerCounts; state.peerSubsetCounts = data.peerSubsetCounts || state.peerSubsetCounts; state.batch = null; renderAll(); renderReport(data, true);
           endTaskProgress('분석 완료');
         } else {
@@ -3755,7 +3848,7 @@
       setButtonLoading(button, true, '분석 중...');
       startTaskProgress('삭제 영향 분석', 'record 제거 전후 density 변화를 계산합니다.');
       try {
-        updateTaskProgress(35, 'rebuild reference', 'target-included reference density를 재구성합니다.');
+        updateTaskProgress(35, 'rebuild reference', 'External, Pooled, Internal reference density를 재구성합니다.');
         const { response, data } = await fetchJson('/api/admin/clusters/impact', { method:'POST', headers:adminHeaders(), body:JSON.stringify({ id }) }, 60000);
         if (!response.ok) throw adminRequestError(response, data, '영향 분석 실패');
         updateTaskProgress(90, 'render audit', '영향 분석 결과를 표시합니다.');
