@@ -61,7 +61,7 @@ class DensityDiagnosisResult:
             "engine": self.engine,
             "axis_names": list(axis_names),
             "specificity_method": "occupied_bin_count_ecdf",
-            "specificity_interpretation": "Higher means target rows fall in lower-density bins in the target-included reference density map.",
+            "specificity_interpretation": "Higher means target rows fall in lower-density bins in the configured reference density map.",
             "specificity_score": round(float(self.specificity_score), 6),
             "mean_bin_specificity": round(float(self.mean_bin_specificity), 6),
             "max_specificity": round(float(self.max_specificity), 6),

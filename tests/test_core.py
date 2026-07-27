@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -218,7 +220,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
 
     def test_empty_peer_density_raises_clear_error(self) -> None:
         analyzer = DensityGridAnalyzer(ExperimentConfig(["x"], [(0, 10)], [1]))
-        with self.assertRaisesRegex(ValueError, "target-included reference row-level bin occupancy observation"):
+        with self.assertRaisesRegex(ValueError, "reference row-level bin occupancy observation"):
             analyzer.diagnose({"[0]": 1}, {"validMultidimensionalRowCount": 1, "totalRows": 1})
 
     def test_same_aggregated_bin_count_gives_same_density_result(self) -> None:
@@ -314,10 +316,14 @@ class DensityGridBehaviorTests(unittest.TestCase):
         ):
             response = app.analyze_request_v2(payload)
         self.assertEqual(response["result"]["engine"], "density_grid")
-        self.assertEqual(response["result"]["peer_observation_count"], 3)
+        self.assertEqual(response["result"]["peer_observation_count"], 1)
         self.assertEqual(response["result"]["externalPeerObservationCount"], 1)
-        self.assertEqual(response["result"]["referenceObservationCount"], 3)
-        self.assertTrue(response["result"]["targetIncludedInReference"])
+        self.assertEqual(response["result"]["referenceObservationCount"], 1)
+        self.assertFalse(response["result"]["targetIncludedInReference"])
+        self.assertEqual(response["result"]["primaryReferenceMode"], "external")
+        self.assertEqual(set(response["referenceModes"]), {"external", "pooled", "internal"})
+        self.assertEqual(response["referenceModes"]["pooled"]["referenceObservationCount"], 3)
+        self.assertEqual(response["referenceModes"]["internal"]["referenceObservationCount"], 2)
         for key in [
             "specificity_score",
             "specificity_method",
@@ -376,7 +382,7 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIsNotNone(result["confidence"])
         self.assertEqual(result["masked_out_target_rows"], 0)
 
-    def test_single_target_without_stored_peer_still_analyzes_internal_density(self) -> None:
+    def test_single_target_without_stored_peer_reports_external_boundary_and_other_modes(self) -> None:
         selected_goal = goal(axes=[axis("x")])
         payload = {
             "goalId": selected_goal["id"],
@@ -394,12 +400,14 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertEqual(response["result"]["engine"], "density_grid")
         self.assertEqual(response["result"]["externalPeerRecordCount"], 0)
         self.assertEqual(response["result"]["externalPeerObservationCount"], 0)
-        self.assertEqual(response["result"]["referenceObservationCount"], 3)
-        self.assertGreaterEqual(response["result"]["specificity_score"], 0.0)
-        self.assertGreaterEqual(response["result"]["confidence"], 0.0)
-        self.assertTrue(response["result"]["internalDensityMode"])
-        self.assertTrue(response["result"]["selfContainedReferenceWarning"])
-        self.assertTrue(any("업로드된 데이터 내부" in message for message in response["summary"]))
+        self.assertEqual(response["result"]["referenceObservationCount"], 0)
+        self.assertEqual(response["result"]["specificity_score"], 1.0)
+        self.assertEqual(response["result"]["confidence"], 0.0)
+        self.assertTrue(response["result"]["noExternalReference"])
+        self.assertFalse(response["result"]["targetIncludedInReference"])
+        self.assertEqual(response["referenceModes"]["pooled"]["referenceObservationCount"], 3)
+        self.assertEqual(response["referenceModes"]["internal"]["referenceObservationCount"], 3)
+        self.assertTrue(any("경계값 100" in message for message in response["summary"]))
 
     def test_delete_impact_reference_excludes_saved_target_before_readding_it(self) -> None:
         selected_goal = goal(axes=[axis("x")])
@@ -413,8 +421,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["externalPeerRecordCount"], 1)
         self.assertEqual(response["result"]["externalPeerObservationCount"], 1)
-        self.assertEqual(response["result"]["referenceObservationCount"], 3)
-        self.assertEqual(response["result"]["referenceDensityPolicy"], "target_included")
+        self.assertEqual(response["result"]["referenceObservationCount"], 1)
+        self.assertEqual(response["result"]["referenceDensityPolicy"], "external_only")
+        self.assertEqual(response["result"]["referenceModes"]["pooled"]["referenceObservationCount"], 3)
 
     def test_same_mean_and_row_count_with_different_bin_occupancy_is_not_duplicate(self) -> None:
         selected_goal = goal(axes=[axis("x")])
@@ -575,12 +584,55 @@ class DensityGridBehaviorTests(unittest.TestCase):
                     "goalId": original_goal["id"],
                     "selectedAxes": ["x"],
                     "previewAxes": [{"name": "x", "domainMin": 0, "domainMax": 10, "resolution": 0.5}],
+                    "gridPreviewSessionId": "apply_session",
+                    "referenceModes": {
+                        "external": {"specificity_score": 0.8, "confidence": 0.2},
+                        "pooled": {"specificity_score": 0.4, "confidence": 0.3},
+                        "internal": {"specificity_score": 0.1, "confidence": 0.1},
+                    },
                 }
             )
         self.assertEqual(response["updatedRecordCount"], 1)
         updated_record = saved_clusters[0][0]
         self.assertNotEqual(updated_record["gridSignature"], old_grid)
         self.assertNotEqual(updated_record["binOccupancyHash"], old_hash)
+        applied_log = saved_goals[0][0]["gridPreviewLogs"][0]
+        self.assertEqual(applied_log["action"], "apply_goal_default")
+        self.assertTrue(applied_log["appliedAsGoalDefault"])
+
+    def test_grid_preview_log_is_persisted_with_experiment_goal(self) -> None:
+        selected_goal = storage.validate_goal(goal(axes=[axis("x", domain_max=10, resolution=1)]))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            goal_store_path = Path(temp_dir) / "goal_store.json"
+            with (
+                patch.object(storage, "GOAL_STORE_PATH", goal_store_path),
+                patch("storage.load_cluster_store", return_value=[]),
+                patch("app.load_cluster_store", return_value=[]),
+            ):
+                storage.save_goal_store([selected_goal])
+                response = app.grid_preview_request(
+                    {
+                        "goalId": selected_goal["id"],
+                        "selectedAxes": ["x"],
+                        "previewAxes": [{"name": "x", "domainMin": 0, "domainMax": 10, "resolution": 0.5}],
+                        "targetRowVectors": [[1.0], [2.0]],
+                        "targetRowVectorAxisOrder": ["x"],
+                        "gridPreviewSessionId": "session_a",
+                        "logAction": "preview_edit",
+                        "previousAxes": [{"name": "x", "domainMin": 0, "domainMax": 10, "resolution": 1}],
+                    }
+                )
+                saved_goal = storage.load_goal_store()[0]
+        self.assertEqual(response["referenceModes"]["external"]["specificity_score"], 1.0)
+        self.assertEqual(response["referenceModes"]["external"]["confidence"], 0.0)
+        self.assertEqual(len(response["gridPreviewLogs"]), 1)
+        self.assertEqual(len(saved_goal["gridPreviewLogs"]), 1)
+        log = saved_goal["gridPreviewLogs"][0]
+        self.assertEqual(log["sessionId"], "session_a")
+        self.assertEqual(log["action"], "preview_edit")
+        self.assertEqual(log["axesBefore"][0]["resolution"], 1.0)
+        self.assertEqual(log["axesAfter"][0]["resolution"], 0.5)
+        self.assertIn("external", log["referenceModesAfter"])
 
     def test_report_template_does_not_render_coverage_axis_distribution(self) -> None:
         template = app.TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1149,6 +1201,9 @@ class DensityGridBehaviorTests(unittest.TestCase):
         self.assertIn("coverage_warning", content)
         self.assertIn("reference_density_policy", content)
         self.assertIn("self_contained_reference_warning", content)
+        self.assertIn("primary_reference_mode", content)
+        self.assertIn("reference_modes", content)
+        self.assertIn("grid_preview_logs", content)
 
 
 if __name__ == "__main__":

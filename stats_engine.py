@@ -156,7 +156,7 @@ def compute_ecdf_specificity(
     occupied_bin_count = int(occupied_counts.size)
     if occupied_bin_count <= 0:
         raise ValueError(
-            "Density grid analysis requires at least one target-included reference row-level bin occupancy observation."
+            "Density grid analysis requires at least one reference row-level bin occupancy observation."
         )
     weighted_specificity = 0.0
     max_specificity = 0.0
@@ -225,7 +225,7 @@ class DensityGridAnalyzer:
         peer_valid_rows = self._peer_density.observation_count
         if peer_valid_rows <= 0:
             raise ValueError(
-                "Density grid analysis requires at least one target-included reference row-level bin occupancy observation."
+                "Density grid analysis requires at least one reference row-level bin occupancy observation."
             )
 
         target_tracker = BinGridTracker(self.config.domain_range, self.config.resolution)

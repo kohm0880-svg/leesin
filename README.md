@@ -2,7 +2,13 @@
 
 Leesin certifies CSV datasets against saved peer observations for each Experiment Goal.
 
-The main engine is now a row-level density grid specificity detector. Leesin keeps each Goal's Axis, Domain Range, and Resolution settings, maps CSV rows into the multidimensional grid, accumulates saved peer row-level bin occupancy into a density map, and scores how rare the target rows are on that peer density map.
+The main engine is a row-level density grid specificity detector. Leesin keeps each Goal's Axis, Domain Range, and Resolution settings, maps CSV rows into the multidimensional grid, and reports three independent reference analyses:
+
+- **External** (primary): saved peers only
+- **Pooled**: saved peers plus the current target
+- **Internal**: current target only
+
+The three results are displayed separately and are never combined.
 
 ## Core Model
 
@@ -39,9 +45,9 @@ Additional result fields include `mean_bin_specificity`, `max_specificity`, `ext
 
 `mean_rarity` and `max_rarity` remain available as advanced compatibility metrics, but they do not drive `specificity_score`.
 
-Specificity Score is an engineering score that compares target-bin peer counts against the occupied peer-bin count eCDF. It is not a p-value, posterior probability, or statistical probability.
+Specificity Score is an engineering score that compares target-bin reference counts against the occupied reference-bin count eCDF. It is not a p-value, posterior probability, or statistical probability.
 
-If `peer_valid_rows == 0`, density analysis is limited and Leesin returns a clear error. Legacy records without row-level vectors are excluded from density scoring.
+If the External reference contains zero rows, External Specificity uses the explicit boundary value `1.0` (100) and External Confidence is `0.0`. The boundary means that no external observation supports the target; it does not mean the outlier judgment is 100% certain. Pooled and Internal remain calculable. Legacy records without row-level vectors are excluded from density scoring.
 
 ## Confidence
 
@@ -56,6 +62,12 @@ Confidence is engineering confidence, not a p-value. It combines:
 ```text
 confidence = (observation_support_S * coverage_C * equitability_E) ** (1/3)
 ```
+
+Each reference mode calculates its own Confidence from that mode's input-axis reference occupancy.
+
+## Grid Preview Audit Log
+
+Every completed Grid Preview recalculation records the timestamp, action, before/after Domain Range and Resolution, and before/after External/Pooled/Internal metrics. Logs are stored with the Experiment Goal. A report includes only the logs from its own analysis session, while the Goal management view preserves the full history. Applying a preview as the Goal default is recorded as a separate applied event.
 
 ## Grid Signature
 
@@ -137,6 +149,10 @@ Duplicate detection still includes `binOccupancyHash`, so records with the same 
 Analysis results include density fields such as:
 
 - `engine = "density_grid"`
+- `primaryReferenceMode = "external"`
+- `referenceModes.external`
+- `referenceModes.pooled`
+- `referenceModes.internal`
 - `specificity_method = "occupied_bin_count_ecdf"`
 - `specificity_score`
 - `mean_bin_specificity`
