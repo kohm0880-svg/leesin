@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: data-quality-certification
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Leesin.py --host 0.0.0.0
+    healthCheckPath: /health
+    disk:
+      name: leesin-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: leesin-postgres
+          property: connectionString
+      - key: ALLOW_REMOTE_ADMIN
+        value: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: LEESIN_STORE_DIR
+        value: /var/data
+      - key: SAVE_DATA_CLUSTERS
+        value: true
+
+databases:
+  - name: leesin-postgres
+    plan: free
