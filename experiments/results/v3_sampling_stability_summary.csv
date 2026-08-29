@@ -1,0 +1,6 @@
+check,expected,passed
+"same shape/C/E, N increases",sampling stability candidate increases,True
+"same N/A/C, E changes",TV candidate remains unchanged; it is not re-measuring E,True
+"same N/C≈1/E≈1, A increases",sampling stability candidate decreases,True
+"same N/A/E=1, C changes",TV candidate remains unchanged; it is not re-measuring C,True
+known one-row eCDF sensitivity failure,"for m>=10, right-eCDF delta stays 0.75 despite N growth",True
