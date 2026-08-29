@@ -1,0 +1,7 @@
+check,expected,passed
+"same C/E/shape, N increases",mean rank stability increases toward 1,True
+uniform ties as N grows,rank stability does not falsely converge to 1,True
+"same N/C, larger density gap",rank stability rises as target/comparison separation becomes clearer,True
+"same reference, different target bin",rank stability can differ while C/E/N are identical,True
+distribution stability vs rank stability are distinct,TV bound stays fixed at same N/A while rank stability changes,True
+unseen target policy,rank stability is undefined rather than falsely certain,True
