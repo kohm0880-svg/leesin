@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from v4_mvp.modules import analyze_question
+from v4_mvp.mvp_adapters.prime_benchmark import generate_cluster_payload
 
 
 def cluster(name: str, rows: list[tuple[int, str, float]], *, protocol: str = "prime-v1", context: str = "same-machine"):
@@ -40,6 +41,14 @@ class PrimeBoundaryModuleTests(unittest.TestCase):
         result = analyze_question("general_prime_speed", data)
         self.assertEqual(result["status"], "insufficient_scope")
         self.assertIsNone(result["proposal"])
+
+    def test_mvp_adapter_generates_cluster_csv(self):
+        payload = generate_cluster_payload([5, 20], repeats=3, warmup=0)
+        self.assertIn("N,algorithm,runtime_ms,repeat", payload["csv_text"])
+        self.assertIn("prime-benchmark-mvp-v1", payload["protocol"])
+        self.assertTrue(payload["context"])
+        self.assertEqual(payload["experiment"]["nValues"], [5, 20])
+        self.assertEqual(payload["experiment"]["repeats"], 3)
 
 
 if __name__ == "__main__":
