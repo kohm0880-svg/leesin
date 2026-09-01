@@ -7,7 +7,7 @@ This folder is an isolated MVP for the V4 direction. It intentionally does **not
 The UI follows the V4 workflow:
 
 1. choose a **Project**
-2. add one or more **Data Clusters**
+2. add or generate one or more **Data Clusters**
 3. choose the **Question** (the information you want)
 4. select which clusters should be analyzed (`Select all` is provided)
 5. run the analysis
@@ -55,14 +55,47 @@ Override it with:
 LEESIN_V4_STORE=/path/to/store.json python -m v4_mvp.app
 ```
 
-## Generate benchmark CSV data
+## Fastest test: run the MVP experiment inside Leesin
 
-Choose the repeat count as part of your own protocol rather than letting Leesin infer a “sufficient” value:
+The prime benchmark executor is intentionally isolated under `v4_mvp/mvp_adapters/` so it can be deleted after this MVP. It is not part of the general Leesin core.
+
+1. Open the seeded `Prime Algorithm Benchmark` project.
+2. Click **⚗ Run MVP experiment**.
+3. Enter two or more `N` values separated by commas, for example:
+
+   `1000,100000`
+
+4. Leesin runs both prime algorithms locally, records 7 repetitions after 1 warmup, and automatically creates a new Data Cluster. The Protocol and execution Context are filled consistently by the temporary adapter.
+5. Choose **Prime algorithm performance crossover**.
+6. Use **Select all** and click **Analyze selected data**.
+7. Inspect **Preview / Result / Assumptions / Limits / Next**.
+8. If a crossover is bracketed, click **Start next experiment**. For this MVP only, that button executes the proposed `N` directly and creates the next Data Cluster automatically.
+9. Return to the Question, use **Select all**, and analyze again.
+
+This closes the loop inside the MVP:
+
+`Analysis → Proposal → experiment execution → new Cluster → Analysis`
+
+without making built-in experiment execution a permanent Leesin assumption.
+
+### Reset the experiment
+
+Stop the server and delete:
+
+```text
+v4_mvp/runtime/store.json
+```
+
+The next launch will seed a fresh project.
+
+## Manual benchmark path
+
+The benchmark can still be run outside the UI when needed:
 
 ```bash
 python -m v4_mvp.benchmark_prime \
   --n 10000 1000000 \
-  --repeats 5 \
+  --repeats 7 \
   --warmup 1 \
   --out initial.csv
 ```
@@ -75,20 +108,6 @@ Recognized algorithm labels include `trial`, `trial_division`, `incremental_tria
 
 For the same analysis, use the same Protocol label and Context text for clusters that are meant to be directly comparable.
 
-## Suggested first experiment
-
-1. Benchmark two distant N values.
-2. Upload the CSV as Cluster 001.
-3. Choose `Prime algorithm performance crossover`.
-4. Select the cluster and analyze.
-5. If a crossover is bracketed, Leesin proposes the integer midpoint.
-6. Click `Start next experiment`.
-7. Run the displayed benchmark command with the same protocol.
-8. Upload that CSV as the next cluster.
-9. Re-run the question with `Select all`.
-
-The analysis history is auto-saved; a later cluster does not rewrite earlier analyses.
-
 ## Tests
 
 ```bash
@@ -97,6 +116,10 @@ python -m unittest tests.test_v4_mvp
 
 The tests cover normal crossover bracket + midpoint proposal, multiple crossover assumption failure, protocol mismatch, and refusal to answer the undefined general-performance question.
 
+## Removing the built-in MVP experiment later
+
+Delete `v4_mvp/mvp_adapters/` and remove the small adapter import, `/mvp-prime-ui.js` route, HTML injection line, and `/mvp/prime-benchmark` endpoint from `v4_mvp/app.py`. The Question/Cluster/Analysis/Proposal core remains independent.
+
 ## MVP boundaries
 
-Not implemented yet: authentication/accounts, public/private projects, external references/fork, schema editor, generalized plugin registry, probabilistic timing uncertainty, automatic environment discovery, upload compatibility preview before analysis, and deletion/edit revision UI.
+Not implemented yet: authentication/accounts, public/private projects, external references/fork, schema editor, generalized plugin registry, probabilistic timing uncertainty, upload compatibility preview before analysis, and deletion/edit revision UI.
