@@ -61,11 +61,8 @@ The prime benchmark executor is intentionally isolated under `v4_mvp/mvp_adapter
 
 1. Open the seeded `Prime Algorithm Benchmark` project.
 2. Click **⚗ Run MVP experiment**.
-3. Enter two or more `N` values separated by commas, for example:
-
-   `1000,100000`
-
-4. Leesin runs both prime algorithms locally, records 7 repetitions after 1 warmup, and automatically creates a new Data Cluster. The Protocol and execution Context are filled consistently by the temporary adapter.
+3. Use the default initial values `5,100` unless you want to choose a different starting bracket.
+4. Leesin runs both prime algorithms locally, records 101 repetitions after 3 warmups, and automatically creates a new Data Cluster. This repeat count is only a declared test protocol chosen because the crossover occurs at tiny runtimes; it is not a confidence score or a claim of statistical sufficiency.
 5. Choose **Prime algorithm performance crossover**.
 6. Use **Select all** and click **Analyze selected data**.
 7. Inspect **Preview / Result / Assumptions / Limits / Next**.
@@ -94,9 +91,9 @@ The benchmark can still be run outside the UI when needed:
 
 ```bash
 python -m v4_mvp.benchmark_prime \
-  --n 10000 1000000 \
-  --repeats 7 \
-  --warmup 1 \
+  --n 5 100 \
+  --repeats 101 \
+  --warmup 3 \
   --out initial.csv
 ```
 
