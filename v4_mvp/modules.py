@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 
-MODULE_VERSION = "0.1.0"
+MODULE_VERSION = "0.1.1"
 
 QUESTIONS: list[dict[str, Any]] = [
     {
@@ -202,6 +202,14 @@ def _analysis_input(clusters: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
     return rows, errors
 
 
+def _closest_unobserved_midpoint(lower: int, upper: int, observed: set[int]) -> int | None:
+    candidates = [value for value in range(lower + 1, upper) if value not in observed]
+    if not candidates:
+        return None
+    midpoint = (lower + upper) / 2
+    return min(candidates, key=lambda value: (abs(value - midpoint), value))
+
+
 def analyze_prime_crossover(clusters: list[dict[str, Any]]) -> Outcome:
     if not clusters:
         return Outcome(
@@ -265,36 +273,43 @@ def analyze_prime_crossover(clusters: list[dict[str, Any]]) -> Outcome:
             diagnostics=[],
         )
 
-    ties = [item["N"] for item in comparable if item["winner"] == "tie"]
-    if ties:
+    ordered_all = sorted(comparable, key=lambda item: int(item["N"]))
+    ties = [int(item["N"]) for item in ordered_all if item["winner"] == "tie"]
+    ordered = [item for item in ordered_all if item["winner"] in {"trial", "sieve"}]
+
+    if len(ordered) < 2:
         return Outcome(
             status="insufficient_information",
             status_label="INSUFFICIENT INFORMATION",
-            title="An observed comparison is tied",
+            title="Observed ties do not yet bracket a performance crossover",
             summary=(
-                "동일한 median runtime이 관측된 N이 있어 binary winner로 처리하지 않았습니다."
+                "동일한 median runtime이 관측되었지만, 양쪽에서 서로 다른 성능 우위가 "
+                "확인되지 않아 하나의 전환 구간을 만들 수 없습니다."
             ),
             preview=preview,
-            assumptions=["Single Boundary Module은 각 비교 지점의 우위가 결정되어 있어야 합니다."],
-            limits=["tie를 임의의 알고리즘 승리로 바꾸지 않았습니다."],
-            diagnostics=[f"Tied N: {', '.join(map(str, ties))}"],
+            assumptions=[
+                "tie는 어느 알고리즘의 승리로 강제하지 않고 관측된 동률 상태로 유지합니다."
+            ],
+            limits=[
+                "관측된 median의 동률을 실제 실행시간의 정확한 equality로 해석하지 않습니다."
+            ],
+            diagnostics=[f"Tied N: {', '.join(map(str, ties))}" if ties else "No non-tied bracket."],
         )
 
-    ordered = sorted(comparable, key=lambda item: int(item["N"]))
     transitions: list[int] = []
     for idx in range(1, len(ordered)):
         if ordered[idx - 1]["winner"] != ordered[idx]["winner"]:
             transitions.append(idx)
 
     if len(transitions) > 1:
-        sequence = " → ".join(f"{item['N']}:{item['winner']}" for item in ordered)
+        sequence = " → ".join(f"{item['N']}:{item['winner']}" for item in ordered_all)
         return Outcome(
             status="assumption_failed",
             status_label="ANALYSIS STOPPED",
             title="Single-crossover assumption conflicts with the selected data",
             summary=(
-                "성능 우위가 두 번 이상 뒤집혀 하나의 경계만 존재한다는 가정 아래에서 "
-                "결과나 다음 실험을 계산하지 않았습니다."
+                "tie를 어느 한쪽의 승리로 강제하지 않고 제외하여 보아도 성능 우위가 두 번 이상 "
+                "뒤집혀, 하나의 경계만 존재한다는 가정 아래에서는 결과나 다음 실험을 계산하지 않았습니다."
             ),
             preview=preview,
             assumptions=["탐색 구간에서 성능 우위는 최대 한 번만 전환된다."],
@@ -307,20 +322,25 @@ def analyze_prime_crossover(clusters: list[dict[str, Any]]) -> Outcome:
 
     if len(transitions) == 0:
         winner = ordered[0]["winner"]
+        diagnostics = []
+        if ties:
+            diagnostics.append(f"Observed tie N: {', '.join(map(str, ties))}")
         return Outcome(
             status="insufficient_information",
             status_label="INSUFFICIENT INFORMATION",
-            title="No crossover is bracketed by the selected data",
+            title="No crossover is bracketed by non-tied observations",
             summary=(
-                f"선택된 비교 지점에서는 모두 {winner}가 더 빨랐습니다. "
-                "현재 관측 범위만으로 경계가 존재하는 위치를 정할 수 없습니다."
+                f"동률을 제외한 선택된 비교 지점에서는 모두 {winner}가 더 빨랐습니다. "
+                "현재 관측 범위만으로 반대쪽 성능 우위가 어디에서 나타나는지 정할 수 없습니다."
             ),
             preview=preview,
-            assumptions=["탐색 구간에서 성능 우위가 한 번 전환될 수 있다."],
+            assumptions=[
+                "tie는 어느 알고리즘의 승리로 강제하지 않고 관측된 동률 상태로 유지합니다."
+            ],
             limits=[
                 "관측 범위 밖의 어느 N을 다음에 선택해야 하는지는 별도의 탐색 Domain 없이는 정당하게 결정되지 않습니다."
             ],
-            diagnostics=[],
+            diagnostics=diagnostics,
         )
 
     idx = transitions[0]
@@ -331,48 +351,65 @@ def analyze_prime_crossover(clusters: list[dict[str, Any]]) -> Outcome:
     left_winner = str(left["winner"])
     right_winner = str(right["winner"])
 
-    midpoint = (lower + upper) // 2
+    observed_ns = {int(item["N"]) for item in ordered_all}
+    next_n = _closest_unobserved_midpoint(lower, upper, observed_ns)
     proposal: dict[str, Any] | None = None
-    if lower < midpoint < upper:
+    if next_n is not None:
         proposal = {
             "type": "next_observation",
-            "input": {"N": midpoint},
+            "input": {"N": next_n},
             "reason": (
-                "현재 관측된 crossover bracket의 정수 중점을 측정하면 "
-                "Single Boundary 가정 아래에서 후보 구간의 한쪽을 제거할 수 있습니다."
+                "현재 관측된 crossover bracket의 중점에 가장 가까운 아직 관측하지 않은 정수 N을 "
+                "측정하여 Single Boundary 가정 아래에서 후보 구간을 더 좁힙니다."
             ),
             "repeatInstruction": "현재 선택한 군집과 동일한 Protocol/Context로 측정하세요.",
             "commandTemplate": (
-                f"python -m v4_mvp.benchmark_prime --n {midpoint} "
+                f"python -m v4_mvp.benchmark_prime --n {next_n} "
                 "--repeats <protocol에_정한_반복횟수> --out next.csv"
             ),
         }
+
+    tie_note = ""
+    if ties:
+        inside = [value for value in ties if lower < value < upper]
+        if inside:
+            tie_note = (
+                f" 이 구간 안에서 N={', '.join(map(str, inside))}의 median runtime 동률이 관측되었으며, "
+                "이를 어느 알고리즘의 승리로 강제하지 않았습니다."
+            )
+
+    diagnostics = [
+        f"Selected clusters: {len(clusters)}",
+        f"Comparable N values: {len(ordered_all)}",
+        f"Non-tied N values used for bracket logic: {len(ordered)}",
+        f"Module version: {MODULE_VERSION}",
+    ]
+    if ties:
+        diagnostics.append(f"Observed tie N: {', '.join(map(str, ties))}")
 
     return Outcome(
         status="ok",
         status_label="RESULT",
         title="A single performance crossover is bracketed",
         summary=(
-            f"현재 선택한 데이터와 Single Boundary 가정 아래에서 성능 우위 전환은 "
-            f"{lower} < N* ≤ {upper} 범위에 있습니다. "
-            f"왼쪽에서는 {left_winner}, 오른쪽에서는 {right_winner}가 더 빨랐습니다."
+            f"현재 선택한 데이터와 Single Boundary 가정 아래에서 서로 다른 성능 우위가 관측된 "
+            f"가장 가까운 경계는 {lower} < N* ≤ {upper} 범위에 있습니다. "
+            f"왼쪽에서는 {left_winner}, 오른쪽에서는 {right_winner}가 더 빨랐습니다.{tie_note}"
         ),
         preview=preview,
         assumptions=[
             "선택된 군집의 Protocol/Context 표기가 동일하다.",
             "탐색 구간에서 성능 우위가 한 번만 전환된다.",
             "각 N의 비교에는 관측된 runtime의 median을 사용한다.",
+            "median tie는 어느 알고리즘의 승리로 강제하지 않는다.",
         ],
         limits=[
             "runtime의 sampling uncertainty를 확률적 confidence로 환산하지 않았습니다.",
+            "관측된 median tie를 두 알고리즘의 실제 실행시간이 정확히 같다는 명제로 해석하지 않습니다.",
             "결론은 선택된 구현과 실행환경에 한정됩니다.",
             "관측하지 않은 실행환경에 대한 일반적인 성능 우위는 결정하지 않습니다.",
         ],
-        diagnostics=[
-            f"Selected clusters: {len(clusters)}",
-            f"Comparable N values: {len(ordered)}",
-            f"Module version: {MODULE_VERSION}",
-        ],
+        diagnostics=diagnostics,
         proposal=proposal,
     )
 
