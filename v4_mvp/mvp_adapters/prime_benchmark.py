@@ -3,15 +3,18 @@ from __future__ import annotations
 import csv
 import io
 import platform
-import sys
 from typing import Any
 
 from v4_mvp.benchmark_prime import benchmark
 
 
 ADAPTER_ID = "prime-benchmark-mvp-v1"
-DEFAULT_REPEATS = 7
-DEFAULT_WARMUP = 1
+# The first crossover for these pure-Python implementations occurs at very small
+# N, so individual timings are tiny. 101 repetitions are a declared experimental
+# protocol choice to make the median less jumpy; they are NOT a confidence score
+# or a claim that 101 samples are statistically sufficient.
+DEFAULT_REPEATS = 101
+DEFAULT_WARMUP = 3
 
 
 def execution_context() -> str:
