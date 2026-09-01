@@ -26,7 +26,7 @@
   }
 
   window.runPrimeMvpInitial = async function () {
-    const raw = prompt('실험할 N 값을 쉼표로 입력하세요.', '1000,100000');
+    const raw = prompt('실험할 N 값을 쉼표로 입력하세요.', '5,100');
     if (raw == null) return;
     const values = raw.split(',').map(v => Number(v.trim())).filter(Number.isFinite);
     await runPrimeMvp(values);
