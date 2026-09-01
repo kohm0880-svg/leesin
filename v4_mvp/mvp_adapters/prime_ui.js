@@ -2,7 +2,7 @@
   // Temporary MVP-only UI. Delete v4_mvp/mvp_adapters and the tiny app.py
   // injection/endpoint when built-in experiment execution is no longer needed.
   async function runPrimeMvp(nValues, originProposalId = null) {
-    if (!window.state?.project?.id) {
+    if (!state?.project?.id) {
       alert('프로젝트를 먼저 선택하세요.');
       return;
     }
@@ -12,13 +12,13 @@
       return;
     }
     try {
-      const result = await window.api(`/api/projects/${window.state.project.id}/mvp/prime-benchmark`, {
+      const result = await api(`/api/projects/${state.project.id}/mvp/prime-benchmark`, {
         method: 'POST',
         body: JSON.stringify({nValues: normalized, originProposalId})
       });
-      window.state.project = await window.api(`/api/projects/${window.state.project.id}`);
-      window.renderTree();
-      window.renderProjectHome();
+      state.project = await api(`/api/projects/${state.project.id}`);
+      renderTree();
+      renderProjectHome();
       alert(`실험 완료: ${result.cluster.name}\n${result.rowCount} rows saved.`);
     } catch (err) {
       alert(err.message);
@@ -32,8 +32,8 @@
     await runPrimeMvp(values);
   };
 
-  const originalRenderProjectHome = window.renderProjectHome;
-  window.renderProjectHome = function () {
+  const originalRenderProjectHome = renderProjectHome;
+  renderProjectHome = function () {
     originalRenderProjectHome();
     const header = document.querySelector('#mainView .section-head');
     if (!header || document.getElementById('runPrimeMvpBtn')) return;
@@ -48,9 +48,9 @@
 
   // For this MVP only, "Start next experiment" actually executes the benchmark
   // and creates the next cluster instead of opening the manual CSV upload dialog.
-  window.startProposal = async function (proposalId) {
+  startProposal = async function (proposalId) {
     try {
-      const proposal = await window.api(`/api/projects/${window.state.project.id}/proposals/${proposalId}/start`, {
+      const proposal = await api(`/api/projects/${state.project.id}/proposals/${proposalId}/start`, {
         method: 'POST',
         body: '{}'
       });
@@ -66,8 +66,7 @@
   };
 
   // Initial project rendering may finish before/after this adapter loads.
-  // Add the button once if a project is already visible.
   setTimeout(() => {
-    if (window.state?.project) window.renderProjectHome();
+    if (state?.project) renderProjectHome();
   }, 50);
 })();
