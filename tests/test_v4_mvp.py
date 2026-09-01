@@ -22,6 +22,26 @@ class PrimeBoundaryModuleTests(unittest.TestCase):
         self.assertIn("100 < N* ≤ 300", result["summary"])
         self.assertEqual(result["proposal"]["input"]["N"], 200)
 
+    def test_tie_inside_bracket_is_kept_as_observation(self):
+        data = [
+            cluster(
+                "tie-bracket",
+                [
+                    (5, "trial", 1.0),
+                    (5, "sieve", 2.0),
+                    (16, "trial", 2.5),
+                    (16, "sieve", 2.5),
+                    (28, "trial", 5.3),
+                    (28, "sieve", 3.7),
+                ],
+            )
+        ]
+        result = analyze_question("prime_crossover", data)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("5 < N* ≤ 28", result["summary"])
+        self.assertIn("N=16", result["summary"])
+        self.assertEqual(result["proposal"]["input"]["N"], 17)
+
     def test_rejects_multiple_crossovers(self):
         data = [cluster("multi", [(100, "trial", 1.0), (100, "sieve", 2.0), (200, "trial", 3.0), (200, "sieve", 2.0), (300, "trial", 1.0), (300, "sieve", 2.0)])]
         result = analyze_question("prime_crossover", data)
