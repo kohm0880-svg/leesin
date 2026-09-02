@@ -38,3 +38,6 @@ jobs:
 
       - name: Run V4 backend tests
         run: python -m unittest tests.test_v4_mvp tests.test_module_workshop tests.test_workspace_store
+
+      - name: Report checked Core prototype
+        run: echo "V4 stateful Core and Module shelf checked"
