@@ -1,0 +1,40 @@
+name: V4 MVP checks
+
+on:
+  pull_request:
+    paths:
+      - "v4_mvp/**"
+      - "tests/test_v4_mvp.py"
+      - "tests/test_module_workshop.py"
+      - "tests/test_workspace_store.py"
+      - ".github/workflows/v4-mvp-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check browser JavaScript syntax
+        run: |
+          node --check v4_mvp/mvp_adapters/prime_ui.js
+          node --check v4_mvp/module_workshop_ui.js
+          node --check v4_mvp/module_file_input_ui.js
+          node --check v4_mvp/workspace_ui.js
+          node --check v4_mvp/ux_polish_ui.js
+
+      - name: Compile Python sources
+        run: python -m compileall -q v4_mvp
+
+      - name: Run V4 backend tests
+        run: python -m unittest tests.test_v4_mvp tests.test_module_workshop tests.test_workspace_store
