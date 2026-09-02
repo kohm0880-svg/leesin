@@ -55,7 +55,7 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 class V4Handler(BaseHTTPRequestHandler):
-    server_version = "LeesinV4MVP/0.3"
+    server_version = "LeesinV4MVP/0.4"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         body = _json_bytes(payload)
