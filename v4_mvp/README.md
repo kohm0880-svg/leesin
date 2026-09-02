@@ -4,11 +4,11 @@ This folder is an isolated MVP for the V4 direction. It intentionally does **not
 
 ## What this MVP tests
 
-The UI follows the V4 workflow:
+The original project flow still tests:
 
 1. choose a **Project**
 2. add or generate one or more **Data Clusters**
-3. choose the **Question** (the information you want)
+3. choose a **Question**
 4. select which clusters should be analyzed (`Select all` is provided)
 5. run the analysis
 6. review **Preview / Result / Assumptions / Limits / Next**
@@ -29,11 +29,47 @@ It is deliberately able to **stop** rather than manufacture a result:
 - `INSUFFICIENT INFORMATION` when no crossover is bracketed
 - `INSUFFICIENT INFORMATION` for the intentionally broad question “which algorithm is generally faster?” because the target environment population is undefined
 
-This is the core V4 distinction being tested: the system manages the link
+## Module Workshop: Paste → Map → Run → Save
 
-`Question → selected Data → Assumptions → Information / Limits → Next Observation`
+V4 now also contains a separate `Module Workshop` prototype. Its purpose is to test a different product direction: Leesin does not infer the meaning of an arbitrary research question on its own. Instead, the executable analysis logic is explicit in an Analysis Module, while a human-readable Question can remain optional semantic context.
 
-instead of treating every available numeric value as sufficient to answer every question.
+Open **Modules** in the top bar and:
+
+1. paste an existing Python function
+2. paste CSV, TSV, or an Excel clipboard table including the header row
+3. Leesin detects top-level functions, function parameters, table columns, and suggests parameter → column mappings
+4. correct only ambiguous mappings
+5. click **Run**
+6. click **Save Module**; Description / Question / Assumptions / Limits are optional
+7. use a saved Module again with different data, or **Copy JSON** / **Paste Module JSON** to transfer the Module by copy-paste
+
+A simple example:
+
+```python
+def average(values):
+    return sum(values) / len(values)
+```
+
+Paste data such as:
+
+```text
+values
+1
+2
+3
+```
+
+The Workshop maps `values ← values`, executes the function, and returns `2.0`.
+
+The current runner is deliberately narrow. It executes a restricted Python subset in a separate process with a timeout and supports common builtins plus curated `math` / `statistics` imports. It is **not a complete security sandbox**, so only trusted local code should be pasted. NumPy/Pandas compatibility, dependency environments, public accounts/registry, signing, and server-grade sandboxing are later work.
+
+Saved Workshop modules are written separately to:
+
+```text
+v4_mvp/runtime/custom_modules.json
+```
+
+Override it with `LEESIN_V4_MODULE_STORE`.
 
 ## Run the MVP
 
@@ -108,15 +144,15 @@ For the same analysis, use the same Protocol label and Context text for clusters
 ## Tests
 
 ```bash
-python -m unittest tests.test_v4_mvp
+python -m unittest tests.test_v4_mvp tests.test_module_workshop
 ```
 
-The tests cover normal crossover bracket + midpoint proposal, multiple crossover assumption failure, protocol mismatch, and refusal to answer the undefined general-performance question.
+The Workshop tests cover signature inspection, Excel-style TSV parsing, automatic mapping, whole-table input, restricted execution, curated imports, and module persistence.
 
 ## Removing the built-in MVP experiment later
 
-Delete `v4_mvp/mvp_adapters/` and remove the small adapter import, `/mvp-prime-ui.js` route, HTML injection line, and `/mvp/prime-benchmark` endpoint from `v4_mvp/app.py`. The Question/Cluster/Analysis/Proposal core remains independent.
+Delete `v4_mvp/mvp_adapters/` and remove the small adapter import, `/mvp-prime-ui.js` route, HTML injection line, and `/mvp/prime-benchmark` endpoint from `v4_mvp/app.py`. The Project/Cluster/Analysis/Proposal core and Module Workshop remain independent.
 
 ## MVP boundaries
 
-Not implemented yet: authentication/accounts, public/private projects, external references/fork, schema editor, generalized plugin registry, probabilistic timing uncertainty, upload compatibility preview before analysis, and deletion/edit revision UI.
+Not implemented yet: authentication/accounts, public/private module registry, dependency environments, robust server sandboxing, external references/fork graph, generalized Module version publication, probabilistic timing uncertainty, upload compatibility preview before analysis, and deletion/edit revision UI.
