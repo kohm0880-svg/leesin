@@ -33,6 +33,8 @@ At this stage `Data` and `Module` are navigable; destructive rollback of downstr
 
 The right panel is a persistent Module shelf. It currently shows local **Favorites** and **My Modules**, allows quick Use/New actions, and provides simple local filtering. Natural-language/GPT discovery is intentionally deferred until a real Module Registry exists.
 
+The current UX polish deliberately keeps saved Modules out of the center Workshop because they already live in the right Module shelf. The old top-bar `Projects / Modules` collapse buttons are removed; pane controls now live directly on the left/right boundaries as `<< / >>` handles while retaining drag-to-resize. The visual system uses a muted blue-green/slate palette, softer selection states, quieter module cards and a progress-rail style Throughout indicator rather than high-contrast office-style controls.
+
 Both side panels can be collapsed and resized.
 
 Workspace state uses the same local JSON store as the MVP but is kept under separate `workspace_files`, `workspace_folders`, and `workspace_trash` keys so the original V4 experiment objects can remain independent. Deleting an existing Cluster/Analysis/Proposal from the explorer moves the original object into workspace Trash rather than immediately destroying it.
