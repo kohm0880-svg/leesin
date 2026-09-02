@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from v4_mvp.module_workshop import (
+    list_saved_modules,
+    prepare_workshop,
+    run_workshop,
+    save_module,
+)
 from v4_mvp.modules import MODULE_VERSION, analyze_question, question_registry
 from v4_mvp.mvp_adapters.prime_benchmark import (
     DEFAULT_REPEATS,
@@ -27,6 +33,7 @@ from v4_mvp.store import (
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "index.html"
 MVP_PRIME_UI_PATH = Path(__file__).resolve().parent / "mvp_adapters" / "prime_ui.js"
+MODULE_WORKSHOP_UI_PATH = Path(__file__).resolve().parent / "module_workshop_ui.js"
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -34,7 +41,7 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 class V4Handler(BaseHTTPRequestHandler):
-    server_version = "LeesinV4MVP/0.1"
+    server_version = "LeesinV4MVP/0.2"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         body = _json_bytes(payload)
@@ -45,11 +52,13 @@ class V4Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_html(self) -> None:
-        # MVP-only experiment UI is injected here instead of being mixed into the
-        # main template. Remove this one line and the /mvp-prime-ui.js route when
-        # built-in experiment execution is no longer needed.
+        # MVP-only tools are injected instead of being mixed into the main template.
+        # They can be removed independently when the prototype flows are replaced.
         text = TEMPLATE_PATH.read_text(encoding="utf-8").replace(
-            "</body>", '<script src="/mvp-prime-ui.js"></script>\n</body>'
+            "</body>",
+            '<script src="/mvp-prime-ui.js"></script>\n'
+            '<script src="/module-workshop-ui.js"></script>\n'
+            "</body>",
         )
         body = text.encode("utf-8")
         self.send_response(HTTPStatus.OK)
@@ -87,6 +96,9 @@ class V4Handler(BaseHTTPRequestHandler):
             if segments == ["mvp-prime-ui.js"]:
                 self._send_javascript(MVP_PRIME_UI_PATH)
                 return
+            if segments == ["module-workshop-ui.js"]:
+                self._send_javascript(MODULE_WORKSHOP_UI_PATH)
+                return
             if segments == ["api", "bootstrap"]:
                 self._send_json(
                     {
@@ -98,8 +110,15 @@ class V4Handler(BaseHTTPRequestHandler):
                             "repeats": DEFAULT_REPEATS,
                             "warmup": DEFAULT_WARMUP,
                         },
+                        "moduleWorkshop": {
+                            "enabled": True,
+                            "runner": "restricted-python-mvp",
+                        },
                     }
                 )
+                return
+            if segments == ["api", "module-workshop", "modules"]:
+                self._send_json({"modules": list_saved_modules()})
                 return
             if len(segments) == 3 and segments[:2] == ["api", "projects"]:
                 self._send_json(project_detail(segments[2]))
@@ -118,6 +137,42 @@ class V4Handler(BaseHTTPRequestHandler):
             if segments == ["api", "projects"]:
                 self._send_json(
                     create_project(body.get("title", ""), body.get("description", "")),
+                    HTTPStatus.CREATED,
+                )
+                return
+            if segments == ["api", "module-workshop", "prepare"]:
+                self._send_json(
+                    prepare_workshop(
+                        str(body.get("code") or ""),
+                        str(body.get("dataText") or ""),
+                        str(body.get("functionName") or "") or None,
+                    )
+                )
+                return
+            if segments == ["api", "module-workshop", "run"]:
+                mapping = body.get("mapping") or {}
+                if not isinstance(mapping, dict):
+                    raise ValueError("mapping must be an object.")
+                self._send_json(
+                    run_workshop(
+                        str(body.get("code") or ""),
+                        str(body.get("functionName") or ""),
+                        str(body.get("dataText") or ""),
+                        mapping,
+                    )
+                )
+                return
+            if segments == ["api", "module-workshop", "modules"]:
+                self._send_json(
+                    save_module(
+                        code=str(body.get("code") or ""),
+                        function_name=str(body.get("functionName") or ""),
+                        title=str(body.get("title") or ""),
+                        description=str(body.get("description") or ""),
+                        question=str(body.get("question") or ""),
+                        assumptions=str(body.get("assumptions") or ""),
+                        limits=str(body.get("limits") or ""),
+                    ),
                     HTTPStatus.CREATED,
                 )
                 return
