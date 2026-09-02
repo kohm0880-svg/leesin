@@ -23,11 +23,13 @@ from v4_mvp.mvp_adapters.prime_benchmark import (
 from v4_mvp.store import (
     add_cluster,
     create_project,
+    delete_project,
     list_projects,
     project_detail,
     save_analysis,
     selected_clusters,
     start_proposal,
+    update_project,
 )
 from v4_mvp.workspace_store import (
     add_project_file,
@@ -55,7 +57,7 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 class V4Handler(BaseHTTPRequestHandler):
-    server_version = "LeesinV4MVP/0.6"
+    server_version = "LeesinV4MVP/0.7"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         body = _json_bytes(payload)
@@ -66,8 +68,6 @@ class V4Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_html(self) -> None:
-        # MVP-only tools are injected instead of being mixed into the main template.
-        # They can be removed independently when the prototype flows are replaced.
         text = TEMPLATE_PATH.read_text(encoding="utf-8").replace(
             "</body>",
             '<script src="/mvp-prime-ui.js"></script>\n'
@@ -180,6 +180,30 @@ class V4Handler(BaseHTTPRequestHandler):
                     create_project(body.get("title", ""), body.get("description", "")),
                     HTTPStatus.CREATED,
                 )
+                return
+            if (
+                len(segments) == 4
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "settings"
+            ):
+                self._send_json(
+                    update_project(
+                        segments[2],
+                        title=str(body.get("title") or ""),
+                        description=(
+                            str(body.get("description"))
+                            if body.get("description") is not None
+                            else None
+                        ),
+                    )
+                )
+                return
+            if (
+                len(segments) == 4
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "delete"
+            ):
+                self._send_json(delete_project(segments[2]))
                 return
             if segments == ["api", "module-workshop", "prepare"]:
                 self._send_json(
