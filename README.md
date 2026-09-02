@@ -1,197 +1,227 @@
 # Leesin
 
-Leesin certifies CSV datasets against saved peer observations for each Experiment Goal.
+Leesin is a local web-based research workflow prototype built around one question:
 
-The main engine is a row-level density grid specificity detector. Leesin keeps each Goal's Axis, Domain Range, and Resolution settings, maps CSV rows into the multidimensional grid, and reports three independent reference analyses:
+> **What information can the current data justify, and what should be observed next when it cannot?**
 
-- **External** (primary): saved peers only
-- **Pooled**: saved peers plus the current target
-- **Internal**: current target only
-
-The three results are displayed separately and are never combined.
-
-## Core Model
-
-- CSV file = one saved record.
-- CSV rows = row-level observations inside that record.
-- Raw rows, filenames, unmapped columns, and personal data are not stored.
-- Saved records keep selected-axis sanitized numeric row vectors in `rowLevelVectors`.
-- Saved records also keep compatibility axis summaries, `binOccupancy`, `axisBinOccupancy`, `binOccupancyMeta`, `binOccupancyHash`, and `gridSignature`.
-- A mean vector is still stored for compatibility and display, but it is not the main analysis signal.
-
-Storage and deletion happen at the record level. Leesin's density calculation does not treat a record mean vector as the sample; it re-bins the record's row-level sanitized axis vectors into the current density grid. When Domain Range or Resolution changes, saved row-level vectors can be used to recompute `binOccupancy` and `gridSignature`.
-
-## Specificity Engine
-
-Leesin compares each target bin's peer count against the distribution of occupied peer bin counts.
+The current V4 prototype treats analysis as one step inside a repeatable experimental cycle rather than as the endpoint of the system.
 
 ```text
-C_occupied = [peer_count[g] for g where peer_count[g] > 0]
-b = len(C_occupied)
-
-if C_i == 0:
-    S_i = 1.0
-else:
-    S_i = 1 - count(C_j <= C_i for C_j in C_occupied) / b
+Data → Module → Mapping → Analysis → Result → Next
 ```
 
-Target bin counts weight the bin-level specificity:
+The repository also preserves the earlier V1–V3 implementations that led to this redesign.
+
+---
+
+## Current V4 prototype
+
+The V4 interface is organized as:
 
 ```text
-specificity_score = sum(target_count[i] * S_i) / target_valid_rows
+Projects / Files | Core workflow | Modules
 ```
 
-Additional result fields include `mean_bin_specificity`, `max_specificity`, `extreme_specificity_rate`, `unseen_bin_rate`, `rare_bin_rate`, and `out_of_domain_rate`. `rare_bin_rate` is retained for UI/export compatibility and currently mirrors the fraction of valid target rows with bin-level specificity `S_i >= 0.95`.
+### Core workflow
 
-`mean_rarity` and `max_rarity` remain available as advanced compatibility metrics, but they do not drive `specificity_score`.
+Each Project keeps one active experimental cycle.
 
-Specificity Score is an engineering score that compares target-bin reference counts against the occupied reference-bin count eCDF. It is not a p-value, posterior probability, or statistical probability.
+- **Data** — select saved Data Clusters or original CSV/TSV project files.
+- **Module** — attach an Analysis Module by clicking **Use** or dragging it from the Module shelf.
+- **Mapping** — explicitly connect Module inputs to Data columns.
+- **Analysis** — execute only the declared Module logic.
+- **Result** — show the result together with declared assumptions, limits and diagnostics.
+- **Next** — optionally continue to another observation/experiment and return to a new Data cycle.
 
-If the External reference contains zero rows, External Specificity uses the explicit boundary value `1.0` (100) and External Confidence is `0.0`. The boundary means that no external observation supports the target; it does not mean the outlier judgment is 100% certain. Pooled and Internal remain calculable. Legacy records without row-level vectors are excluded from density scoring.
+`Question` is optional human-readable context. It is not an executable inference object; the actual analysis rule lives in the Module.
 
-## Confidence
+Previous editable stages can be revisited. Moving backward removes downstream state from the active Run, while backend Analysis/Proposal records move to Trash and the prior Run snapshot remains undoable.
 
-Confidence is engineering confidence, not a p-value. It combines:
+### Analysis Modules
 
-- `observation_support_S = peer_valid_rows / (peer_valid_rows + K_density)`
-- `coverage_C = occupied_bins / total_bins`
-- `equitability_E = -sum(p_i ln(p_i)) / ln(occupied_bins)`
-
-`K_density` currently reuses each Goal's `K_m` value so the code can rename it cleanly later.
+A reusable Module is treated as more than a bare Python function.
 
 ```text
-confidence = (observation_support_S * coverage_C * equitability_E) ** (1/3)
+Analysis Module = Function + Input Contract + Assumptions + Output/Limit metadata
 ```
 
-Each reference mode calculates its own Confidence from that mode's input-axis reference occupancy.
+The right-side Module shelf provides:
 
-## Grid Preview Audit Log
+- **Browse / My / Favorites**
+- author and version
+- description and visibility
+- tags and example Questions
+- deterministic search across title, description, tags, inputs, outputs, assumptions and examples
+- compatibility hints from the currently selected Data columns
+- **Use** and drag-and-drop attachment
+- local Fork / metadata editing for prototype Modules
 
-Every completed Grid Preview recalculation records the timestamp, action, before/after Domain Range and Resolution, and before/after External/Pooled/Internal metrics. Logs are stored with the Experiment Goal. A report includes only the logs from its own analysis session, while the Goal management view preserves the full history. Applying a preview as the Goal default is recorded as a separate applied event.
+### Module Workshop
 
-## Grid Signature
+Existing Python functions can be wrapped with a minimal workflow:
 
-`axisSignature` only tracks axis names. To guard stored grid metadata, each saved record also stores `gridSignature`.
-
-`gridSignature` hashes canonical JSON containing each selected axis's normalized name, `domainMin`, `domainMax`, and `resolution`. The canonical axes list is sorted by normalized axis name, and bin occupancy keys are generated in that same canonical order. Density analysis only combines saved records whose `gridSignature` matches the current selected Goal grid.
-
-The analysis payload reports:
-
-- `coverageEligibleClusterCount`
-- `coverageLegacyExcludedClusterCount`
-- `coverageGridSignatureExcludedClusterCount`
-- `rowLevelObservationCount`
-
-## Feasible Domain Mask
-
-Certified Feasible Domain rules are now defined by exact rectangular exclusion boxes generated from GUI rules: Conditional IF-THEN rules and Focused 2D Projection Mask rules. Leesin does not materialize the full multidimensional grid.
-
-Each enabled `feasibleDomainRules` item is converted to one or more high-dimensional mask boxes. `maskedBins` is the exact union size of those boxes, computed without `np.meshgrid`, `np.indices`, or full-grid boolean arrays. `a_valid = totalBins - maskedBins`, and Coverage is `occupied_bins / a_valid`.
-
-The Goal Admin UI separates configuration from analysis:
-
-- **Goal Configuration Projection Mask Editor** defines the feasible experiment domain before analysis.
-- **Analysis Projection Explorer** visualizes the resulting target/reference density after analysis.
-
-Advanced arbitrary expressions are no longer certified feasible-domain input. Existing expression strings are preserved as `legacyAdvancedExpressions` for migration, but they are not used for exact `a_valid`, Coverage, Confidence, or row filtering. Convert legacy expressions to Conditional or Focused 2D Projection Mask rules.
-
-With a certified mask enabled:
-
-- `total_bins` is the rectangular Cartesian bin count.
-- `masked_bins` is the exact union size of mask boxes.
-- `valid_bins` / `aValid` is `total_bins - masked_bins`.
-- Coverage is `occupied_bins / aValid`.
-- Peer and target rows whose bin tuple falls inside a mask box are excluded from specificity scoring and reported separately.
-- Long-running actions show progress text/percentage in the UI.
-
-## Projection Explorer
-
-Leesin visualizes high-dimensional density grids through linked 2D axis-pair projections.
-
-- Peer density is collapsed from saved multidimensional `binOccupancy` into each 2D projection.
-- Target rows are represented only as bin-index tuples during the analysis response; raw row values are not stored or sent.
-- Clicking a bin in one projection selects the target row subset in that 2D bin and highlights where that subset appears in all other projections.
-- Crosshair markers show the selected axis/bin location on every projection that includes the selected axes.
-- Modes include combined, peer only, target only, and selected subset only.
-- `Ctrl + wheel` zooms each heatmap independently, drag pans the zoomed view, and double-click or Reset zoom restores the projection.
-
-This helps users inspect high-dimensional specificity without directly visualizing a 4D or higher-dimensional object. Selection A/B persistence is intentionally not part of this workflow.
-
-## Grid Preview Editor
-
-The report view includes a Grid Preview Editor for Domain Range and Resolution.
-
-- Preview changes are recalculated in memory and are not stored.
-- Preview metrics include Z / Observation Support, C / Coverage, E / Equitability, Confidence, total bins, occupied bins, peer valid rows, eligible records, and legacy excluded records.
-- Preview recalculation uses saved `rowLevelVectors`, not stale stored bin occupancy.
-- Apply as Goal Default asks for confirmation, then updates the Goal grid and recomputes saved records that have row-level vectors.
-- Legacy records without row-level vectors remain stored but are excluded from density calculation and preview recalculation.
-
-## Stored Record Notes
-
-New saved records include:
-
-- `rowLevelVectors`: selected-axis sanitized numeric row vectors
-- `rowLevelVectorAxisOrder`: canonical axis order for those vectors
-- `rowLevelVectorCount`: number of sanitized numeric rows
-- `rowLevelVectorBasis`: currently `valid_multidimensional_numeric_rows`
-- `hasRowLevelVectors`: whether the record can be re-binned for new grids
-- `binOccupancy`: multidimensional bin key to row count
-- `axisBinOccupancy`: 1D bin counts per axis for visualization
-- `binOccupancyMeta`: valid, invalid, out-of-domain, and total row counts
-- `binOccupancyHash`: duplicate detection support
-- `gridSignature`: density grid compatibility guard
-
-Duplicate detection still includes `binOccupancyHash`, so records with the same mean vector but different row-level occupancy are treated as distinct.
-
-## API Shape
-
-Analysis results include density fields such as:
-
-- `engine = "density_grid"`
-- `primaryReferenceMode = "external"`
-- `referenceModes.external`
-- `referenceModes.pooled`
-- `referenceModes.internal`
-- `specificity_method = "occupied_bin_count_ecdf"`
-- `specificity_score`
-- `mean_bin_specificity`
-- `max_specificity`
-- `extreme_specificity_rate`
-- `mean_rarity`
-- `max_rarity`
-- `unseen_bin_rate`
-- `rare_bin_rate`
-- `out_of_domain_rate`
-- `observation_support_S`
-- `coverage_C`
-- `equitability_E`
-- `confidence`
-- `peer_observation_count`
-- `valid_target_rows`
-- `invalid_target_rows`
-- `out_of_domain_rows`
-- `masked_out_target_rows`
-- `total_bins`
-- `valid_bins`
-- `masked_bins`
-- `occupied_bins`
-- `feasible_mask_enabled`
-
-Report visualizations include `projectionExplorer`, which carries canonical `axisOrder`, `axisMeta`, all 2D `axisPairs`, peer/target projection matrices, and target row bin-index tuples for in-session linked highlighting.
-
-## Admin Token UX
-
-Admin endpoints check the `X-Admin-Token` header when remote admin authentication is required. In Render deployments, users can enter the `ADMIN_TOKEN` value in the Admin Token panel. The token is stored only in the current browser's `localStorage` under `leesinAdminToken`; it is not stored on the server. Saved tokens are automatically attached to `/api/admin/*` requests, and 403 responses highlight the Admin Token panel with a Render-specific help message.
-
-## Local Run
-
-```powershell
-.\run_app.ps1
+```text
+Paste / Drop Python → Paste / Drop Data → Auto-map → Run → Save
 ```
 
-Run tests:
+The Workshop currently:
 
-```powershell
-.\Lee_sin.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+- inspects top-level functions with `ast`
+- detects parameters, defaults, annotations and docstrings
+- accepts pasted CSV/TSV/Excel clipboard tables
+- accepts `.py` plus `.csv`/`.tsv` through the same file area
+- suggests parameter-to-column mappings
+- runs a restricted Python subset in a separate process with a timeout
+- saves the function as a reusable Module
+
+The runner is **not a security sandbox** and should only execute trusted local code.
+
+### Project workspace
+
+The left panel behaves like a small file explorer.
+
+- folders and original-file storage
+- original uploaded bytes preserved separately from parsed views
+- rename, drag/move and multi-select
+- Trash / Restore / permanent delete
+- Project settings and Project deletion from the Projects sidebar
+
+### Data lens
+
+CSV/TSV data can be viewed in the same location through three interchangeable lenses:
+
+- **Heat** — per-column numeric magnitude visualization
+- **Table** — ordinary rows and columns
+- **Raw** — the original delimited text
+
+The Heat view is visual only. It does not modify values or claim cross-column comparability.
+
+---
+
+## V4 generality checks
+
+Two small manual checks were used to test the separation between Core and Module.
+
+### Same Module, different experiments
+
+The same `Descriptive Summary` Module was applied without changing its code to:
+
+1. Monte Carlo π estimation data — `abs_error → values`
+2. Prime algorithm benchmark data — `runtime_ms → values`
+
+Observed results included:
+
+```text
+Monte Carlo π
+count = 100
+mean abs_error = 0.056524000000000005
+
+Prime benchmark
+count = 404
+mean runtime_ms = 0.002865346534653465
 ```
+
+Only the Data and Mapping changed; the Module did not.
+
+### Same Core, different Modules
+
+The Monte Carlo π Project was then analyzed with `Pearson Correlation` using:
+
+```text
+sample_size → x
+abs_error   → y
+```
+
+The Module returned:
+
+```text
+-0.4160325607005631
+```
+
+The analysis function changed, but the Core workflow remained:
+
+```text
+Data → Module → Mapping → Analysis → Result
+```
+
+These are prototype checks, not a proof of universal applicability.
+
+---
+
+## How Leesin reached V4
+
+### V1 — anomaly detection and confidence separation
+
+The first version asked whether an anomaly score and the reliability of that judgment should be treated separately. It used saved peer observations and several distance-based engines.
+
+### V2 — row-level density and experiment-space coverage
+
+V2 moved from record-level distance toward row-level density grids, introduced Domain Range / Resolution / Feasible Domain Mask, separated Input and Output axes, and used Grid Preview to expose unobserved regions.
+
+### V3 — limits of confidence inference
+
+V3 exposed a deeper problem: observed Data and the Information that can be justified from that Data are not the same thing. Some desired claims cannot be determined from the current observations without additional assumptions or additional experiments.
+
+### V4 — experiment / analysis / next-observation loop
+
+V4 therefore reframed Leesin around a reusable Core and explicit Analysis Modules. Analysis is no longer the endpoint; it can return a limit or a next observation that feeds a new experimental cycle.
+
+Earlier V1/V2 code remains in the repository as part of this development history. The current V4 prototype is isolated under `v4_mvp/`.
+
+---
+
+## Run V4 locally
+
+From the repository root:
+
+```bash
+python -m v4_mvp.app
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+After pulling a UI update, restart the Python process and use `Ctrl+F5` in the browser.
+
+V4 server-side state is stored under `v4_mvp/runtime/`. Core cycle state, local identity, Favorites and prototype Registry metadata are currently browser-local.
+
+---
+
+## Verification
+
+GitHub Actions checks the V4 branch with:
+
+```bash
+node --check v4_mvp/mvp_adapters/prime_ui.js
+node --check v4_mvp/module_workshop_ui.js
+node --check v4_mvp/module_file_input_ui.js
+node --check v4_mvp/workspace_ui.js
+node --check v4_mvp/ux_polish_ui.js
+node --check v4_mvp/project_controls_ui.js
+python -m compileall -q v4_mvp
+python -m unittest tests.test_v4_mvp tests.test_module_workshop tests.test_workspace_store
+```
+
+Browser drag/drop, rollback/Undo and visual interactions are also smoke-tested manually.
+
+---
+
+## Scope boundary
+
+Leesin V4 is intentionally finished as a **local service prototype**, not a deployed public service.
+
+Not implemented as production infrastructure:
+
+- real Google/GitHub OAuth
+- server-side multi-user authorization
+- hosted public/private Module Registry
+- GPT/Sites Module discovery
+- dependency environments
+- robust sandboxing for arbitrary user Python
+- signed Modules / trust policy
+- generalized remote experiment adapters
+
+Public deployment would require a separate security design for authentication, authorization, untrusted code execution and uploaded data. That work is outside the scope of the current prototype.
