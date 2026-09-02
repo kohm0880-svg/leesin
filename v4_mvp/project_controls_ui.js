@@ -13,9 +13,10 @@
 
   function activeProjectId() {
     const title = document.querySelector('#mainView .core-title');
-    if (!title) return null;
+    if (!title) return window.state?.activeProjectId || window.state?.project?.id || null;
     const cards = [...document.querySelectorAll('#projectList .project-card')];
     const card = cards.find(item => item.querySelector('strong')?.textContent === title.textContent);
+    if (card?.dataset.projectId) return card.dataset.projectId;
     if (card) {
       const handler = card.getAttribute('onclick') || '';
       const match = handler.match(/openProject\(['\"]([^'\"]+)/);
@@ -30,6 +31,19 @@
     }[ch]));
   }
 
+  function installStyles() {
+    if (document.getElementById('projectControlsStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'projectControlsStyles';
+    style.textContent = `
+      #projectList .project-card{position:relative;padding-right:42px}
+      .project-card-settings{position:absolute;right:8px;top:8px;width:27px;height:27px;border:1px solid #d2dce2;border-radius:9px;background:rgba(250,252,252,.92);color:#667680;font-weight:900;line-height:1;padding:0;display:flex;align-items:center;justify-content:center}
+      .project-card-settings:hover{background:#eaf1f3;border-color:#aec1c9;color:#415a65}
+      .project-card.current-project{border-color:#aebfd2!important;box-shadow:inset 3px 0 0 #718fb8,0 5px 16px rgba(58,76,87,.05)!important}
+    `;
+    document.head.appendChild(style);
+  }
+
   function ensureDialog() {
     let dialog = document.getElementById('projectSettingsDialog');
     if (!dialog) {
@@ -41,8 +55,7 @@
     return dialog;
   }
 
-  async function openProjectSettings() {
-    const projectId = activeProjectId();
+  async function openProjectSettings(projectId = activeProjectId()) {
     if (!projectId) return;
     let project;
     try {
@@ -113,17 +126,38 @@
     dialog.showModal();
   }
 
-  function installProjectSettingsButton() {
-    const actions = document.querySelector('#mainView .core-header-actions');
-    if (!actions || document.getElementById('coreProjectSettingsBtn')) return;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'ghost';
-    button.id = 'coreProjectSettingsBtn';
-    button.textContent = 'Project';
-    button.title = 'Rename, edit description, or delete this Project';
-    button.onclick = openProjectSettings;
-    actions.insertBefore(button, actions.firstChild);
+  function projectIdFromCard(card) {
+    if (card.dataset.projectId) return card.dataset.projectId;
+    const handler = card.getAttribute('onclick') || '';
+    const match = handler.match(/openProject\(['\"]([^'\"]+)/);
+    if (!match) return null;
+    card.dataset.projectId = match[1];
+    return match[1];
+  }
+
+  function installProjectSidebarControls() {
+    document.getElementById('coreProjectSettingsBtn')?.remove();
+    const activeId = activeProjectId();
+    document.querySelectorAll('#projectList .project-card').forEach(card => {
+      const projectId = projectIdFromCard(card);
+      if (!projectId) return;
+      card.classList.toggle('current-project', projectId === activeId);
+      let button = card.querySelector('.project-card-settings');
+      if (!button) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'project-card-settings';
+        button.textContent = '⋯';
+        button.title = 'Project settings';
+        button.setAttribute('aria-label', 'Project settings');
+        button.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          void openProjectSettings(projectId);
+        });
+        card.appendChild(button);
+      }
+    });
   }
 
   function selectedRenameRow() {
@@ -181,7 +215,8 @@
 
   let scheduled = false;
   function patch() {
-    installProjectSettingsButton();
+    installStyles();
+    installProjectSidebarControls();
     installRenameButton();
     installF2();
   }
