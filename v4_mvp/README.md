@@ -131,13 +131,15 @@ v4_mvp/runtime/store.json
 
 unless `LEESIN_V4_STORE` overrides it. Core cycle state, local identity, Favorites and registry metadata are currently browser-local (`localStorage`).
 
-## Backend tests
+## Verification
+
+GitHub Actions checks JavaScript syntax, Python compilation and the V4 backend tests:
 
 ```bash
 python -m unittest tests.test_v4_mvp tests.test_module_workshop tests.test_workspace_store
 ```
 
-These tests cover the prime module, Module Workshop execution and workspace storage. The browser state-machine and visual interactions still require a manual browser smoke test.
+The backend tests cover the prime module, Module Workshop execution and workspace storage. The browser state-machine and visual interactions still require a manual browser smoke test.
 
 ## Deliberately deferred
 
