@@ -1,6 +1,8 @@
 (() => {
   const LEFT_OFF_KEY = 'leesin.leftOff';
   const RIGHT_OFF_KEY = 'leesin.rightOff';
+  let polishing = false;
+  let polishScheduled = false;
 
   function installPolishStyles() {
     if (document.getElementById('leesinUxPolishStyles')) return;
@@ -132,21 +134,20 @@
     syncBoundaryButtons();
   }
 
+  function setButtonText(button, text, title) {
+    if (!button) return;
+    if (button.textContent !== text) button.textContent = text;
+    if (button.title !== title) button.title = title;
+    if (button.getAttribute('aria-label') !== title) button.setAttribute('aria-label', title);
+  }
+
   function syncBoundaryButtons() {
     const left = document.querySelector('.ws-boundary-toggle[data-side="left"]');
     const right = document.querySelector('.ws-boundary-toggle[data-side="right"]');
     const leftOff = document.body.classList.contains('ws-left-off');
     const rightOff = document.body.classList.contains('ws-right-off');
-    if (left) {
-      left.textContent = leftOff ? '>>' : '<<';
-      left.title = leftOff ? 'Projects 열기' : 'Projects 접기';
-      left.setAttribute('aria-label', left.title);
-    }
-    if (right) {
-      right.textContent = rightOff ? '<<' : '>>';
-      right.title = rightOff ? 'Modules 열기' : 'Modules 접기';
-      right.setAttribute('aria-label', right.title);
-    }
+    setButtonText(left, leftOff ? '>>' : '<<', leftOff ? 'Projects 열기' : 'Projects 접기');
+    setButtonText(right, rightOff ? '<<' : '>>', rightOff ? 'Modules 열기' : 'Modules 접기');
   }
 
   function addBoundaryButton(handle, side) {
@@ -191,13 +192,11 @@
     const right = document.getElementById('leesinRightModules');
     if (!right) return;
     const search = document.getElementById('wsModuleSearch');
-    if (search) search.placeholder = 'What do you want to do?';
-    const newButton = document.getElementById('wsNewModule');
-    if (newButton) {
-      newButton.textContent = '+';
-      newButton.title = 'New Module';
-      newButton.setAttribute('aria-label', 'New Module');
+    if (search && search.placeholder !== 'What do you want to do?') {
+      search.placeholder = 'What do you want to do?';
     }
+    const newButton = document.getElementById('wsNewModule');
+    if (newButton) setButtonText(newButton, '+', 'New Module');
     const explanatory = right.querySelector(':scope > .muted');
     if (explanatory && !explanatory.dataset.polished) {
       explanatory.dataset.polished = '1';
@@ -206,10 +205,25 @@
   }
 
   function polish() {
-    stripTopToggles();
-    ensureBoundaryControls();
-    polishWorkshop();
-    polishModuleShelf();
+    if (polishing) return;
+    polishing = true;
+    try {
+      stripTopToggles();
+      ensureBoundaryControls();
+      polishWorkshop();
+      polishModuleShelf();
+    } finally {
+      polishing = false;
+    }
+  }
+
+  function schedulePolish() {
+    if (polishScheduled) return;
+    polishScheduled = true;
+    window.requestAnimationFrame(() => {
+      polishScheduled = false;
+      polish();
+    });
   }
 
   function init() {
@@ -217,7 +231,7 @@
     if (localStorage.getItem(LEFT_OFF_KEY) === '1') document.body.classList.add('ws-left-off');
     if (localStorage.getItem(RIGHT_OFF_KEY) === '1') document.body.classList.add('ws-right-off');
     polish();
-    const observer = new MutationObserver(polish);
+    const observer = new MutationObserver(schedulePolish);
     observer.observe(document.documentElement, {childList:true, subtree:true});
     window.addEventListener('storage', syncBoundaryButtons);
   }
