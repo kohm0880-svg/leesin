@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.6.0';
+  const VERSION = '0.6.1';
   const STEP_ORDER = ['data', 'module', 'mapping', 'analysis', 'result', 'next'];
   const STEP_LABELS = {
     data: 'Data',
@@ -798,8 +798,8 @@
     box.dataset.productSignature = signature;
     box.innerHTML = STEP_ORDER.map((step, index) => {
       const active = index === activeIndex;
-      const reached = index <= activeIndex && app.centerMode === 'core';
-      return `${index ? '<span class="product-flow-arrow">›</span>' : ''}<button type="button" class="product-flow-step ${active ? 'active' : ''} ${index < activeIndex ? 'done' : ''} ${reached ? 'reached' : ''}" data-step="${step}" ${reached ? '' : 'disabled'}><span class="dot"></span><span class="label">${STEP_LABELS[step]}</span></button>`;
+      const reached = index <= activeIndex && app.centerMode === 'core' && step !== 'analysis';
+      return `${index ? '<span class="product-flow-arrow">›</span>' : ''}<button type="button" class="product-flow-step ${active ? 'active' : ''} ${index < activeIndex ? 'done' : ''} ${reached ? 'reached' : ''}" data-step="${step}" ${reached ? '' : 'disabled'} title="${step === 'analysis' && !active ? 'Analysis는 실행 상태입니다. 다시 실행하려면 Mapping으로 돌아가세요.' : ''}"><span class="dot"></span><span class="label">${STEP_LABELS[step]}</span></button>`;
     }).join('');
     box.querySelectorAll('.product-flow-step.reached').forEach(button => {
       button.onclick = () => {
@@ -1080,6 +1080,11 @@
     const module = moduleById(id);
     const run = activeRun();
     if (!module || !run) return;
+    if (!run.dataRefs.length) {
+      showToast('먼저 Data를 선택한 뒤 Module을 장착하세요.');
+      setStage('data');
+      return;
+    }
     if (stageIndex(run.stage) > stageIndex('module') && run.module?.id !== id) {
       await rollbackTo('module');
       if (stageIndex(activeRun()?.stage || 'data') > stageIndex('module')) return;
@@ -1372,7 +1377,11 @@
   function numericStats(table) {
     const stats = {};
     for (const column of table.columns) {
-      const values = table.rows.map(row => Number(row[column])).filter(Number.isFinite);
+      const values = table.rows
+        .map(row => String(row[column] ?? '').trim())
+        .filter(value => value !== '')
+        .map(Number)
+        .filter(Number.isFinite);
       if (values.length >= Math.max(1, Math.ceil(table.rows.length * 0.5))) {
         stats[column] = {min: Math.min(...values), max: Math.max(...values)};
       }
@@ -1381,7 +1390,9 @@
   }
 
   function heatStyle(value, stat) {
-    const number = Number(value);
+    const text = String(value ?? '').trim();
+    if (!text) return '';
+    const number = Number(text);
     if (!stat || !Number.isFinite(number)) return '';
     const span = stat.max - stat.min;
     const t = span === 0 ? 0.5 : Math.max(0, Math.min(1, (number - stat.min) / span));
@@ -1503,11 +1514,11 @@
     const fav = favorites();
     let modules = app.modules;
     if (app.moduleTab === 'my') {
-      modules = modules.filter(module => module.kind === 'saved' && (!module.ownerId || module.ownerId === user?.id || module.author === `@${user?.username}`));
+      modules = modules.filter(module => module.kind === 'saved' && (!module.ownerId || module.ownerId === user?.id));
     } else if (app.moduleTab === 'favorites') {
       modules = modules.filter(module => fav.has(module.id));
     } else {
-      modules = modules.filter(module => module.visibility === 'public' || module.kind === 'builtin' || module.kind === 'registry' || module.kind === 'saved');
+      modules = modules.filter(module => module.kind !== 'saved' || module.visibility === 'public' || !module.ownerId || module.ownerId === user?.id);
     }
     return modules
       .map(module => ({module, score: moduleSearchScore(module, app.search)}))
@@ -1576,7 +1587,8 @@
     const module = moduleById(id);
     if (!module) return;
     const meta = moduleMetaStore()[id] || {};
-    const mine = module.kind === 'saved';
+    const user = currentUser();
+    const mine = module.kind === 'saved' && (!module.ownerId || module.ownerId === user?.id);
     const dialog = ensureDialog('productModuleDialog', '<div></div>');
     dialog.innerHTML = `<div class="product-dialog-body"><div class="product-dialog-head"><div><div class="core-eyebrow">${esc(module.kind)} Module</div><h2>${esc(module.title)}</h2><div class="core-meta">${esc(module.author)} · v${esc(module.version || '0.1.0')}</div></div><button class="ghost" data-close>Close</button></div><p>${esc(module.description || '')}</p><div class="product-dialog-grid"><div class="field"><label>Visibility</label><select id="moduleVisibility" ${mine ? '' : 'disabled'}><option value="private" ${(meta.visibility || module.visibility) === 'private' ? 'selected' : ''}>Private</option><option value="public" ${(meta.visibility || module.visibility) === 'public' ? 'selected' : ''}>Public</option></select></div><div class="field"><label>Author</label><input value="${esc(module.author || '@local')}" disabled></div></div><div class="field"><label>Tags</label><input id="moduleTags" value="${esc((meta.tags || module.tags || []).join(', '))}" ${mine ? '' : 'disabled'}></div><div class="field"><label>Example questions</label><textarea id="moduleExamples" ${mine ? '' : 'disabled'}>${esc((meta.exampleQuestions || module.exampleQuestions || []).join('\n'))}</textarea></div><div class="field"><label>Outputs</label><input id="moduleOutputs" value="${esc((meta.outputs || module.outputs || []).join(', '))}" ${mine ? '' : 'disabled'}></div><div class="core-toolbar" style="justify-content:flex-end"><button class="ghost" id="moduleUseNow">Use</button>${module.code ? `<button class="ghost" id="moduleFork">${mine ? 'Edit code' : 'Fork'}</button>` : ''}${mine ? '<button class="primary" id="moduleMetaSave">Save metadata</button>' : ''}</div></div>`;
     dialog.querySelector('[data-close]').onclick = () => dialog.close();
@@ -1591,7 +1603,6 @@
     };
     const save = dialog.querySelector('#moduleMetaSave');
     if (save) save.onclick = () => {
-      const user = currentUser();
       updateModuleMeta(id, {
         ownerId: user?.id || null,
         author: user ? `@${user.username}` : module.author,
@@ -1747,8 +1758,8 @@
   function installGlobalClickHooks() {
     document.addEventListener('click', event => {
       if (event.target?.id === 'mwSaveBtn') {
+        const before = new Set(app.savedModules.map(module => module.id));
         setTimeout(async () => {
-          const before = new Set(app.savedModules.map(module => module.id));
           await loadModules();
           const created = app.savedModules.find(module => !before.has(module.id));
           if (created) {
@@ -1762,6 +1773,20 @@
     }, true);
   }
 
+  function installProjectTreeRefresh() {
+    const tree = document.getElementById('projectTree');
+    if (!tree || tree.dataset.productRefreshObserved) return;
+    tree.dataset.productRefreshObserved = '1';
+    let timer = null;
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (document.querySelector('#mainView .core-shell') && typeof window.renderProjectHome === 'function') window.renderProjectHome();
+      }, 140);
+    });
+    observer.observe(tree, {childList: true, subtree: true});
+  }
+
   function schedulePolish() {
     if (app.observerScheduled) return;
     app.observerScheduled = true;
@@ -1773,6 +1798,7 @@
         stripTopToggles();
         ensureBoundaryControls();
         installAccountButton();
+        installProjectTreeRefresh();
         detectCurrentView();
       } finally {
         app.polishing = false;
@@ -1789,6 +1815,7 @@
     installAccountButton();
     wrapLegacyFunctions();
     installGlobalClickHooks();
+    installProjectTreeRefresh();
     await loadModules();
     try {
       const bootstrap = await requestJson('/api/bootstrap');
