@@ -47,6 +47,7 @@ MVP_PRIME_UI_PATH = Path(__file__).resolve().parent / "mvp_adapters" / "prime_ui
 MODULE_WORKSHOP_UI_PATH = Path(__file__).resolve().parent / "module_workshop_ui.js"
 MODULE_FILE_INPUT_UI_PATH = Path(__file__).resolve().parent / "module_file_input_ui.js"
 WORKSPACE_UI_PATH = Path(__file__).resolve().parent / "workspace_ui.js"
+UX_POLISH_UI_PATH = Path(__file__).resolve().parent / "ux_polish_ui.js"
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -73,6 +74,7 @@ class V4Handler(BaseHTTPRequestHandler):
             '<script src="/module-workshop-ui.js"></script>\n'
             '<script src="/module-file-input-ui.js"></script>\n'
             '<script src="/workspace-ui.js"></script>\n'
+            '<script src="/ux-polish-ui.js"></script>\n'
             "</body>",
         )
         body = text.encode("utf-8")
@@ -119,6 +121,9 @@ class V4Handler(BaseHTTPRequestHandler):
                 return
             if segments == ["workspace-ui.js"]:
                 self._send_javascript(WORKSPACE_UI_PATH)
+                return
+            if segments == ["ux-polish-ui.js"]:
+                self._send_javascript(UX_POLISH_UI_PATH)
                 return
             if segments == ["api", "bootstrap"]:
                 self._send_json(
