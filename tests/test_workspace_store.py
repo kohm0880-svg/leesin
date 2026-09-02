@@ -87,6 +87,55 @@ class WorkspaceStoreTests(unittest.TestCase):
         trash_types = {item["type"] for item in workspace_detail(self.project["id"])["trash"]}
         self.assertEqual(trash_types, {"analysis", "proposal"})
 
+    def test_project_can_be_renamed_and_deleted_with_owned_objects(self):
+        project_id = self.project["id"]
+        updated = store.update_project(
+            project_id,
+            title="Renamed project",
+            description="Updated description",
+        )
+        self.assertEqual(updated["title"], "Renamed project")
+        self.assertEqual(store.project_detail(project_id)["description"], "Updated description")
+
+        folder = create_folder(project_id, name="raw")
+        raw = b"x,y\n1,2\n"
+        add_project_file(
+            project_id,
+            name="raw.csv",
+            content_base64=base64.b64encode(raw).decode("ascii"),
+            mime_type="text/csv",
+            size=len(raw),
+            text_content=raw.decode("utf-8"),
+            parent_folder_id=folder["id"],
+        )
+        cluster = store.add_cluster(
+            project_id,
+            name="data",
+            filename="data.csv",
+            csv_text="x,y\n1,2\n",
+        )
+        store.save_analysis(
+            project_id,
+            question_id="q",
+            cluster_ids=[cluster["id"]],
+            module_version="test",
+            outcome={
+                "status": "ok",
+                "proposal": {"type": "next_observation", "input": {"x": 2}},
+            },
+        )
+
+        deleted = store.delete_project(project_id)
+        self.assertEqual(deleted["deletedProject"]["title"], "Renamed project")
+        self.assertEqual(deleted["removed"]["clusters"], 1)
+        self.assertEqual(deleted["removed"]["analyses"], 1)
+        self.assertEqual(deleted["removed"]["proposals"], 1)
+        self.assertEqual(deleted["removed"]["files"], 1)
+        self.assertEqual(deleted["removed"]["folders"], 1)
+        self.assertNotIn(project_id, {item["id"] for item in store.list_projects()})
+        with self.assertRaises(KeyError):
+            store.project_detail(project_id)
+
 
 if __name__ == "__main__":
     unittest.main()
