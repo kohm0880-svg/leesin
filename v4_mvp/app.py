@@ -29,12 +29,24 @@ from v4_mvp.store import (
     selected_clusters,
     start_proposal,
 )
+from v4_mvp.workspace_store import (
+    add_project_file,
+    create_folder,
+    get_project_file,
+    move_items,
+    purge_trash,
+    rename_item,
+    restore_items,
+    trash_items,
+    workspace_detail,
+)
 
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "index.html"
 MVP_PRIME_UI_PATH = Path(__file__).resolve().parent / "mvp_adapters" / "prime_ui.js"
 MODULE_WORKSHOP_UI_PATH = Path(__file__).resolve().parent / "module_workshop_ui.js"
 MODULE_FILE_INPUT_UI_PATH = Path(__file__).resolve().parent / "module_file_input_ui.js"
+WORKSPACE_UI_PATH = Path(__file__).resolve().parent / "workspace_ui.js"
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -42,7 +54,7 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 class V4Handler(BaseHTTPRequestHandler):
-    server_version = "LeesinV4MVP/0.2"
+    server_version = "LeesinV4MVP/0.3"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
         body = _json_bytes(payload)
@@ -60,6 +72,7 @@ class V4Handler(BaseHTTPRequestHandler):
             '<script src="/mvp-prime-ui.js"></script>\n'
             '<script src="/module-workshop-ui.js"></script>\n'
             '<script src="/module-file-input-ui.js"></script>\n'
+            '<script src="/workspace-ui.js"></script>\n'
             "</body>",
         )
         body = text.encode("utf-8")
@@ -104,6 +117,9 @@ class V4Handler(BaseHTTPRequestHandler):
             if segments == ["module-file-input-ui.js"]:
                 self._send_javascript(MODULE_FILE_INPUT_UI_PATH)
                 return
+            if segments == ["workspace-ui.js"]:
+                self._send_javascript(WORKSPACE_UI_PATH)
+                return
             if segments == ["api", "bootstrap"]:
                 self._send_json(
                     {
@@ -119,11 +135,26 @@ class V4Handler(BaseHTTPRequestHandler):
                             "enabled": True,
                             "runner": "restricted-python-mvp",
                         },
+                        "workspaceExplorer": {"enabled": True},
                     }
                 )
                 return
             if segments == ["api", "module-workshop", "modules"]:
                 self._send_json({"modules": list_saved_modules()})
+                return
+            if (
+                len(segments) == 4
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+            ):
+                self._send_json(workspace_detail(segments[2]))
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "files"
+            ):
+                self._send_json(get_project_file(segments[2], segments[4]))
                 return
             if len(segments) == 3 and segments[:2] == ["api", "projects"]:
                 self._send_json(project_detail(segments[2]))
@@ -179,6 +210,119 @@ class V4Handler(BaseHTTPRequestHandler):
                         limits=str(body.get("limits") or ""),
                     ),
                     HTTPStatus.CREATED,
+                )
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3:] == ["workspace", "folders"]
+            ):
+                self._send_json(
+                    create_folder(
+                        segments[2],
+                        name=str(body.get("name") or ""),
+                        parent_folder_id=(
+                            str(body.get("parentFolderId"))
+                            if body.get("parentFolderId")
+                            else None
+                        ),
+                    ),
+                    HTTPStatus.CREATED,
+                )
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3:] == ["workspace", "files"]
+            ):
+                self._send_json(
+                    add_project_file(
+                        segments[2],
+                        name=str(body.get("name") or ""),
+                        content_base64=str(body.get("contentBase64") or ""),
+                        mime_type=str(body.get("mimeType") or ""),
+                        size=(int(body["size"]) if body.get("size") is not None else None),
+                        text_content=(
+                            str(body.get("textContent"))
+                            if body.get("textContent") is not None
+                            else None
+                        ),
+                        parent_folder_id=(
+                            str(body.get("parentFolderId"))
+                            if body.get("parentFolderId")
+                            else None
+                        ),
+                    ),
+                    HTTPStatus.CREATED,
+                )
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+                and segments[4] == "trash"
+            ):
+                refs = body.get("items") or []
+                if not isinstance(refs, list):
+                    raise ValueError("items must be a list.")
+                self._send_json(trash_items(segments[2], refs))
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+                and segments[4] == "restore"
+            ):
+                trash_ids = body.get("trashIds") or []
+                if not isinstance(trash_ids, list):
+                    raise ValueError("trashIds must be a list.")
+                self._send_json(restore_items(segments[2], [str(x) for x in trash_ids]))
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+                and segments[4] == "purge"
+            ):
+                trash_ids = body.get("trashIds") or []
+                if not isinstance(trash_ids, list):
+                    raise ValueError("trashIds must be a list.")
+                self._send_json(purge_trash(segments[2], [str(x) for x in trash_ids]))
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+                and segments[4] == "rename"
+            ):
+                self._send_json(
+                    rename_item(
+                        segments[2],
+                        item_type=str(body.get("type") or ""),
+                        item_id=str(body.get("id") or ""),
+                        name=str(body.get("name") or ""),
+                    )
+                )
+                return
+            if (
+                len(segments) == 5
+                and segments[:2] == ["api", "projects"]
+                and segments[3] == "workspace"
+                and segments[4] == "move"
+            ):
+                refs = body.get("items") or []
+                if not isinstance(refs, list):
+                    raise ValueError("items must be a list.")
+                self._send_json(
+                    move_items(
+                        segments[2],
+                        items=refs,
+                        parent_folder_id=(
+                            str(body.get("parentFolderId"))
+                            if body.get("parentFolderId")
+                            else None
+                        ),
+                    )
                 )
                 return
             if (
