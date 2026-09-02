@@ -29,19 +29,20 @@ It is deliberately able to **stop** rather than manufacture a result:
 - `INSUFFICIENT INFORMATION` when no crossover is bracketed
 - `INSUFFICIENT INFORMATION` for the intentionally broad question “which algorithm is generally faster?” because the target environment population is undefined
 
-## Module Workshop: Paste → Map → Run → Save
+## Module Workshop: Paste / Drop → Map → Run → Save
 
 V4 now also contains a separate `Module Workshop` prototype. Its purpose is to test a different product direction: Leesin does not infer the meaning of an arbitrary research question on its own. Instead, the executable analysis logic is explicit in an Analysis Module, while a human-readable Question can remain optional semantic context.
 
 Open **Modules** in the top bar and:
 
-1. paste an existing Python function
-2. paste CSV, TSV, or an Excel clipboard table including the header row
-3. Leesin detects top-level functions, function parameters, table columns, and suggests parameter → column mappings
-4. correct only ambiguous mappings
-5. click **Run**
-6. click **Save Module**; Description / Question / Assumptions / Limits are optional
-7. use a saved Module again with different data, or **Copy JSON** / **Paste Module JSON** to transfer the Module by copy-paste
+1. paste an existing Python function, or drop/browse a `.py` file
+2. paste CSV/TSV/Excel clipboard data, or drop/browse a `.csv` / `.tsv` file
+3. the same Workshop input area accepts a `.py` and a data file together and routes each to the correct editor
+4. Leesin detects top-level functions, function parameters, table columns, and suggests parameter → column mappings
+5. correct only ambiguous mappings
+6. click **Run**
+7. click **Save Module**; Description / Question / Assumptions / Limits are optional
+8. use a saved Module again with different data, or **Copy JSON** / **Paste Module JSON** to transfer the Module by copy-paste
 
 A simple example:
 
