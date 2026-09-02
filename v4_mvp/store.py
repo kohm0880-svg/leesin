@@ -65,7 +65,8 @@ def _read_state() -> dict[str, Any]:
         for key in ("projects", "clusters", "analyses", "proposals"):
             if not isinstance(state.get(key), dict):
                 state[key] = {}
-        _ensure_seed_project(state)
+        # Seed only when the store is created for the first time. If a user
+        # intentionally deletes every project, keep the store empty.
         return state
 
 
@@ -126,6 +127,62 @@ def create_project(title: str, description: str = "") -> dict[str, Any]:
         state["projects"][project_id] = project
         _write_state(state)
         return dict(project)
+
+
+def update_project(
+    project_id: str,
+    *,
+    title: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise ValueError("Project title is required.")
+    with _LOCK:
+        state = _read_state()
+        project = _require_project(state, project_id)
+        project["title"] = clean_title
+        if description is not None:
+            project["description"] = str(description or "").strip()
+        project["updatedAt"] = utc_now()
+        _write_state(state)
+        return dict(project)
+
+
+def delete_project(project_id: str) -> dict[str, Any]:
+    """Permanently remove one project and every object owned by it."""
+    with _LOCK:
+        state = _read_state()
+        project = dict(_require_project(state, project_id))
+
+        removed = {
+            "clusters": 0,
+            "analyses": 0,
+            "proposals": 0,
+            "files": 0,
+            "folders": 0,
+            "trash": 0,
+        }
+
+        for store_name, counter in (
+            ("clusters", "clusters"),
+            ("analyses", "analyses"),
+            ("proposals", "proposals"),
+            ("workspace_files", "files"),
+            ("workspace_folders", "folders"),
+            ("workspace_trash", "trash"),
+        ):
+            items = state.get(store_name)
+            if not isinstance(items, dict):
+                continue
+            for item_id, item in list(items.items()):
+                if isinstance(item, dict) and item.get("projectId") == project_id:
+                    items.pop(item_id, None)
+                    removed[counter] += 1
+
+        state["projects"].pop(project_id, None)
+        _write_state(state)
+        return {"deletedProject": project, "removed": removed}
 
 
 def _require_project(state: dict[str, Any], project_id: str) -> dict[str, Any]:
