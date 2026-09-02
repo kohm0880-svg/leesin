@@ -32,6 +32,7 @@ jobs:
           node --check v4_mvp/module_file_input_ui.js
           node --check v4_mvp/workspace_ui.js
           node --check v4_mvp/ux_polish_ui.js
+          node --check v4_mvp/project_controls_ui.js
 
       - name: Compile Python sources
         run: python -m compileall -q v4_mvp
