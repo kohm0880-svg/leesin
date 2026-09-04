@@ -1,3 +1,11 @@
+"""Local HTTP entry point for Leesin V4.
+
+This module is deliberately a *wiring layer*: it connects browser requests to
+Project storage, Analysis Modules, the Module Workshop, and MVP adapters. The
+mathematical analysis logic should live elsewhere (for example in
+``modules.py``), so the Core server does not become tied to one analysis method.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -44,20 +52,34 @@ from v4_mvp.workspace_store import (
 )
 
 
-TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "index.html"
-MVP_PRIME_UI_PATH = Path(__file__).resolve().parent / "mvp_adapters" / "prime_ui.js"
-MODULE_WORKSHOP_UI_PATH = Path(__file__).resolve().parent / "module_workshop_ui.js"
-MODULE_FILE_INPUT_UI_PATH = Path(__file__).resolve().parent / "module_file_input_ui.js"
-WORKSPACE_UI_PATH = Path(__file__).resolve().parent / "workspace_ui.js"
-UX_POLISH_UI_PATH = Path(__file__).resolve().parent / "ux_polish_ui.js"
-PROJECT_CONTROLS_UI_PATH = Path(__file__).resolve().parent / "project_controls_ui.js"
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATE_PATH = BASE_DIR / "templates" / "index.html"
+
+# Keep the browser scripts in one ordered registry. Previously each file had a
+# separate path constant, <script> tag, and GET branch; this map keeps the same
+# loading order while removing that repeated wiring.
+STATIC_ASSETS: dict[str, Path] = {
+    "mvp-prime-ui.js": BASE_DIR / "mvp_adapters" / "prime_ui.js",
+    "module-workshop-ui.js": BASE_DIR / "module_workshop_ui.js",
+    "module-file-input-ui.js": BASE_DIR / "module_file_input_ui.js",
+    "workspace-ui.js": BASE_DIR / "workspace_ui.js",
+    "ux-polish-ui.js": BASE_DIR / "ux_polish_ui.js",
+    "project-controls-ui.js": BASE_DIR / "project_controls_ui.js",
+}
 
 
 def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+def _script_tags() -> str:
+    """Return script tags in the same deterministic order as STATIC_ASSETS."""
+    return "\n".join(f'<script src="/{name}"></script>' for name in STATIC_ASSETS)
+
+
 class V4Handler(BaseHTTPRequestHandler):
+    """Small local API server used by the V4 prototype UI."""
+
     server_version = "LeesinV4MVP/0.7"
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
@@ -71,13 +93,7 @@ class V4Handler(BaseHTTPRequestHandler):
     def _send_html(self) -> None:
         text = TEMPLATE_PATH.read_text(encoding="utf-8").replace(
             "</body>",
-            '<script src="/mvp-prime-ui.js"></script>\n'
-            '<script src="/module-workshop-ui.js"></script>\n'
-            '<script src="/module-file-input-ui.js"></script>\n'
-            '<script src="/workspace-ui.js"></script>\n'
-            '<script src="/ux-polish-ui.js"></script>\n'
-            '<script src="/project-controls-ui.js"></script>\n'
-            "</body>",
+            _script_tags() + "\n</body>",
         )
         body = text.encode("utf-8")
         self.send_response(HTTPStatus.OK)
@@ -112,24 +128,13 @@ class V4Handler(BaseHTTPRequestHandler):
             if not segments:
                 self._send_html()
                 return
-            if segments == ["mvp-prime-ui.js"]:
-                self._send_javascript(MVP_PRIME_UI_PATH)
+
+            # Static UI assets are intentionally served by this tiny local
+            # server rather than a separate web framework in the MVP.
+            if len(segments) == 1 and segments[0] in STATIC_ASSETS:
+                self._send_javascript(STATIC_ASSETS[segments[0]])
                 return
-            if segments == ["module-workshop-ui.js"]:
-                self._send_javascript(MODULE_WORKSHOP_UI_PATH)
-                return
-            if segments == ["module-file-input-ui.js"]:
-                self._send_javascript(MODULE_FILE_INPUT_UI_PATH)
-                return
-            if segments == ["workspace-ui.js"]:
-                self._send_javascript(WORKSPACE_UI_PATH)
-                return
-            if segments == ["ux-polish-ui.js"]:
-                self._send_javascript(UX_POLISH_UI_PATH)
-                return
-            if segments == ["project-controls-ui.js"]:
-                self._send_javascript(PROJECT_CONTROLS_UI_PATH)
-                return
+
             if segments == ["api", "bootstrap"]:
                 self._send_json(
                     {
@@ -210,6 +215,9 @@ class V4Handler(BaseHTTPRequestHandler):
             ):
                 self._send_json(delete_project(segments[2]))
                 return
+
+            # Module Workshop owns code inspection/execution. The HTTP layer
+            # only validates request shapes and forwards explicit inputs.
             if segments == ["api", "module-workshop", "prepare"]:
                 self._send_json(
                     prepare_workshop(
@@ -246,6 +254,9 @@ class V4Handler(BaseHTTPRequestHandler):
                     HTTPStatus.CREATED,
                 )
                 return
+
+            # Project workspace operations use the same project store, but keep
+            # file/folder/trash behavior in workspace_store.py.
             if (
                 len(segments) == 5
                 and segments[:2] == ["api", "projects"]
@@ -359,6 +370,7 @@ class V4Handler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+
             if (
                 len(segments) == 4
                 and segments[:2] == ["api", "projects"]
@@ -375,6 +387,10 @@ class V4Handler(BaseHTTPRequestHandler):
                 )
                 self._send_json(cluster, HTTPStatus.CREATED)
                 return
+
+            # This endpoint is intentionally MVP-specific. It turns a Proposal
+            # into a real prime benchmark observation through an adapter rather
+            # than making experiment execution a permanent Core responsibility.
             if (
                 len(segments) == 5
                 and segments[:2] == ["api", "projects"]
@@ -414,6 +430,10 @@ class V4Handler(BaseHTTPRequestHandler):
                     HTTPStatus.CREATED,
                 )
                 return
+
+            # Built-in MVP analyses still expose the historical questionId API.
+            # In the V4 product model Question is optional context; the analysis
+            # behavior itself remains in the Module implementation.
             if (
                 len(segments) == 4
                 and segments[:2] == ["api", "projects"]
@@ -457,6 +477,7 @@ class V4Handler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
+    """Run the local V4 server until interrupted."""
     server = ThreadingHTTPServer((host, port), V4Handler)
     print(f"Leesin_V4 MVP: http://{host}:{port}")
     try:
